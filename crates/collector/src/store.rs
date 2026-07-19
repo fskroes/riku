@@ -12,10 +12,16 @@ use tracing::warn;
 
 use crate::model::Session;
 use crate::session::FileState;
+use crate::source::SessionSource;
 
 /// Sessions whose transcript has not been touched within this window are not
 /// shown at all on startup (older sessions are out of scope for C1).
 pub const DISCOVERY_WINDOW: Duration = Duration::hours(24);
+
+/// How deep discovery recurses under a source root. Claude Code nests transcripts
+/// two levels (`<project>/<uuid>.jsonl`); Codex four (`YYYY/MM/DD/rollout.jsonl`).
+/// A bounded walk covers both without following pathological trees.
+const MAX_SCAN_DEPTH: usize = 6;
 
 /// A change the store wants pushed to boards. Each carries a full Session so the
 /// SSE stream is idempotent — clients upsert by `id`.
@@ -33,55 +39,55 @@ struct FileEntry {
     session: Option<Session>,
 }
 
-/// Holds one [`FileState`] per discovered transcript. Not internally synchronized;
-/// wrap in a mutex to share between the watcher and the HTTP layer.
-#[derive(Default)]
+/// Holds one [`FileState`] per discovered transcript, across every configured
+/// [`SessionSource`]. Not internally synchronized; wrap in a mutex to share
+/// between the watcher and the HTTP layer.
 pub struct SessionStore {
+    sources: Vec<Box<dyn SessionSource>>,
     files: HashMap<PathBuf, FileEntry>,
 }
 
 impl SessionStore {
-    pub fn new() -> Self {
-        Self::default()
+    /// Build a store over the given sources (e.g. Claude Code + Codex CLI).
+    pub fn new(sources: Vec<Box<dyn SessionSource>>) -> Self {
+        SessionStore {
+            sources,
+            files: HashMap::new(),
+        }
     }
 
-    /// Scan `root` for `<project>/<uuid>.jsonl` transcripts touched within
+    /// Scan every source's roots for transcripts touched within
     /// [`DISCOVERY_WINDOW`] and ingest each fully. Returns the initial snapshot.
-    pub fn scan(&mut self, root: &Path, now: DateTime<Utc>) -> Vec<Session> {
+    pub fn scan(&mut self, now: DateTime<Utc>) -> Vec<Session> {
         let cutoff = now - DISCOVERY_WINDOW;
-        let project_dirs = match fs::read_dir(root) {
-            Ok(rd) => rd,
-            Err(e) => {
-                warn!(?root, error = %e, "cannot read projects root");
-                return Vec::new();
-            }
-        };
-        for project_dir in project_dirs.flatten() {
-            let dir = project_dir.path();
-            if !dir.is_dir() {
-                continue;
-            }
-            let files = match fs::read_dir(&dir) {
-                Ok(rd) => rd,
-                Err(e) => {
-                    warn!(?dir, error = %e, "cannot read project dir");
-                    continue;
-                }
-            };
-            for file in files.flatten() {
-                let path = file.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                match file_mtime(&path) {
-                    Some(mtime) if mtime >= cutoff => {
-                        self.ingest(&path, now);
+        // Collect candidate paths first so the per-source immutable borrow does not
+        // overlap the mutable `ingest` below.
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        for source in &self.sources {
+            for root in source.roots() {
+                let mut found = Vec::new();
+                walk(&root, MAX_SCAN_DEPTH, &mut found);
+                for path in found {
+                    if source.owns(&path) && file_mtime(&path).is_some_and(|m| m >= cutoff) {
+                        candidates.push(path);
                     }
-                    _ => {}
                 }
             }
         }
+        for path in candidates {
+            self.ingest(&path, now);
+        }
         self.snapshot(now)
+    }
+
+    /// The source that owns `path`: the one whose root is an ancestor and whose
+    /// [`owns`](SessionSource::owns) accepts the file. Roots are disjoint across
+    /// sources, so at most one matches.
+    fn source_for(&self, path: &Path) -> Option<&dyn SessionSource> {
+        self.sources
+            .iter()
+            .find(|s| s.roots().iter().any(|r| path.starts_with(r)) && s.owns(path))
+            .map(|s| s.as_ref())
     }
 
     /// Current sessions, with status recomputed against `now` (so time-based
@@ -103,14 +109,20 @@ impl SessionStore {
         let size = meta.len();
         let mtime = meta.modified().ok().map(system_time_to_utc).unwrap_or(now);
 
-        let entry = self
-            .files
-            .entry(path.to_path_buf())
-            .or_insert_with(|| FileEntry {
-                state: FileState::default(),
-                mtime,
-                session: None,
-            });
+        // First sighting: bind this path to the source that owns it. A path no
+        // source claims (e.g. a stray file under a root) is ignored.
+        if !self.files.contains_key(path) {
+            let fold = self.source_for(path)?.new_fold();
+            self.files.insert(
+                path.to_path_buf(),
+                FileEntry {
+                    state: FileState::new(fold),
+                    mtime,
+                    session: None,
+                },
+            );
+        }
+        let entry = self.files.get_mut(path).expect("just inserted");
 
         // Truncation / rewrite: the file is shorter than what we already consumed.
         if size < entry.state.offset() {
@@ -150,6 +162,30 @@ impl SessionStore {
             }
         }
         events
+    }
+}
+
+/// Recursively collect files under `dir`, descending at most `depth` levels.
+/// Directories that cannot be read are warned about and skipped, so one missing
+/// or unreadable subtree never aborts the whole scan.
+fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            warn!(?dir, error = %e, "cannot read source directory");
+            return;
+        }
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk(&path, depth - 1, out);
+        } else {
+            out.push(path);
+        }
     }
 }
 

@@ -1,13 +1,14 @@
 # Agent Board
 
-A local mission-control board for AI coding agent sessions. This is the **C1
-walking skeleton** (issue #2): it watches your local Claude Code transcripts and
-renders every session live on an attention-first board.
+A local mission-control board for AI coding agent sessions. It watches your local
+Claude Code **and** Codex CLI transcripts and renders every session live on an
+attention-first board (issues #2, #5).
 
 ```
 Cargo.toml            workspace
-crates/collector/     lib — the Claude Code Session Source: discovery,
-                      transcript tailing, the Session model, status heuristic
+crates/collector/     lib — the Session Sources (Claude Code + Codex CLI) behind a
+                      shared trait: discovery, transcript tailing, the Session
+                      model, status heuristic
 crates/board/         bin — axum server: serves web/dist + /api/sessions + SSE
 web/                  React 18 + Vite 5 + TypeScript board (attention stream)
 ```
@@ -23,7 +24,10 @@ cargo run -p board            # then open http://localhost:4242
 ```
 
 Flags: `--port <n>` (default 4242, binds `127.0.0.1` only), `--root <dir>`
-(default `~/.claude/projects`), `--web-dist <dir>` (default `web/dist`).
+(Claude Code projects, default `~/.claude/projects`), `--codex-root <dir>` (Codex
+CLI sessions, default `$CODEX_HOME/sessions` or `~/.codex/sessions`), `--web-dist
+<dir>` (default `web/dist`). A missing Codex root degrades gracefully — Claude
+sessions still show.
 
 If `web/dist` is missing the server stays up and `/` returns a 503 telling you to
 build the UI; the API keeps working.
@@ -44,13 +48,21 @@ cd web && npm run build       # type-checks the frontend (tsc, strict)
 
 ## How it works
 
-Each Claude Code transcript (`~/.claude/projects/<project>/<uuid>.jsonl`) is one
-**Agent Session**. The collector scans transcripts touched in the last 24h, tails
-each incrementally (byte-offset per file, re-parsing on truncation), and folds
-`user` / `assistant` entries into a `Session` — skipping sidechain (subagent)
-traffic and tolerating unknown fields / schema drift. Status is mtime-based for
-C1: an unanswered `tool_use` in the newest entry is **Attention**, a fresh file is
-**Active**, and a quiet one (≥15m) is **Finished**.
+Each transcript is one **Agent Session**. Two **Session Sources** plug in behind a
+shared trait — Claude Code (`~/.claude/projects/<project>/<uuid>.jsonl`) and Codex
+CLI (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`). Each source owns only its
+discovery layout and line decoding; the byte-offset tailing (re-parsing on
+truncation), the mtime-based status heuristic, and the `Session` shape are shared.
+
+The collector scans transcripts touched in the last 24h and tails each
+incrementally, folding lines into a `Session` while tolerating unknown fields /
+schema drift. Subagent traffic never surfaces as its own card (Claude's
+`isSidechain`; Codex's `thread_source: "subagent"`). Claude tokens are summed
+per-entry; Codex tokens are the latest **cumulative** `total_token_usage`. Status
+is mtime-based: an unanswered Claude `tool_use` in the newest entry is
+**Attention**, a fresh file is **Active**, and a quiet one (≥15m) is **Finished**.
+Codex's approval-wait signal is deferred to C3, so Codex cards are Active/Finished
+only for now.
 
 The board serves a full snapshot at `GET /api/sessions` and streams full-Session
 updates over SSE at `GET /api/events` (`session` / `removed` events; the client

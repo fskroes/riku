@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
-use collector::{Change, Event, SessionStore, WatchGuard};
+use collector::{
+    Change, ClaudeSource, CodexSource, Event, SessionSource, SessionStore, WatchGuard,
+};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -24,25 +26,35 @@ pub struct Started {
     pub watch_guard: Option<WatchGuard>,
 }
 
-/// Scan `root`, start watching it, and begin the periodic status refresh.
+/// Scan the Claude Code and (optional) Codex roots, start watching them, and begin
+/// the periodic status refresh. A `None` `codex_root` runs Claude-only.
 ///
 /// Must be called from within a Tokio runtime (it spawns the refresh task).
-pub fn init(root: PathBuf, web_dist: PathBuf) -> Started {
-    // Canonicalize so the paths from filesystem events match the keys produced
-    // by discovery (on macOS the projects root may sit under a symlinked tmp /
-    // home path, and FSEvents reports the resolved path).
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+pub fn init(claude_root: PathBuf, codex_root: Option<PathBuf>, web_dist: PathBuf) -> Started {
+    // Canonicalize so the paths from filesystem events match the keys produced by
+    // discovery (on macOS a root may sit under a symlinked tmp / home path, and
+    // FSEvents reports the resolved path). A root that does not exist yet keeps its
+    // given path — discovery and watching degrade gracefully.
+    let claude_root = std::fs::canonicalize(&claude_root).unwrap_or(claude_root);
+    let codex_root = codex_root.map(|r| std::fs::canonicalize(&r).unwrap_or(r));
 
-    let store = Arc::new(Mutex::new(SessionStore::new()));
+    let mut sources: Vec<Box<dyn SessionSource>> =
+        vec![Box::new(ClaudeSource::new(claude_root.clone()))];
+    if let Some(root) = codex_root.clone() {
+        sources.push(Box::new(CodexSource::new(root)));
+    }
+    let roots: Vec<PathBuf> = sources.iter().flat_map(|s| s.roots()).collect();
+
+    let store = Arc::new(Mutex::new(SessionStore::new(sources)));
     let (tx, _) = broadcast::channel::<Event>(1024);
 
     let count = {
         let mut guard = store.lock().unwrap();
-        guard.scan(&root, Utc::now()).len()
+        guard.scan(Utc::now()).len()
     };
-    info!(?root, sessions = count, "discovered sessions");
+    info!(?roots, sessions = count, "discovered sessions");
 
-    let watch_guard = start_watch(&root, store.clone(), tx.clone());
+    let watch_guard = start_watch(&roots, store.clone(), tx.clone());
     spawn_refresh(store.clone(), tx.clone());
 
     Started {
@@ -52,11 +64,11 @@ pub fn init(root: PathBuf, web_dist: PathBuf) -> Started {
 }
 
 fn start_watch(
-    root: &std::path::Path,
+    roots: &[PathBuf],
     store: Arc<Mutex<SessionStore>>,
     tx: broadcast::Sender<Event>,
 ) -> Option<WatchGuard> {
-    let result = collector::watch(root, move |change| {
+    let result = collector::watch(roots, move |change| {
         let now = Utc::now();
         let event = {
             let mut guard = store.lock().unwrap();

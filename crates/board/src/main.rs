@@ -1,5 +1,5 @@
 //! The `board` binary: an axum server that serves the web UI and streams live
-//! Agent Session updates from the Claude Code [`collector`].
+//! Agent Session updates from the [`collector`] (Claude Code + Codex CLI sources).
 //!
 //! Binds `127.0.0.1` only — the board is a local mission-control view, not a
 //! network service.
@@ -13,12 +13,16 @@ use tracing::info;
 struct Config {
     port: u16,
     root: PathBuf,
+    codex_root: Option<PathBuf>,
     web_dist: PathBuf,
 }
 
 fn parse_config() -> Config {
     let mut port = 4242u16;
     let mut root = collector::default_root().unwrap_or_else(|| PathBuf::from(".claude/projects"));
+    // Codex CLI sessions, honoring CODEX_HOME. `None` only if we cannot resolve a
+    // home dir at all; the source then simply finds nothing.
+    let mut codex_root = collector::codex_default_root();
     let mut web_dist = PathBuf::from("web/dist");
 
     let mut args = std::env::args().skip(1);
@@ -37,6 +41,11 @@ fn parse_config() -> Config {
                     root = PathBuf::from(v);
                 }
             }
+            "--codex-root" => {
+                if let Some(v) = args.next() {
+                    codex_root = Some(PathBuf::from(v));
+                }
+            }
             "--web-dist" => {
                 if let Some(v) = args.next() {
                     web_dist = PathBuf::from(v);
@@ -45,7 +54,7 @@ fn parse_config() -> Config {
             other => eprintln!("ignoring unknown argument '{other}'"),
         }
     }
-    Config { port, root, web_dist }
+    Config { port, root, codex_root, web_dist }
 }
 
 #[tokio::main]
@@ -57,7 +66,7 @@ async fn main() {
         .init();
 
     let config = parse_config();
-    let started = runtime::init(config.root, config.web_dist);
+    let started = runtime::init(config.root, config.codex_root, config.web_dist);
     let app = http::router(started.state.clone());
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port);

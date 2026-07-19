@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
-import type { Session } from "./types";
+import type { Session, Tool } from "./types";
 import { useSessions } from "./useSessions";
 import { abbrevTokens, relativeAge, shortModel } from "./format";
+
+/** Per-tool tile glyph + accent. One Session Source per tool (issue #5). */
+const TOOL: Record<Tool, { label: string; color: string }> = {
+  claude: { label: "C", color: "#E8590C" },
+  codex: { label: "◆", color: "#10A37F" },
+};
 
 /** A clock that ticks every `ms` so relative ages stay fresh. */
 function useNow(ms: number): number {
@@ -16,14 +22,14 @@ function useNow(ms: number): number {
 const byMostRecent = (a: Session, b: Session): number =>
   Date.parse(b.lastEventAt) - Date.parse(a.lastEventAt);
 
-function Tile({ small }: { small?: boolean }) {
-  // C1 only sources Claude Code, so every card is a Claude tile.
+function Tile({ tool, small }: { tool: Tool; small?: boolean }) {
+  const { label, color } = TOOL[tool];
   return (
     <span
       className={small ? "tile sm" : "tile"}
-      style={{ ["--tile" as string]: "#E8590C" }}
+      style={{ ["--tile" as string]: color }}
     >
-      C
+      {label}
     </span>
   );
 }
@@ -45,7 +51,7 @@ function Meta({ session }: { session: Session }) {
 function AlertRow({ session }: { session: Session }) {
   return (
     <div className="alert">
-      <Tile />
+      <Tile tool={session.tool} />
       <div className="body">
         <div className="r1">
           <span className="name">{session.project}</span>
@@ -66,7 +72,7 @@ function AlertRow({ session }: { session: Session }) {
 function CompactRow({ session, now, done }: { session: Session; now: number; done?: boolean }) {
   return (
     <div className={done ? "row done" : "row"}>
-      <Tile small />
+      <Tile tool={session.tool} small />
       <div>
         <div className="name">{session.project}</div>
         <div className="branch">⑂ {session.branch ?? "—"}</div>
@@ -117,7 +123,7 @@ export default function App() {
       <div className="stage view-board">
         <div className="stream">
           {sessions.length === 0 ? (
-            <div className="empty">No Claude Code sessions in the last 24h.</div>
+            <div className="empty">No agent sessions in the last 24h.</div>
           ) : (
             <>
               <Band dot="attention" label="Needs you" count={attention.length} />
