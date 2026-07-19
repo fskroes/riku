@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en" data-theme="graphite">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Board — UI prototype (iteration 2)</title>
+
+<!--
+  THROWAWAY PROTOTYPE — do not ship. Converged design after variant review:
+    • Board  = attention-first stream (winning variant B) — the default view.
+    • Work Items = per-project kanban plan (variant A layout, repurposed),
+      with a project selector + WORK.md/GitHub source badge, and each item
+      linked to the Agent Session working it (Work Link, per CONTEXT.md).
+  Switch views: topbar tabs, or ← / → keys.  ?view=board|work&project=<name>
+  Sample data only, no persistence, no real fetch. Fold the winner into web/ later.
+-->
+
+<style>
+/* ---------- Autumn tokens (subset used here) ---------- */
+:root{
+  --unit:4px; --r-sm:6px; --r-md:10px; --r-lg:14px; --r-xl:16px; --r-pill:999px;
+  --font-ui:"Inter",-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
+  --font-mono:"JetBrains Mono","Geist Mono","SF Mono",ui-monospace,monospace;
+  --fs-micro:11px; --fs-body:13px; --fs-title:15px; --lh-body:1.45;
+  --ease-out:cubic-bezier(0.22,1,0.36,1); --t-fast:150ms;
+}
+[data-theme="graphite"]{
+  --bg-content:#0E0E10; --surface:#1A1A1D; --surface-raised:#222226;
+  --ink:#F2F2F0; --ink-muted:rgba(255,255,255,0.55); --ink-faint:rgba(255,255,255,0.32);
+  --hairline:rgba(255,255,255,0.06);
+  --accent:#4C8DFF; --accent-soft:rgba(76,141,255,0.16);
+  --positive:#33C481; --warning:#F0B429; --negative:#FF6259; --info:#8B93F8;
+  --info-soft:rgba(139,147,248,0.20); --ghost:rgba(255,255,255,0.07);
+  --shadow-float:0 12px 40px rgba(0,0,0,0.5);
+  --card-edge:0 0 0 0.5px rgba(255,255,255,0.08);
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; font-family:var(--font-ui); font-size:var(--fs-body); line-height:var(--lh-body);
+  color:var(--ink); -webkit-font-smoothing:antialiased;
+  background:radial-gradient(120% 90% at 50% -10%, #3a4a86 0%, #7a5f8f 32%, #c98a54 62%, #e9c06a 100%) fixed;
+  min-height:100vh; padding:36px;
+}
+.num,.mono{font-family:var(--font-mono); font-variant-numeric:tabular-nums}
+.up{color:var(--positive)} .down{color:var(--negative)}
+.label-micro{font-size:var(--fs-micro); text-transform:uppercase; letter-spacing:.06em; color:var(--ink-muted); font-weight:500}
+
+/* ---------- app window + chrome ---------- */
+.window{max-width:1360px; margin:0 auto; background:var(--bg-content);
+  border-radius:var(--r-xl); box-shadow:0 30px 80px rgba(0,0,0,.45), var(--card-edge); overflow:hidden;}
+.topbar{display:flex; align-items:center; gap:14px; height:56px; padding:0 20px; border-bottom:1px solid var(--hairline);}
+.topbar .logo{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:6px;
+  background:linear-gradient(135deg,#4C8DFF,#8B93F8);color:#fff;font-size:12px}
+.topbar .brand{font-weight:600;letter-spacing:.04em;font-size:13px}
+.topbar .live{color:var(--positive);font-family:var(--font-mono);font-weight:500;letter-spacing:.04em;font-size:12px}
+.topbar .spacer{flex:1}
+.topbar .remote{color:var(--ink-muted);font-size:12px;display:flex;align-items:center;gap:6px}
+
+/* segmented nav (Board | Work Items) */
+.seg{display:inline-flex;gap:2px;padding:2px;border-radius:var(--r-md);background:rgba(255,255,255,.05)}
+.seg button{padding:6px 14px;border:0;border-radius:8px;background:transparent;color:var(--ink-muted);
+  font:500 13px var(--font-ui);cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--surface-raised);color:var(--ink);box-shadow:var(--card-edge)}
+
+.stage{padding:22px}
+
+/* shared bits */
+.meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;color:var(--ink-muted);font-family:var(--font-mono);font-size:12px}
+.meta .k{color:var(--ink)}
+.tile{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:8px;
+  background:color-mix(in srgb,var(--tile) 20%,transparent);color:var(--tile);font-weight:700;font-size:13px;flex:none}
+.tile.sm{width:22px;height:22px;border-radius:6px;font-size:11px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.dot.active,.dot.doing{background:var(--info)} .dot.attention{background:var(--warning)}
+.dot.finished,.dot.todo{background:var(--ink-faint)} .dot.done{background:var(--positive)}
+.dot.live{background:var(--positive)}
+.wi{font-family:var(--font-mono);font-size:11px;color:var(--info);background:var(--info-soft);padding:1px 6px;border-radius:var(--r-pill)}
+.age{color:var(--ink-faint);font-family:var(--font-mono);font-size:11px;flex:none}
+
+/* pill dropdown (project selector) */
+.pill{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;border-radius:8px;
+  background:var(--surface-raised);box-shadow:var(--card-edge);font:500 13px var(--font-ui);color:var(--ink);cursor:pointer}
+.pill .chev{color:var(--ink-muted)}
+.menu{position:absolute;margin-top:6px;background:var(--surface-raised);border-radius:var(--r-md);
+  box-shadow:var(--shadow-float);padding:6px;min-width:200px;z-index:30}
+.menu button{display:flex;width:100%;align-items:center;gap:9px;padding:8px 10px;border:0;border-radius:8px;
+  background:transparent;color:var(--ink);font:450 13px var(--font-ui);cursor:pointer;text-align:left}
+.menu button:hover{background:rgba(255,255,255,.06)}
+.menu button[aria-current="true"]{background:rgba(255,255,255,.06);font-weight:600}
+.hidden{display:none}
+
+/* ==========================================================================
+   BOARD — attention-first stream (winning variant B)
+   ========================================================================== */
+.view-board .stream{max-width:880px;margin:0 auto}
+.view-board .band{display:flex;align-items:center;gap:10px;margin:18px 4px 10px}
+.view-board .band:first-child{margin-top:4px}
+.view-board .band .n{font-family:var(--font-mono);color:var(--ink-faint);font-size:12px}
+.view-board .alert{display:flex;gap:14px;align-items:stretch;background:var(--surface);border-radius:var(--r-md);
+  padding:14px 16px;margin-bottom:10px;box-shadow:var(--card-edge);position:relative;overflow:hidden}
+.view-board .alert::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--warning)}
+.view-board .alert.err::before{background:var(--negative)}
+.view-board .alert .body{flex:1;min-width:0}
+.view-board .alert .r1{display:flex;align-items:center;gap:10px}
+.view-board .alert .name{font-weight:600;font-size:15px}
+.view-board .alert .reason{font-weight:600;margin-top:8px}
+.view-board .alert .cta{align-self:center;font:500 12px var(--font-ui);padding:8px 14px;border-radius:var(--r-md);
+  background:var(--surface-raised);box-shadow:var(--card-edge);color:var(--ink);white-space:nowrap;cursor:pointer}
+.view-board .row{display:grid;grid-template-columns:auto 150px 1fr auto;gap:14px;align-items:center;
+  padding:11px 14px;border-radius:var(--r-md);transition:background var(--t-fast)}
+.view-board .row:hover{background:var(--surface)}
+.view-board .row .name{font-weight:550}
+.view-board .row .branch{font-family:var(--font-mono);font-size:12px;color:var(--ink-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.view-board .row .act{color:var(--ink-muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.view-board .row.done{opacity:.55}
+.view-board .row .mini{display:flex;gap:12px;align-items:center;font-family:var(--font-mono);font-size:12px;color:var(--ink-muted)}
+.pillstat{color:var(--warning)} .pillstat.err{color:var(--negative)}
+
+/* ==========================================================================
+   WORK ITEMS — per-project kanban plan (variant A layout, repurposed)
+   ========================================================================== */
+.work-head{display:flex;align-items:center;gap:16px;margin-bottom:18px;position:relative}
+.work-head .src{color:var(--ink-muted);font-family:var(--font-mono);font-size:12px}
+.work-head .prog{margin-left:auto;display:flex;align-items:center;gap:10px;color:var(--ink-muted);font-size:12px}
+.work-head .track{width:120px;height:6px;border-radius:var(--r-pill);background:var(--ghost);overflow:hidden}
+.work-head .track > span{display:block;height:100%;background:var(--positive);border-radius:var(--r-pill)}
+
+.view-work .cols{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.view-work .col{background:var(--surface);border-radius:var(--r-lg);box-shadow:var(--card-edge);padding:14px;min-height:440px}
+.view-work .col-head{display:flex;align-items:center;gap:9px;padding:4px 6px 14px}
+.view-work .col-head b{font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:600}
+.view-work .col-head .count{margin-left:auto;font-family:var(--font-mono);color:var(--ink-muted);font-size:12px}
+
+.wcard{background:var(--surface-raised);border-radius:var(--r-md);box-shadow:var(--card-edge);
+  padding:13px 14px;margin-bottom:12px;transition:transform var(--t-fast) var(--ease-out)}
+.wcard:hover{transform:translateY(-1px)}
+.wcard.is-done{opacity:.6}
+.wcard .top{display:flex;align-items:center;gap:10px}
+.wcard .top .id{font-family:var(--font-mono);font-size:11px;color:var(--ink-muted)}
+.wcard .top .eff{margin-left:auto;font-family:var(--font-mono);font-size:11px;color:var(--ink-faint)}
+.wcard .title{font-weight:550;font-size:13.5px;margin-top:9px;line-height:1.35}
+.wcard .ref{color:var(--ink-faint);font-family:var(--font-mono);font-weight:400;font-size:11px;margin-left:6px}
+/* blocked hint */
+.blocked{display:inline-flex;align-items:center;gap:6px;margin-top:10px;color:var(--warning);font-size:12px}
+.blocked code{font-family:var(--font-mono);font-size:11px;color:var(--warning)}
+/* linked Agent Session chip (the Work Link, made visible) */
+.link-sess{display:flex;align-items:center;gap:8px;margin-top:11px;padding:8px 10px;border-radius:8px;
+  background:rgba(255,255,255,.03);box-shadow:var(--card-edge);cursor:pointer}
+.link-sess .who{display:flex;flex-direction:column;min-width:0}
+.link-sess .repo{font-weight:600;font-size:12px}
+.link-sess .sub{font-family:var(--font-mono);font-size:11px;color:var(--ink-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.link-sess .go{margin-left:auto;color:var(--ink-faint);font-size:12px;flex:none}
+.done-line{display:flex;align-items:center;gap:7px;margin-top:9px;color:var(--ink-muted);font-size:12px}
+
+/* ---------- floating hint (prototype-only) ---------- */
+#proto-tag{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:50;
+  padding:7px 16px;border-radius:var(--r-pill);background:#000;color:rgba(255,255,255,.7);font-size:11.5px;
+  box-shadow:0 10px 30px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.12);font-family:var(--font-mono)}
+</style>
+</head>
+<body>
+  <div class="window">
+    <div class="topbar">
+      <span class="logo">▦</span>
+      <span class="brand">AGENT BOARD</span>
+      <span class="live" id="liveCount"></span>
+      <div class="seg" role="tablist" id="nav" style="margin-left:8px">
+        <button data-view="board" role="tab">Board</button>
+        <button data-view="work" role="tab">Work Items</button>
+      </div>
+      <span class="spacer"></span>
+      <span class="remote">🖥 1 remote</span>
+    </div>
+    <div class="stage" id="app"></div>
+  </div>
+
+  <div id="proto-tag">prototype · Board = stream · Work Items = plan · ← → to switch</div>
+
+<script>
+/* ---------------- sample data ---------------- */
+const TOOL={claude:{c:"#E8590C",g:"C"},openai:{c:"#33C481",g:"O"},cursor:{c:"#4C8DFF",g:"◨"},
+  gemini:{c:"#8B93F8",g:"G"},fable:{c:"#F0B429",g:"F"}};
+
+const SESSIONS=[
+  {id:"s1",repo:"AgentPeek",tool:"openai",model:"GPT-5.6 Sol",branch:"feature/agent-board",machine:null,
+   status:"active",tin:"37.6k",tout:"4.7k",cost:"$1.84",files:12,msgs:23,add:412,del:96,wi:"#2",act:"Implementing the Kanban widget",age:"1m"},
+  {id:"s2",repo:"agentpeek-web",tool:"claude",model:"Opus 4.8",branch:"fix/download-flow",machine:null,
+   status:"active",tin:"27.9k",tout:"3.8k",cost:"62¢",files:5,msgs:9,add:128,del:40,stale:true,wi:"W-12",act:"Working through the release flow",age:"1m"},
+  {id:"s3",repo:"design-system",tool:"gemini",model:"Gemini 3 Pro",branch:"token-refresh",machine:null,
+   status:"active",tin:"18.8k",tout:"2.5k",cost:"48¢",files:4,msgs:7,add:86,del:22,wi:"W-08",act:"Editing components/Button.tsx",age:"1m"},
+  {id:"s4",repo:"release-infra",tool:"fable",model:"Fable 5",branch:"main",machine:"studio-mac",
+   status:"active",tin:"11.3k",tout:"1.3k",cost:null,act:"Running packaged-app checks",age:"1m"},
+  {id:"s5",repo:"desktop-shell",tool:"cursor",model:"Composer 2.5",branch:"migration/settings",machine:null,
+   status:"attention",reason:"approval",tin:"6.5k",tout:"760",cost:null,wi:"W-21",act:"Approval needed",age:"1m"},
+  {id:"s6",repo:"license-api",tool:"openai",model:"Big Pickle",branch:"fix/trial-receipt",machine:null,
+   status:"attention",reason:"error",tin:"14.2k",tout:"1.7k",cost:"31¢",files:3,msgs:14,add:36,del:12,wi:"#204",act:"Contract test failed",age:"1m"},
+  {id:"s7",repo:"agentpeek-web",tool:"claude",model:"Sonnet 5",branch:"polish/onboarding",machine:null,
+   status:"finished",tin:"16.1k",tout:"2.3k",cost:null,wi:"W-11",act:"Completed 1m ago",age:"1m"},
+  {id:"s8",repo:"AgentPeek",tool:"openai",model:"GPT-5.6 Sol",branch:"main",machine:null,
+   status:"finished",tin:"8.7k",tout:"1.1k",cost:null,act:"Completed 1m ago",age:"1m"},
+];
+const byId=Object.fromEntries(SESSIONS.map(s=>[s.id,s]));
+
+/* Work Items per project — one source per project (WORK.md wins, else GitHub Issues) */
+const PLANS={
+  "AgentPeek":{source:"GitHub Issues", items:[
+    {status:"done", title:"Repo scaffold + gstack skills"},
+    {status:"done", title:"Domain glossary + ADRs"},
+    {id:"#2", ref:"C1", status:"doing", effort:"~3d", title:"Walking skeleton: Claude sessions → live board", session:"s1"},
+    {id:"#5", ref:"C4", status:"doing", effort:"~2-3d", title:"Work Items: WORK.md + GitHub + Work Links"},
+    {id:"#3", ref:"C2", status:"todo", effort:"~2d", title:"Codex CLI Session Source", blockedBy:["C1"]},
+    {id:"#4", ref:"C3", status:"todo", effort:"~1-2d", title:"Attention detection + column semantics", blockedBy:["C1"]},
+    {id:"#6", ref:"C5", status:"todo", effort:"~1-2d", title:"Card stats: diff ± and cost estimates"},
+    {id:"#7", ref:"C6", status:"todo", effort:"~1-2d", title:"Deep-link into local session"},
+    {id:"#8", ref:"C7", status:"todo", effort:"~4-5d", title:"Collector + Relay (multi-machine)", blockedBy:["C1","C3"]},
+  ]},
+  "agentpeek-web":{source:"WORK.md", items:[
+    {id:"W-11", status:"done", title:"Onboarding polish", session:"s7"},
+    {id:"W-12", status:"doing", effort:"~2d", title:"Release download flow", session:"s2"},
+    {id:"W-13", status:"todo", effort:"~1d", title:"Trial receipt copy"},
+    {id:"W-14", status:"todo", effort:"~2d", title:"Auto-update banner", blockedBy:["W-12"]},
+  ]},
+  "design-system":{source:"WORK.md", items:[
+    {id:"W-06", status:"done", title:"Graphite dark theme audit"},
+    {id:"W-08", status:"doing", effort:"~1d", title:"Token refresh (semantic colors)", session:"s3"},
+    {id:"W-07", status:"todo", effort:"~1d", title:"Button.tsx size + tone variants"},
+    {id:"W-09", status:"todo", effort:"~2d", title:"Waffle chart component"},
+  ]},
+  "license-api":{source:"GitHub Issues", items:[
+    {id:"#201", status:"done", title:"License key rotation"},
+    {id:"#204", status:"doing", effort:"~1d", title:"Trial receipt contract test", session:"s6"},
+    {id:"#205", status:"todo", effort:"~2d", title:"Grace-period billing"},
+  ]},
+};
+
+/* ---------------- helpers ---------------- */
+const tile=(s,cls="")=>{const t=TOOL[s.tool];return `<span class="tile ${cls}" style="--tile:${t.c}">${t.g}</span>`;};
+const branch=(s)=>`⑂ ${s.branch}`;
+function metricStr(s){let p=[`↑ ${s.tin} / ${s.tout}`];if(s.cost)p.push(s.cost);
+  if(s.files)p.push(`▤ ${s.files}`);if(s.msgs)p.push(`▢ ${s.msgs}`);let out=p.join("  ");
+  if(s.add!=null)out+=`  <span class="up">+${s.add}</span> <span class="down">−${s.del}</span>`;return out;}
+const actIcon=(s)=> s.status==="finished"?"✓"
+  : s.reason==="error"?'<span style="color:var(--negative)">⚠</span>'
+  : s.reason==="approval"?'<span style="color:var(--warning)">💬</span>'
+  : s.act.startsWith("Editing")?'<span style="color:var(--positive)">✎</span>':"▸";
+
+/* ---------------- BOARD (variant B) ---------------- */
+function renderBoard(){
+  const attn=SESSIONS.filter(s=>s.status==="attention");
+  const active=SESSIONS.filter(s=>s.status==="active");
+  const done=SESSIONS.filter(s=>s.status==="finished");
+  const alert=(s)=>`
+    <div class="alert ${s.reason==="error"?"err":""}">
+      ${tile(s)}
+      <div class="body">
+        <div class="r1"><span class="name">${s.repo}</span> ${s.wi?`<span class="wi">${s.wi}</span>`:""}
+          <span class="meta" style="margin-left:6px">${branch(s)}</span></div>
+        <div class="reason ${s.reason==="error"?"pillstat err":"pillstat"}">${actIcon(s)} ${s.act}</div>
+        <div class="meta" style="margin-top:8px">${s.model} · ${metricStr(s)}</div>
+      </div>
+      <button class="cta">${s.reason==="error"?"Open error →":"Review →"}</button>
+    </div>`;
+  const row=(s,isDone=false)=>`
+    <div class="row ${isDone?"done":""}">
+      ${tile(s,"sm")}
+      <div><div class="name">${s.repo}</div><div class="branch">${branch(s)}</div></div>
+      <div class="act">${actIcon(s)} ${s.act}</div>
+      <div class="mini">${s.wi?`<span class="wi">${s.wi}</span>`:""}
+        <span>↑${s.tin}/${s.tout}</span>${s.cost?`<span>${s.cost}</span>`:""}<span class="age">${s.age}</span></div>
+    </div>`;
+  return `<div class="stream">
+    <div class="band"><span class="dot attention"></span><b class="label-micro">Needs you</b><span class="n">${attn.length}</span></div>
+    ${attn.map(alert).join("")}
+    <div class="band"><span class="dot active"></span><b class="label-micro">Running</b><span class="n">${active.length}</span></div>
+    ${active.map(s=>row(s)).join("")}
+    <div class="band"><span class="dot finished"></span><b class="label-micro">Finished</b><span class="n">${done.length}</span></div>
+    ${done.map(s=>row(s,true)).join("")}
+  </div>`;
+}
+
+/* ---------------- WORK ITEMS (variant A layout) ---------------- */
+function linkSess(sid){
+  const s=byId[sid]; if(!s) return "";
+  return `<div class="link-sess" title="Open session on the board">
+    ${tile(s,"sm")}
+    <div class="who"><span class="repo">${s.repo}</span>
+      <span class="sub">${s.model} · ${branch(s)}${s.machine?" · "+s.machine:""}</span></div>
+    <span class="dot ${s.status==="attention"?"attention":"live"}" style="margin-left:2px"></span>
+    <span class="go">→</span>
+  </div>`;
+}
+function wcard(it){
+  const blocked = it.blockedBy && it.status==="todo"
+    ? `<div class="blocked">⛔ Blocked · ${it.blockedBy.map(b=>`<code>${b}</code>`).join(" ")}</div>` : "";
+  const body = it.status==="done"
+    ? `<div class="done-line">✓ Done${it.session?` · ${byId[it.session].repo}`:""}</div>`
+    : (it.session ? linkSess(it.session) : blocked ||
+        (it.status==="doing" ? `<div class="done-line" style="color:var(--ink-faint)">◔ In progress · no live session</div>` : ""));
+  return `<div class="wcard is-${it.status}">
+    <div class="top">
+      <span class="tile sm" style="--tile:${it.status==="done"?"var(--positive)":it.status==="doing"?"var(--info)":"var(--ink-faint)"}">${it.status==="done"?"✓":it.status==="doing"?"◐":"○"}</span>
+      ${it.id?`<span class="id">${it.id}</span>`:""}
+      ${it.effort?`<span class="eff">${it.effort}</span>`:""}
+    </div>
+    <div class="title">${it.title}${it.ref?`<span class="ref">${it.ref}</span>`:""}</div>
+    ${body}
+  </div>`;
+}
+function renderWork(project){
+  const plan=PLANS[project];
+  const cols=[["todo","To do"],["doing","In progress"],["done","Done"]];
+  const total=plan.items.length, done=plan.items.filter(i=>i.status==="done").length;
+  const pct=Math.round(done/total*100);
+  const projBtn=`<button class="pill" id="projPill">▤ ${project} <span class="chev">▾</span></button>`;
+  const menu=`<div class="menu hidden" id="projMenu">${Object.keys(PLANS).map(p=>
+      `<button data-proj="${p}" aria-current="${p===project}">▤ ${p}</button>`).join("")}</div>`;
+  const head=`<div class="work-head">
+    ${projBtn}${menu}
+    <span class="src">source: ${plan.source} · ${total} items</span>
+    <span class="prog">${done}/${total} done <span class="track"><span style="width:${pct}%"></span></span></span>
+  </div>`;
+  const board=`<div class="cols">${cols.map(([k,label])=>{
+    const items=plan.items.filter(i=>i.status===k);
+    return `<div class="col">
+      <div class="col-head"><span class="dot ${k}"></span><b>${label}</b><span class="count">${items.length}</span></div>
+      ${items.map(wcard).join("")}
+    </div>`;}).join("")}</div>`;
+  return head+board;
+}
+
+/* ---------------- routing / state ---------------- */
+function params(){return new URLSearchParams(location.search);}
+function state(){const p=params();
+  return {view:p.get("view")==="work"?"work":"board", project:PLANS[p.get("project")]?p.get("project"):"AgentPeek"};}
+function setState(patch){const p=params();const s={...state(),...patch};
+  p.set("view",s.view); p.set("project",s.project);
+  history.replaceState(null,"",location.pathname+"?"+p.toString()); render();}
+function render(){
+  const {view,project}=state();
+  const app=document.getElementById("app");
+  app.className="stage "+(view==="work"?"view-work":"view-board");
+  app.innerHTML = view==="work" ? renderWork(project) : renderBoard();
+  document.getElementById("liveCount").textContent=SESSIONS.filter(s=>s.status!=="finished").length+" LIVE";
+  document.querySelectorAll("#nav button").forEach(b=>b.setAttribute("aria-pressed", b.dataset.view===view));
+  wire(view);
+}
+function wire(view){
+  if(view!=="work") return;
+  const pill=document.getElementById("projPill"), menu=document.getElementById("projMenu");
+  pill.onclick=(e)=>{e.stopPropagation();menu.classList.toggle("hidden");};
+  menu.querySelectorAll("button").forEach(b=>b.onclick=()=>setState({project:b.dataset.proj}));
+}
+document.addEventListener("click",()=>{const m=document.getElementById("projMenu");if(m)m.classList.add("hidden");});
+document.querySelectorAll("#nav button").forEach(b=>b.onclick=()=>setState({view:b.dataset.view}));
+addEventListener("keydown",(e)=>{const t=e.target.tagName;if(t==="INPUT"||t==="TEXTAREA"||e.target.isContentEditable)return;
+  if(e.key==="ArrowLeft"||e.key==="ArrowRight") setState({view:state().view==="board"?"work":"board"});});
+render();
+</script>
+</body>
+</html>
