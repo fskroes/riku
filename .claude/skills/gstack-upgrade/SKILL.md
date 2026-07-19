@@ -1,0 +1,1 @@
+/Users/fskroes/conductor/repos/riku/.claude/skills/gstack/gstack-upgrade/SKILL.md

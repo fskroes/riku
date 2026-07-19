@@ -1,0 +1,1 @@
+/Users/fskroes/conductor/repos/riku/.claude/skills/gstack/plan-ceo-review/SKILL.md
