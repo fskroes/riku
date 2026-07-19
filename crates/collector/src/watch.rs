@@ -27,9 +27,13 @@ pub struct WatchGuard {
     _handle: thread::JoinHandle<()>,
 }
 
-/// Watch `root` recursively for `*.jsonl` changes, invoking `on_change` once per
-/// file per debounce window. `on_change` runs on a dedicated thread.
-pub fn watch<F>(root: &Path, mut on_change: F) -> notify::Result<WatchGuard>
+/// Watch each of `roots` recursively for `*.jsonl` changes, invoking `on_change`
+/// once per file per debounce window. `on_change` runs on a dedicated thread.
+///
+/// A root that cannot be watched (e.g. a missing `~/.codex/sessions`) is warned
+/// about and skipped rather than failing the whole watcher, so one absent source
+/// never takes the others down. Constructing the watcher itself can still fail.
+pub fn watch<F>(roots: &[PathBuf], mut on_change: F) -> notify::Result<WatchGuard>
 where
     F: FnMut(Change) + Send + 'static,
 {
@@ -47,7 +51,11 @@ where
             Err(e) => warn!(error = %e, "watch error"),
         }
     })?;
-    watcher.watch(root, RecursiveMode::Recursive)?;
+    for root in roots {
+        if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
+            warn!(?root, error = %e, "cannot watch source root; skipping");
+        }
+    }
 
     let handle = thread::spawn(move || debounce_loop(rx, &mut on_change));
 

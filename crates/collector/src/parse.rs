@@ -6,6 +6,8 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+use crate::fold::first_line;
+
 /// A raw transcript line, deserialized leniently. Fields we do not model are
 /// dropped; every field is optional so partial / drifting records still parse.
 #[derive(Debug, Deserialize)]
@@ -156,19 +158,5 @@ fn summarize_content(content: &Content, is_assistant: bool) -> (Option<String>, 
             }
             (activity, has_tool_use)
         }
-    }
-}
-
-/// First non-empty line of `s`, trimmed and truncated to 80 chars (by char).
-fn first_line(s: &str) -> Option<String> {
-    let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
-    Some(truncate_chars(line, 80))
-}
-
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max).collect()
     }
 }

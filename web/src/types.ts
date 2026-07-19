@@ -3,8 +3,11 @@
 
 export type Status = "active" | "attention" | "finished";
 
+export type Tool = "claude" | "codex";
+
 export interface Session {
   id: string;
+  tool: Tool;
   project: string;
   model: string | null;
   branch: string | null;

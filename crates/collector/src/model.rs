@@ -4,6 +4,15 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+/// The agent tool a Session came from. One Session Source per tool; carried to
+/// the UI so each card can show the right tool tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tool {
+    Claude,
+    Codex,
+}
+
 /// Board status for an Agent Session. See CONTEXT.md and issue #2 for the locked
 /// C1 heuristic (mtime-based; process liveness lands with C3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -25,6 +34,8 @@ pub struct Session {
     /// `sessionId` (uuid). Globally unique, so duplicate filename stems across
     /// project dirs cannot collide.
     pub id: String,
+    /// Which agent tool produced this Session.
+    pub tool: Tool,
     /// Last path segment of the latest `cwd`.
     pub project: String,
     /// `message.model` of the latest assistant entry.
