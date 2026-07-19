@@ -1,2 +1,9 @@
 # gstack browse-daemon runtime cache
 .gstack/
+
+# Rust
+/target/
+
+# Node / web build
+web/node_modules/
+web/dist/
