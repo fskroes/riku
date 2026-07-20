@@ -17,11 +17,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use collector::{DeepLink, Event, Session, Status, Tool, WorkItem, WorkSourceKind};
 use futures::StreamExt;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sessions::{DeepLink, Event, Session, Status, Tool, WorkItem, WorkSourceKind};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::open::{is_safe_session_id, Launcher};
@@ -256,7 +256,7 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
     };
 
     let dir = PathBuf::from(&q.cwd);
-    let map = tokio::task::spawn_blocking(move || collector::read_work_map(&dir))
+    let map = tokio::task::spawn_blocking(move || sessions::read_work_map(&dir))
         .await
         .expect("read_work_map does not panic");
 

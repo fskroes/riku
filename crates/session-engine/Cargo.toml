@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-collector = { path = "../collector" }
+sessions = { path = "../sessions" }
 chrono = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

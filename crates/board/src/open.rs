@@ -1,6 +1,6 @@
 //! The OS half of the deep link: turning a [`DeepLink`] into an open terminal.
 //!
-//! [`collector::DeepLink`] says *what* resumes a session and *where*; this module
+//! [`sessions::DeepLink`] says *what* resumes a session and *where*; this module
 //! is *how* on this machine. The board is local (binds `127.0.0.1`), so "open"
 //! genuinely runs on the human's own box — it launches a new macOS Terminal
 //! window that `cd`s into the session's workspace and runs the resume command, so
@@ -12,7 +12,7 @@
 
 use std::process::Command;
 
-use collector::DeepLink;
+use sessions::DeepLink;
 
 /// Opens a resolved [`DeepLink`] on this machine. Behind a trait so the HTTP layer
 /// depends on the capability, not the macOS mechanism, and tests can substitute a
@@ -106,7 +106,7 @@ fn applescript_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use collector::Tool;
+    use sessions::Tool;
     use std::path::Path;
 
     fn link(dir: &str) -> DeepLink {

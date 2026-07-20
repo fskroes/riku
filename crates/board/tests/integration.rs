@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use board::{http, runtime, Launcher, Started};
-use collector::DeepLink;
 use futures::StreamExt;
+use sessions::DeepLink;
 
 /// A [`Launcher`] that records the deep links it is asked to open instead of
 /// spawning Terminal, so the open endpoint can be tested end-to-end.

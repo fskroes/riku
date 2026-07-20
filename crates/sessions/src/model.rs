@@ -44,7 +44,7 @@ pub enum AttentionReason {
 
 /// Lines added / removed in a session's repo — the card's `+/-` stat (C5). Live
 /// git working-tree state, not transcript-derived: filled in by the board (see
-/// `collector::git::diff_stat`), so the collector always leaves it `None`.
+/// `sessions::git::diff_stat`), so the sessions projection leaves it `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffStat {
@@ -95,7 +95,7 @@ pub struct Session {
     /// subscription sessions, which pay no marginal per-token cost.
     pub cost_usd: Option<f64>,
     /// Lines added / removed in the session's repo (C5). Live git state, so the
-    /// collector *projection* leaves it `None`; whichever process owns the repo (the
+    /// sessions projection leaves it `None`; whichever process owns the repo (the
     /// board for local sessions, the Collector for remote ones) fills it before
     /// serving/streaming. Omitted-on-wire tolerant (`default` → `None`).
     #[serde(default)]
@@ -104,7 +104,7 @@ pub struct Session {
     /// source: the board's own local runtime (and, later, a Collector on a remote
     /// machine) sets it to the local hostname before the Session leaves the watcher,
     /// so every card can show which machine an Agent Session is on. Like `diff`, the
-    /// collector projection leaves it `None`; a `None` still serializes cleanly,
+    /// sessions projection leaves it `None`; a `None` still serializes cleanly,
     /// keeping the field additive on the wire for local-only, pre-C7 boards.
     #[serde(default)]
     pub machine: Option<String>,

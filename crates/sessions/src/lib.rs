@@ -1,4 +1,4 @@
-//! Collector: the Session Sources for Claude Code and Codex CLI.
+//! Sessions: the Session Sources for Claude Code and Codex CLI.
 //!
 //! Each tool plugs in behind [`SessionSource`]: it discovers its transcripts and
 //! decodes their lines, while the byte-offset tailing, status heuristic, and

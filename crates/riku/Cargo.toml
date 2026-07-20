@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 board = { path = "../board" }
-collector = { path = "../collector" }
+sessions = { path = "../sessions" }
 relay = { path = "../relay" }
 axum = "0.7"
 dirs = "5"

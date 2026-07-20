@@ -1,7 +1,7 @@
 //! Live git diff enrichment for session cards (C5).
 //!
 //! A Session's `+/-` is live working-tree state, not transcript data, so the
-//! collector *projection* leaves [`Session::diff`] `None` and whichever process
+//! sessions projection leaves [`Session::diff`] `None` and whichever process
 //! owns the repo fills it here: the board for local sessions, and — since C7 — the
 //! Collector for the sessions it pushes to the Relay (the repo lives on the
 //! Collector's machine, so only it can read the diff). Enrichment is a decoration

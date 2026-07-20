@@ -1,5 +1,5 @@
 // Mirror of the Rust `Session` model (camelCase JSON). Keep in sync with
-// crates/collector/src/model.rs.
+// crates/sessions/src/model.rs.
 
 export type Status = "active" | "attention" | "finished";
 
@@ -59,7 +59,7 @@ export interface ProjectRef {
   cwd: string;
 }
 
-// Mirror of the Work model. Keep in sync with crates/collector/src/work.rs and the
+// Mirror of the Work model. Keep in sync with crates/sessions/src/work.rs and the
 // `/api/work` response shaped in crates/board/src/http.rs.
 
 export type WorkStatus = "todo" | "doing" | "done";

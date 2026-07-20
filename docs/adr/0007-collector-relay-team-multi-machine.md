@@ -6,7 +6,7 @@ remaining pieces from the settled architecture — a **Collector** (headless, ru
 any machine) and a **Relay** (a hub, run once anywhere reachable) — without changing
 anything about zero-setup solo use.
 
-**`collector::Event` is the one wire currency, in both directions.** The
+**`sessions::Event` is the one wire currency, in both directions.** The
 Collector→Relay push and the Relay→Board fan-out both carry the existing `Event`
 (`Upsert(Session)` / `Removed { id }`). Because every `Upsert` is a full Session
 snapshot, both streams are idempotent and self-healing: a dropped frame or a
@@ -33,7 +33,7 @@ client-supplied path — so a board running both local sources and a Relay subsc
 labels every card consistently, with no unlabelled "local" special case (User Story
 23). The Collector reuses the board's whole pipeline (`SessionStore` over the same
 Session Sources, the watcher, the 30s refresh, and live git `+/-` enrichment, now
-shared as `collector::DiffCache`), so a remote card carries the same stats a local
+shared as `sessions::DiffCache`), so a remote card carries the same stats a local
 one does (User Story 18). The Collector fills `diff` itself because the repo lives on
 its machine — the board cannot read a working tree it does not have.
 
@@ -71,7 +71,7 @@ across every machine.
 
 **Workspace shape.** A new `relay` crate houses the Relay server, the Collector loop,
 and the board's subscription client (all three share the wire codec), exposing the
-`relay` and `collector` binaries; it depends on the shared `collector` library, and
+`relay` and `collector` binaries; it depends on the shared `sessions` library, and
 the `board` binary depends on it for the subscription client. TLS termination, process
 supervision, and where the Relay is hosted are operator concerns, out of scope here.
 

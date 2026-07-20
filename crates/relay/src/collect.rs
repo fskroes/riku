@@ -10,10 +10,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use collector::{Event, Session};
 use futures::StreamExt;
 use reqwest::header::AUTHORIZATION;
 use session_engine::Engine;
+use sessions::{Event, Session};
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{info, warn};
 

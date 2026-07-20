@@ -6,7 +6,7 @@ license.workspace = true
 autobins = false
 
 [dependencies]
-collector = { path = "../collector" }
+sessions = { path = "../sessions" }
 relay = { path = "../relay" }
 session-engine = { path = "../session-engine" }
 serde = { workspace = true }

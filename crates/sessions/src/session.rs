@@ -237,7 +237,7 @@ impl FileState {
             .flatten();
         // Cost is pure (tokens × the model's list price); computed before `p.model`
         // is moved into the session below. The live git `diff` is out-of-transcript,
-        // so the board fills it and the collector leaves it None.
+        // so the board fills it and the sessions projection leaves it None.
         let cost_usd =
             crate::pricing::estimate_cost_usd(p.model.as_deref(), p.tokens_in, p.tokens_out);
         Some(Session {

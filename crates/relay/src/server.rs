@@ -24,8 +24,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use collector::{Event, Session};
 use futures::StreamExt;
+use sessions::{Event, Session};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{info, warn};
