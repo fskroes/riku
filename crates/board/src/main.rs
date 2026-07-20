@@ -7,6 +7,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
+use board::runtime::RelayConfig;
 use board::{http, runtime};
 use tracing::info;
 
@@ -15,6 +16,7 @@ struct Config {
     root: PathBuf,
     codex_root: Option<PathBuf>,
     web_dist: PathBuf,
+    relay: Option<RelayConfig>,
 }
 
 fn parse_config() -> Config {
@@ -24,6 +26,10 @@ fn parse_config() -> Config {
     // home dir at all; the source then simply finds nothing.
     let mut codex_root = collector::codex_default_root();
     let mut web_dist = PathBuf::from("web/dist");
+    // Relay subscription (C7). Absent → local-only, zero-setup solo mode. The token
+    // may also come from the environment, matching the Collector and Relay.
+    let mut relay_url: Option<String> = None;
+    let mut token = std::env::var("RELAY_TOKEN").ok();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -51,10 +57,24 @@ fn parse_config() -> Config {
                     web_dist = PathBuf::from(v);
                 }
             }
+            "--relay" => relay_url = args.next(),
+            "--token" => token = args.next(),
             other => eprintln!("ignoring unknown argument '{other}'"),
         }
     }
-    Config { port, root, codex_root, web_dist }
+
+    // A Relay is subscribed to only when both a URL and a token are present; a URL
+    // without a token is a misconfiguration we refuse rather than connect insecurely.
+    let relay = match (relay_url, token.filter(|t| !t.is_empty())) {
+        (Some(url), Some(token)) => Some(RelayConfig { url, token }),
+        (Some(_), None) => {
+            eprintln!("--relay given without a token; pass --token <token> or set RELAY_TOKEN. Running local-only.");
+            None
+        }
+        _ => None,
+    };
+
+    Config { port, root, codex_root, web_dist, relay }
 }
 
 #[tokio::main]
@@ -66,7 +86,7 @@ async fn main() {
         .init();
 
     let config = parse_config();
-    let started = runtime::init(config.root, config.codex_root, config.web_dist);
+    let started = runtime::init(config.root, config.codex_root, config.web_dist, config.relay);
     let app = http::router(started.state.clone());
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port);

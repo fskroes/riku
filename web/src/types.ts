@@ -33,10 +33,22 @@ export interface Session {
   costUsd: number | null;
   // Live git `+/-` for the session's repo, or `null` when there is none.
   diff: DiffStat | null;
+  // The machine this session runs on — the host's name (C7). Stamped by the board
+  // (or a Collector) so every card shows which machine it is on; `null` only for a
+  // pre-C7 session that was never stamped.
+  machine: string | null;
 }
 
 export interface SessionsResponse {
   sessions: Session[];
+}
+
+// The board's Relay-subscription state (C7), for the topbar pill. `configured` is
+// whether a Relay was set up at all (else zero-setup solo mode); `connected` is
+// whether the board's subscription is currently live (else reconnecting).
+export interface RelayStatus {
+  configured: boolean;
+  connected: boolean;
 }
 
 // One project the Work Items view can show: a display name plus the directory
@@ -64,6 +76,8 @@ export interface LinkedSession {
   model: string | null;
   branch: string | null;
   status: Status;
+  // The machine the linked session is on (C7), shown on the Work Link chip.
+  machine: string | null;
 }
 
 export interface WorkItem {

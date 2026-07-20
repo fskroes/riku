@@ -9,6 +9,7 @@
 
 mod codex;
 mod deeplink;
+mod diff;
 mod fold;
 mod git;
 mod model;
@@ -23,6 +24,7 @@ mod work;
 use std::path::PathBuf;
 
 pub use deeplink::DeepLink;
+pub use diff::DiffCache;
 pub use fold::{Fold, Projection, ACTIVITY_WINDOW};
 pub use git::diff_stat;
 pub use model::{DiffStat, Session, Status, Tool};

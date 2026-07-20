@@ -1,11 +1,13 @@
 //! Live git diff enrichment for session cards (C5).
 //!
 //! A Session's `+/-` is live working-tree state, not transcript data, so the
-//! collector leaves [`Session::diff`] `None` and the board fills it here — the same
-//! seam as Work Links (the collector owns the plan; the board overlays live state).
-//! Enrichment is a decoration applied *at the output boundary* (the snapshot
-//! response and each outgoing SSE upsert), never stored back in the session store,
-//! so it can never perturb the store's change-detection.
+//! collector *projection* leaves [`Session::diff`] `None` and whichever process
+//! owns the repo fills it here: the board for local sessions, and — since C7 — the
+//! Collector for the sessions it pushes to the Relay (the repo lives on the
+//! Collector's machine, so only it can read the diff). Enrichment is a decoration
+//! applied *at the output boundary* (the snapshot response, each outgoing SSE
+//! upsert, each pushed event), never stored back in the session store, so it can
+//! never perturb the store's change-detection.
 //!
 //! Shelling out to `git` per card per event would be wasteful, so results are
 //! cached per directory with a short TTL: a fast-moving agent whose transcript
@@ -16,7 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use collector::{diff_stat, DiffStat, Event, Session};
+use crate::git::diff_stat;
+use crate::model::{DiffStat, Session};
+use crate::store::Event;
 
 /// How long a computed diff is reused before the next request recomputes it.
 const TTL: Duration = Duration::from_secs(10);
@@ -27,7 +31,7 @@ struct Entry {
 }
 
 /// A per-directory cache of git diff stats, safe to share across the HTTP handlers,
-/// the filesystem watcher, and the refresh task.
+/// the filesystem watcher, the refresh task, and the Collector's push loop.
 #[derive(Default)]
 pub struct DiffCache {
     inner: Mutex<HashMap<PathBuf, Entry>>,

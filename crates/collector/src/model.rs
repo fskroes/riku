@@ -2,11 +2,11 @@
 //! camelCase JSON.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The agent tool a Session came from. One Session Source per tool; carried to
 /// the UI so each card can show the right tool tile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tool {
     Claude,
@@ -17,7 +17,7 @@ pub enum Tool {
 /// simple; `Attention` carries its cause in [`Session::attention_reason`]. See
 /// CONTEXT.md, issue #2 (mtime-based Active↔Finished) and issue #7 (principled,
 /// source-agnostic Attention).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     /// Touched within the activity window and not needing a human.
@@ -33,7 +33,7 @@ pub enum Status {
 /// Why a Session is in [`Status::Attention`] — the two, and only two, causes the
 /// glossary allows. Serialized alongside `status` and populated only when the
 /// status is `Attention`. Staleness is never a cause (it is a card hint only).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AttentionReason {
     /// Waiting on a human — a pending approval or question.
@@ -45,7 +45,7 @@ pub enum AttentionReason {
 /// Lines added / removed in a session's repo — the card's `+/-` stat (C5). Live
 /// git working-tree state, not transcript-derived: filled in by the board (see
 /// `collector::git::diff_stat`), so the collector always leaves it `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffStat {
     pub added: u64,
@@ -57,7 +57,13 @@ pub struct DiffStat {
 /// `PartialEq` only (not `Eq`): `cost_usd` is an `f64`. The store compares
 /// successive projections with `!=` to suppress no-op events; cost is deterministic
 /// from tokens + model, so equal projections stay equal (no float churn).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// `Deserialize` as well as `Serialize` (C7): the same camelCase shape the board
+/// serves to the UI is the wire currency the Collector pushes to the Relay and the
+/// Relay fans out to a subscribing board. `diff` and `machine` are the enrichment
+/// fields a pre-C7 (or enrichment-less) sender may omit, so both `#[serde(default)]`
+/// to `None` — keeping the wire additive in both directions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     /// `sessionId` (uuid). Globally unique, so duplicate filename stems across
@@ -89,6 +95,17 @@ pub struct Session {
     /// subscription sessions, which pay no marginal per-token cost.
     pub cost_usd: Option<f64>,
     /// Lines added / removed in the session's repo (C5). Live git state, so the
-    /// collector leaves it `None`; the board fills it before serving/streaming.
+    /// collector *projection* leaves it `None`; whichever process owns the repo (the
+    /// board for local sessions, the Collector for remote ones) fills it before
+    /// serving/streaming. Omitted-on-wire tolerant (`default` → `None`).
+    #[serde(default)]
     pub diff: Option<DiffStat>,
+    /// The machine this Session runs on — the host's name (C7). Stamped at the
+    /// source: the board's own local runtime (and, later, a Collector on a remote
+    /// machine) sets it to the local hostname before the Session leaves the watcher,
+    /// so every card can show which machine an Agent Session is on. Like `diff`, the
+    /// collector projection leaves it `None`; a `None` still serializes cleanly,
+    /// keeping the field additive on the wire for local-only, pre-C7 boards.
+    #[serde(default)]
+    pub machine: Option<String>,
 }

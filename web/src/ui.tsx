@@ -28,6 +28,18 @@ export function Tile({ tool, small }: { tool: Tool; small?: boolean }) {
   );
 }
 
+/** The machine chip (C7): which machine an Agent Session is on. Shown on every
+ *  card so a mixed local + Relay board labels sessions consistently. Renders
+ *  nothing for an unstamped (pre-C7) session. */
+export function Machine({ host }: { host: string | null }) {
+  if (!host) return null;
+  return (
+    <span className="machine" title={`Running on ${host}`}>
+      <span className="mdot" /> {host}
+    </span>
+  );
+}
+
 /** The git `+/-` stat for a card (C5). Renders nothing when the session has no
  *  repo diff (e.g. its cwd is not a git checkout). */
 export function Diff({ diff }: { diff: DiffStat | null }) {
@@ -65,6 +77,7 @@ export function Meta({ session, showCost }: { session: Session; showCost: boolea
       </span>
       <Diff diff={session.diff} />
       <Cost usd={session.costUsd} show={showCost} />
+      <Machine host={session.machine} />
     </span>
   );
 }

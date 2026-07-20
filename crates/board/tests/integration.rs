@@ -166,7 +166,7 @@ async fn spawn_server_with(
     claude_root: PathBuf,
     codex_root: Option<PathBuf>,
 ) -> (SocketAddr, Started) {
-    let started = runtime::init(claude_root, codex_root, PathBuf::from("does-not-exist"));
+    let started = runtime::init(claude_root, codex_root, PathBuf::from("does-not-exist"), None);
     let app = http::router(started.state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -179,7 +179,7 @@ async fn spawn_server_with(
 /// Start the server with a [`RecordingLauncher`] wired in, returning the recorder
 /// so a test can assert which deep link `POST …/open` resolved.
 async fn spawn_server_recording(root: PathBuf) -> (SocketAddr, Started, Arc<Mutex<Vec<DeepLink>>>) {
-    let mut started = runtime::init(root, None, PathBuf::from("does-not-exist"));
+    let mut started = runtime::init(root, None, PathBuf::from("does-not-exist"), None);
     let recorder = RecordingLauncher::default();
     let opened = recorder.opened.clone();
     started.state.launcher = Arc::new(recorder);
@@ -237,6 +237,9 @@ async fn discovery_exposes_sessions_snapshot() {
     assert_eq!(sessions[0]["tokensIn"], 100);
     assert_eq!(sessions[0]["tokensOut"], 10);
     assert_eq!(sessions[0]["status"], "active");
+    // C7: a session served through the board path is stamped with this machine's
+    // name, so every card is labelled (no unlabelled "local" special case).
+    assert_eq!(sessions[0]["machine"], board::runtime::local_hostname());
 }
 
 #[tokio::test]
@@ -264,6 +267,9 @@ async fn append_emits_session_event() {
     assert!(buf.contains("event: session"), "expected a session event: {buf:?}");
     // Tokens accumulated across the appended line.
     assert!(buf.contains("\"tokensIn\":150"), "expected summed tokens: {buf:?}");
+    // C7: the streamed event is stamped with this machine's name, like the snapshot.
+    let stamp = format!("\"machine\":\"{}\"", board::runtime::local_hostname());
+    assert!(buf.contains(&stamp), "expected machine stamp {stamp:?} in: {buf:?}");
 }
 
 #[tokio::test]
@@ -686,6 +692,123 @@ async fn open_404s_for_an_unknown_session() {
         .status();
     assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
     assert!(opened.lock().unwrap().is_empty(), "nothing should have launched");
+}
+
+/// Start a Relay on an ephemeral port, returning its base URL.
+async fn spawn_relay(token: &str) -> String {
+    let app = relay::router(relay::RelayState::new(token));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// Start a board subscribed to `relay_url`, with an empty local root so only remote
+/// sessions can appear.
+async fn spawn_board_subscribed(relay_url: String, token: String) -> (SocketAddr, Started) {
+    let empty = tempfile::tempdir().unwrap();
+    let started = runtime::init(
+        empty.path().to_path_buf(),
+        None,
+        PathBuf::from("does-not-exist"),
+        Some(runtime::RelayConfig { url: relay_url, token }),
+    );
+    // Keep the empty root alive for the board's lifetime.
+    std::mem::forget(empty);
+    let app = http::router(started.state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, started)
+}
+
+#[tokio::test]
+async fn subscribed_board_surfaces_a_remote_session() {
+    let token = "team-token";
+    let relay_url = spawn_relay(token).await;
+
+    // A Collector on another "machine": a temp Claude root with one session.
+    let remote = tempfile::tempdir().unwrap();
+    write_transcript(
+        remote.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("remote-1", "hi from the desktop", 100, 10)],
+    );
+    tokio::spawn(relay::run_collector(relay::CollectorConfig {
+        relay_url: relay_url.clone(),
+        token: token.to_string(),
+        claude_root: remote.path().to_path_buf(),
+        codex_root: None,
+        machine: "remote-desk".to_string(),
+    }));
+
+    let (addr, _started) = spawn_board_subscribed(relay_url, token.to_string()).await;
+
+    // The remote card appears in the board's own /api/sessions snapshot (so a late
+    // browser sees it), labelled with the Collector's machine — proving the full
+    // Collector→Relay→board-subscription path and the local+remote merge.
+    let client = reqwest::Client::new();
+    let mut found = None;
+    for _ in 0..150 {
+        let body: serde_json::Value = client
+            .get(format!("http://{addr}/api/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(card) = body["sessions"]
+            .as_array()
+            .and_then(|a| a.iter().find(|s| s["id"] == "remote-1").cloned())
+        {
+            found = Some(card);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let card = found.expect("remote session should appear in the board snapshot");
+    assert_eq!(card["machine"], "remote-desk");
+    assert_eq!(card["tokensIn"], 100);
+
+    // And the board reports it is subscribed, for the topbar pill.
+    let relay_status: serde_json::Value = client
+        .get(format!("http://{addr}/api/relay"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(relay_status["configured"], true);
+    assert_eq!(relay_status["connected"], true);
+}
+
+#[tokio::test]
+async fn local_only_board_reports_no_relay() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_transcript(
+        tmp.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "hello", 10, 1)],
+    );
+    let (addr, _started) = spawn_server(tmp.path().to_path_buf()).await;
+
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/relay"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // Zero-setup solo mode: no Relay configured (User Story 1).
+    assert_eq!(body["configured"], false);
+    assert_eq!(body["connected"], false);
 }
 
 #[tokio::test]

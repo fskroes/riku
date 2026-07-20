@@ -1,7 +1,9 @@
 //! HTTP surface: the JSON snapshot, the SSE stream, and static UI serving.
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,6 +26,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::open::{is_safe_session_id, Launcher};
+use crate::runtime::{RelayStatus, RemoteSessions};
 
 /// Shared state handed to every request handler.
 #[derive(Clone)]
@@ -32,10 +35,18 @@ pub struct AppState {
     pub tx: broadcast::Sender<Event>,
     pub web_dist: PathBuf,
     /// Live git `+/-` per repo, filled onto session cards at the output boundary.
-    pub diff_cache: Arc<crate::diff::DiffCache>,
+    pub diff_cache: Arc<collector::DiffCache>,
     /// How the board opens a local session (a terminal launch); injectable so
     /// tests can record the deep link instead of spawning Terminal.
     pub launcher: Arc<dyn Launcher>,
+    /// This machine's name, stamped onto every local session and Work Link (C7) so
+    /// each card shows which machine it is on.
+    pub machine: Arc<str>,
+    /// Sessions relayed from other machines (C7), merged with local sessions at the
+    /// snapshot boundary. Empty on a local-only board.
+    pub remote: RemoteSessions,
+    /// The board's Relay-subscription state, for the topbar pill.
+    pub relay_status: Arc<RelayStatus>,
 }
 
 /// The plain-text message shown when the UI has not been built yet.
@@ -49,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/:id/open", post(open_session))
         .route("/api/events", get(events))
         .route("/api/work", get(work))
+        .route("/api/relay", get(relay_status))
         .with_state(state.clone());
 
     let dist = state.web_dist;
@@ -67,23 +79,55 @@ struct SessionsResponse {
     sessions: Vec<Session>,
 }
 
-/// `GET /api/sessions` — full snapshot; the client upserts by `id`. Each card is
-/// enriched with its live git `+/-` off the async workers (git can block).
+/// `GET /api/sessions` — full snapshot; the client upserts by `id`. Local cards are
+/// enriched with their live git `+/-` off the async workers (git can block) and
+/// stamped with this machine's name. Remote cards (C7) are merged in as-is — the
+/// Collector that relayed them already enriched and stamped them on their own
+/// machine — so a late-connecting browser sees the full multi-machine picture from
+/// its first fetch, not only once each remote session next updates.
 async fn sessions(State(state): State<AppState>) -> Json<SessionsResponse> {
     let mut sessions = {
         let store = state.store.lock().unwrap();
         store.snapshot(Utc::now())
     };
     let cache = state.diff_cache.clone();
-    let sessions = tokio::task::spawn_blocking(move || {
+    let machine = state.machine.clone();
+    let mut sessions = tokio::task::spawn_blocking(move || {
         for s in &mut sessions {
             cache.enrich(s);
+            crate::runtime::stamp_local(s, &machine);
         }
         sessions
     })
     .await
     .expect("diff enrichment does not panic");
+
+    // Merge in remote sessions, keeping a local session when an id somehow appears
+    // in both (this board also collects the same machine): local carries live git.
+    let local_ids: HashSet<String> = sessions.iter().map(|s| s.id.clone()).collect();
+    for s in state.remote.lock().unwrap().values() {
+        if !local_ids.contains(&s.id) {
+            sessions.push(s.clone());
+        }
+    }
     Json(SessionsResponse { sessions })
+}
+
+/// The board's Relay-subscription status, for the topbar pill (C7). `configured` is
+/// whether a Relay was set up at all (else zero-setup solo mode); `connected` is
+/// whether the subscription is currently live (else reconnecting).
+#[derive(Serialize)]
+struct RelayStatusResponse {
+    configured: bool,
+    connected: bool,
+}
+
+/// `GET /api/relay` — the current Relay subscription status.
+async fn relay_status(State(state): State<AppState>) -> Json<RelayStatusResponse> {
+    Json(RelayStatusResponse {
+        configured: state.relay_status.configured,
+        connected: state.relay_status.connected.load(Ordering::Relaxed),
+    })
 }
 
 /// `POST /api/sessions/:id/open` — deep-link into the local session (ADR 0002).
@@ -171,6 +215,10 @@ struct LinkedSession {
     model: Option<String>,
     branch: Option<String>,
     status: Status,
+    /// The machine the linked session is on (C7). A Work Link is always to a local
+    /// session, so this is the board's own host; carried so the chip in the Work
+    /// Items view labels it consistently with the same session's card on the Board.
+    machine: Option<String>,
 }
 
 /// `GET /api/work?cwd=<dir>` — the Work Items for the project rooted at `cwd`.
@@ -204,7 +252,7 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
         .items
         .into_iter()
         .map(|item| {
-            let session = link_session(&item, &candidates);
+            let session = link_session(&item, &candidates, &state.machine);
             WorkItemOut { item, session }
         })
         .collect();
@@ -219,7 +267,7 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
 
 /// The Work Link for `item`: the most-recently-active candidate session whose
 /// branch the item's id can be inferred from. `None` if nothing links.
-fn link_session(item: &WorkItem, candidates: &[Session]) -> Option<LinkedSession> {
+fn link_session(item: &WorkItem, candidates: &[Session], machine: &str) -> Option<LinkedSession> {
     candidates
         .iter()
         .filter(|s| s.branch.as_deref().is_some_and(|b| branch_links(b, &item.id)))
@@ -231,6 +279,9 @@ fn link_session(item: &WorkItem, candidates: &[Session]) -> Option<LinkedSession
             model: s.model.clone(),
             branch: s.branch.clone(),
             status: s.status,
+            // Snapshot candidates are unstamped; a Work Link is local, so use this
+            // machine's name (falling back to the session's own tag if present).
+            machine: s.machine.clone().or_else(|| Some(machine.to_string())),
         })
 }
 

@@ -1,12 +1,44 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ProjectRef, Session } from "./types";
+import type { ProjectRef, RelayStatus, Session } from "./types";
 import { useSessions } from "./useSessions";
+import { useRelay } from "./useRelay";
 import { useOpen } from "./useOpen";
 import { useNow } from "./ui";
 import { Board } from "./Board";
 import { WorkItems } from "./WorkItems";
 
 type View = "board" | "work";
+
+/** The number of distinct machines with a session on the board (C7) — the count the
+ *  Relay pill shows. Local cards carry this host; remote cards their own. */
+function machineCount(sessions: Session[]): number {
+  const hosts = new Set<string>();
+  for (const s of sessions) if (s.machine) hosts.add(s.machine);
+  return hosts.size;
+}
+
+/** The topbar Relay pill (variant A). Grey `local only` with no Relay (zero-setup
+ *  solo mode); green `relay ✓ · N machines` when subscribed and live; amber
+ *  `relay … · N machines` while the board is reconnecting to the Relay. */
+function RelayPill({ relay, machines }: { relay: RelayStatus; machines: number }) {
+  const label = `${machines} machine${machines === 1 ? "" : "s"}`;
+  if (!relay.configured) {
+    return (
+      <span className="relaypill off" title="No Relay configured — solo / local mode">
+        <span className="dot finished" /> local only
+      </span>
+    );
+  }
+  return (
+    <span
+      className="relaypill"
+      title={relay.connected ? "Subscribed to a Relay (C7)" : "Reconnecting to the Relay…"}
+    >
+      <span className={`dot ${relay.connected ? "live" : "attention"}`} />
+      relay {relay.connected ? "✓" : "…"} · <span className="rl">{label}</span>
+    </span>
+  );
+}
 
 /** The distinct projects behind the current sessions, one per directory (a
  *  project needs a `cwd` to look up its Work Items). Sorted for a stable menu. */
@@ -34,9 +66,12 @@ function useShowCost(): [boolean, () => void] {
 
 export default function App() {
   const { sessions, connected } = useSessions();
+  const relay = useRelay();
   const open = useOpen();
   const now = useNow(15000);
   const [showCost, toggleCost] = useShowCost();
+
+  const machines = useMemo(() => machineCount(sessions), [sessions]);
 
   const [view, setView] = useState<View>("board");
   // Cross-link focus: a session id to reveal on the Board, and a project +
@@ -109,6 +144,7 @@ export default function App() {
         >
           $ est. {showCost ? "on" : "off"}
         </button>
+        <RelayPill relay={relay} machines={machines} />
         <span className="remote" title={connected ? "Live stream connected" : "Reconnecting…"}>
           <span className={`dot ${connected ? "live" : "finished"}`} />
           {connected ? "connected" : "offline"}

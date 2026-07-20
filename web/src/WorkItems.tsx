@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { LinkedSession, ProjectRef, WorkItem, WorkStatus } from "./types";
 import { domId, shortModel, sourceLabel } from "./format";
-import { Tile, useFlash } from "./ui";
+import { Machine, Tile, useFlash } from "./ui";
 import { useWork } from "./useWork";
 
 const COLUMNS: { key: WorkStatus; label: string }[] = [
@@ -77,6 +77,7 @@ function SessionChip({ session, onOpen }: { session: LinkedSession; onOpen: Open
         <span className="repo">{session.project}</span>
         <span className="sub">
           {[shortModel(session.model), session.branch && `⑂ ${session.branch}`].filter(Boolean).join(" · ")}
+          <Machine host={session.machine} />
         </span>
       </span>
       <span className={`dot ${dot}`} style={{ marginLeft: 2 }} />

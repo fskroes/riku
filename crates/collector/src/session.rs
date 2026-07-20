@@ -252,6 +252,9 @@ impl FileState {
             attention_reason,
             cost_usd,
             diff: None,
+            // Stamped by the board's runtime (or a Collector) at the source, not by
+            // the transcript projection — see `Session::machine`.
+            machine: None,
         })
     }
 }
