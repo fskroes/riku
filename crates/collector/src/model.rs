@@ -13,18 +13,33 @@ pub enum Tool {
     Codex,
 }
 
-/// Board status for an Agent Session. See CONTEXT.md and issue #2 for the locked
-/// C1 heuristic (mtime-based; process liveness lands with C3).
+/// Board status for an Agent Session. The flat three-value shape keeps the client
+/// simple; `Attention` carries its cause in [`Session::attention_reason`]. See
+/// CONTEXT.md, issue #2 (mtime-based Active↔Finished) and issue #7 (principled,
+/// source-agnostic Attention).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
-    /// Touched within the activity window and not waiting on a human.
+    /// Touched within the activity window and not needing a human.
     Active,
-    /// The newest entry is an assistant turn holding an unanswered `tool_use`
-    /// (a pending permission / question) and the file is fresh.
+    /// The session needs a human: it is waiting on input or ended in an error.
+    /// The cause is in [`Session::attention_reason`]. Outranks staleness, so an
+    /// old-but-unanswered wait stays here rather than aging into `Finished`.
     Attention,
-    /// Untouched for at least the activity window.
+    /// Untouched for at least the activity window and not needing a human.
     Finished,
+}
+
+/// Why a Session is in [`Status::Attention`] — the two, and only two, causes the
+/// glossary allows. Serialized alongside `status` and populated only when the
+/// status is `Attention`. Staleness is never a cause (it is a card hint only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttentionReason {
+    /// Waiting on a human — a pending approval or question.
+    Waiting,
+    /// The session ended in an error (an abnormal / aborted ending).
+    Error,
 }
 
 /// One Agent Session — a single Claude Code transcript, projected for the UI.
@@ -52,4 +67,7 @@ pub struct Session {
     /// Latest entry timestamp (what the UI sorts a column by).
     pub last_event_at: DateTime<Utc>,
     pub status: Status,
+    /// Why the session needs a human, when `status == Attention`; `None` otherwise.
+    /// Explicit and typed so the UI never re-derives blocked-ness from raw fields.
+    pub attention_reason: Option<AttentionReason>,
 }

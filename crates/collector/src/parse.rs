@@ -22,6 +22,10 @@ struct RawEntry {
     git_branch: Option<String>,
     #[serde(rename = "isSidechain", default)]
     is_sidechain: bool,
+    /// Claude Code marks a synthetic API-error turn with this flag (model
+    /// `<synthetic>`); the newest such record raises Attention(Error).
+    #[serde(rename = "isApiErrorMessage", default)]
+    is_api_error_message: bool,
     message: Option<RawMessage>,
 }
 
@@ -29,6 +33,9 @@ struct RawEntry {
 struct RawMessage {
     model: Option<String>,
     usage: Option<Usage>,
+    /// Why the assistant turn stopped. `tool_use` means it ended to call a tool
+    /// (waiting on the human); `end_turn` / `stop_sequence` mean it finished.
+    stop_reason: Option<String>,
     #[serde(default)]
     content: Content,
 }
@@ -88,6 +95,10 @@ pub struct Entry {
     pub activity: Option<String>,
     /// `true` if this entry contains at least one `tool_use` block.
     pub has_tool_use: bool,
+    /// `message.stop_reason`, when present (assistant turns only).
+    pub stop_reason: Option<String>,
+    /// `true` for a synthetic `isApiErrorMessage` record.
+    pub is_api_error: bool,
 }
 
 /// Parse one transcript line.
@@ -110,16 +121,24 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
         _ => return Ok(None),
     };
 
-    let (model, input_tokens, output_tokens, activity, has_tool_use) = match raw.message {
+    let (model, input_tokens, output_tokens, activity, has_tool_use, stop_reason) = match raw.message
+    {
         Some(msg) => {
             let (usage_in, usage_out) = msg
                 .usage
                 .map(|u| (u.input_tokens, u.output_tokens))
                 .unwrap_or((0, 0));
             let (activity, has_tool_use) = summarize_content(&msg.content, is_assistant);
-            (msg.model, usage_in, usage_out, activity, has_tool_use)
+            (
+                msg.model,
+                usage_in,
+                usage_out,
+                activity,
+                has_tool_use,
+                msg.stop_reason,
+            )
         }
-        None => (None, 0, 0, None, false),
+        None => (None, 0, 0, None, false, None),
     };
 
     Ok(Some(Entry {
@@ -133,6 +152,8 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
         output_tokens,
         activity,
         has_tool_use,
+        stop_reason,
+        is_api_error: raw.is_api_error_message,
     }))
 }
 

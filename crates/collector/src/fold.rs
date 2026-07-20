@@ -5,11 +5,11 @@
 //!
 //! A [`Fold`] folds a file's lines into a [`Projection`]: the tool-agnostic inputs
 //! the shared builder needs. The status column is derived here from
-//! [`Projection::pending_input`] plus file mtime, so no source reimplements it.
+//! [`Projection::attention`] plus file mtime, so no source reimplements it.
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::model::{Status, Tool};
+use crate::model::{AttentionReason, Status, Tool};
 
 /// A session is Active/Attention while its file was touched within this window,
 /// and Finished once it goes quiet. Locked for C1 (mtime only); shared by every
@@ -52,19 +52,26 @@ pub struct Projection {
     /// Latest entry timestamp; falls back to the file mtime when a source records
     /// no timestamps.
     pub last_event_at: Option<DateTime<Utc>>,
-    /// The newest relevant entry leaves the session waiting on a human (Claude:
-    /// an unanswered `tool_use`). Codex has no verified approval-wait signal yet
-    /// (C3), so it always reports `false`.
-    pub pending_input: bool,
+    /// Why the session needs a human, per the newest relevant signal each source
+    /// decodes (Claude: an unanswered `tool_use` or an API error; Codex: an
+    /// aborted turn or a pending approval), or `None` if nothing does. This is the
+    /// only Attention input the shared rule reads.
+    pub attention: Option<AttentionReason>,
 }
 
-/// The shared status heuristic: quiet ⇒ Finished, else waiting-on-human ⇒
-/// Attention, else Active. Identical for every source.
-pub fn status_for(pending_input: bool, mtime: DateTime<Utc>, now: DateTime<Utc>) -> Status {
-    if now.signed_duration_since(mtime) >= ACTIVITY_WINDOW {
-        Status::Finished
-    } else if pending_input {
+/// The shared status rule. Attention outranks staleness: a present attention
+/// reason wins regardless of the quiet window (so an old, still-unanswered wait
+/// never ages into Finished); otherwise a quiet file is Finished; otherwise
+/// Active. Staleness alone never produces Attention. Identical for every source.
+pub fn status_for(
+    attention: Option<AttentionReason>,
+    mtime: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Status {
+    if attention.is_some() {
         Status::Attention
+    } else if now.signed_duration_since(mtime) >= ACTIVITY_WINDOW {
+        Status::Finished
     } else {
         Status::Active
     }

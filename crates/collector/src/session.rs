@@ -10,21 +10,36 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use crate::fold::{project_from_cwd, status_for, Fold, Projection};
-use crate::model::{Session, Tool};
+use crate::model::{AttentionReason, Session, Status, Tool};
 use crate::parse::{parse_entry, Entry};
 
-/// Whether the newest relevant Claude entry seen so far is an assistant turn
-/// holding an unanswered `tool_use` (i.e. Claude is waiting on the human).
+/// The Attention-relevant classification of the newest relevant Claude entry seen
+/// so far. Because entries fold in file order, the last one to set this wins, so
+/// a `tool_result` or a fresh turn after an error/approval naturally clears it
+/// (recovery needs no extra bookkeeping).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LastKind {
     /// No relevant entry yet.
     None,
-    /// Newest entry is an assistant turn whose content contains a `tool_use`
-    /// block; since it is the newest entry, nothing answers it later.
-    AssistantPendingTool,
-    /// Newest entry is anything else (a user turn, an assistant turn with no
-    /// tool call, ...).
+    /// Newest entry is an assistant turn that ended to call a tool
+    /// (`stop_reason: tool_use`, or a `tool_use` block when `stop_reason` is
+    /// absent) — i.e. Claude is waiting on the human, and nothing answers it later.
+    AwaitingTool,
+    /// Newest relevant entry is an API-error record (`isApiErrorMessage: true`).
+    ApiError,
+    /// Newest entry is anything else (a user turn, an assistant turn that ended
+    /// cleanly, ...) — the session needs nothing from the human.
     Other,
+}
+
+impl LastKind {
+    fn attention(self) -> Option<AttentionReason> {
+        match self {
+            LastKind::AwaitingTool => Some(AttentionReason::Waiting),
+            LastKind::ApiError => Some(AttentionReason::Error),
+            LastKind::None | LastKind::Other => None,
+        }
+    }
 }
 
 /// The Claude Code fold: a running projection of a single transcript. Fold entries
@@ -85,21 +100,34 @@ impl Accumulator {
             }
         }
 
-        if entry.is_assistant {
+        if entry.is_api_error {
+            // A synthetic API-error record (model `<synthetic>`, no real content):
+            // record the error but never let it overwrite the card's model/activity.
+            self.last_kind = LastKind::ApiError;
+        } else if entry.is_assistant {
             if entry.model.is_some() {
                 self.model = entry.model;
             }
             if entry.activity.is_some() {
                 self.activity = entry.activity;
             }
-            self.last_kind = if entry.has_tool_use {
-                LastKind::AssistantPendingTool
+            // Waiting-on-human = the turn ended to call a tool. Prefer the explicit
+            // `stop_reason`; fall back to the presence of a `tool_use` block only
+            // when `stop_reason` is absent. This stops a mid-run tool_use or a
+            // cleanly-ended (`end_turn`) turn from masquerading as a wait.
+            let awaiting = match entry.stop_reason.as_deref() {
+                Some("tool_use") => true,
+                Some(_) => false,
+                None => entry.has_tool_use,
+            };
+            self.last_kind = if awaiting {
+                LastKind::AwaitingTool
             } else {
                 LastKind::Other
             };
         } else {
-            // A user turn (e.g. a tool_result answering the previous tool_use)
-            // clears any pending-attention state.
+            // A user turn (e.g. a tool_result answering the previous tool_use, or
+            // any activity resuming after an error) clears the attention state.
             self.last_kind = LastKind::Other;
         }
     }
@@ -140,7 +168,7 @@ impl Fold for Accumulator {
             tokens_out: self.tokens_out,
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
-            pending_input: self.last_kind == LastKind::AssistantPendingTool,
+            attention: self.last_kind.attention(),
         })
     }
 }
@@ -201,7 +229,10 @@ impl FileState {
     /// Returns `None` if the fold has no projection yet.
     pub fn build(&self, mtime: DateTime<Utc>, now: DateTime<Utc>) -> Option<Session> {
         let p = self.fold.projection()?;
-        let status = status_for(p.pending_input, mtime, now);
+        let status = status_for(p.attention, mtime, now);
+        // Carry the reason only when the status is actually Attention, so the two
+        // can never disagree on the wire.
+        let attention_reason = (status == Status::Attention).then_some(p.attention).flatten();
         Some(Session {
             id: p.id,
             tool: p.tool,
@@ -214,6 +245,7 @@ impl FileState {
             activity: p.activity,
             last_event_at: p.last_event_at.unwrap_or(mtime),
             status,
+            attention_reason,
         })
     }
 }
@@ -305,6 +337,90 @@ mod tests {
         let now = ts("2026-07-19T10:05:00Z");
         let s = fs.build(ts("2026-07-19T10:04:00Z"), now).unwrap();
         assert_eq!(s.status, Status::Active);
+    }
+
+    /// An assistant turn that ended to call a tool, carrying an explicit
+    /// `stop_reason: tool_use`.
+    fn assistant_tool_use(id: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","sessionId":"{id}","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{{"model":"m","stop_reason":"tool_use","content":[{{"type":"tool_use","id":"toolu_1","name":"Bash"}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn stop_reason_tool_use_is_attention_waiting() {
+        let mut fs = claude();
+        let mut data = assistant_tool_use("s1");
+        data.push('\n');
+        fs.feed(data.as_bytes());
+
+        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        assert_eq!(s.status, Status::Attention);
+        assert_eq!(s.attention_reason, Some(AttentionReason::Waiting));
+    }
+
+    #[test]
+    fn end_turn_with_a_tool_use_block_is_not_attention() {
+        // stop_reason wins over the mere presence of a tool_use block: a turn that
+        // ended cleanly is not a wait, even if it references a tool.
+        let mut fs = claude();
+        let line = r#"{"type":"assistant","sessionId":"s1","cwd":"/a/foo","message":{"model":"m","stop_reason":"end_turn","content":[{"type":"tool_use","id":"t1","name":"Bash"},{"type":"text","text":"done"}]}}"#;
+        let mut data = line.to_string();
+        data.push('\n');
+        fs.feed(data.as_bytes());
+
+        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        assert_eq!(s.status, Status::Active);
+        assert_eq!(s.attention_reason, None);
+    }
+
+    #[test]
+    fn api_error_is_attention_error_and_preserves_model() {
+        let mut fs = claude();
+        // A real assistant turn, then a synthetic API-error record.
+        let mut data = assistant("s1", "hello", 10, 2);
+        data.push('\n');
+        data.push_str(r#"{"type":"assistant","isApiErrorMessage":true,"sessionId":"s1","cwd":"/a/foo","message":{"model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: overloaded"}]}}"#);
+        data.push('\n');
+        fs.feed(data.as_bytes());
+
+        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        assert_eq!(s.status, Status::Attention);
+        assert_eq!(s.attention_reason, Some(AttentionReason::Error));
+        // The synthetic record must not clobber the card's real model/activity.
+        assert_eq!(s.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(s.activity.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn old_unanswered_wait_stays_attention_not_finished() {
+        // Precedence: a present attention reason outranks staleness (story 6).
+        let mut fs = claude();
+        let mut data = assistant_tool_use("s1");
+        data.push('\n');
+        fs.feed(data.as_bytes());
+
+        // File quiet for 30 min (well past ACTIVITY_WINDOW), yet still waiting.
+        let s = fs.build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z")).unwrap();
+        assert_eq!(s.status, Status::Attention);
+        assert_eq!(s.attention_reason, Some(AttentionReason::Waiting));
+    }
+
+    #[test]
+    fn activity_after_api_error_clears_attention() {
+        // Recovery (story 19): a fresh turn after an error leaves the error state.
+        let mut fs = claude();
+        let mut data =
+            r#"{"type":"assistant","isApiErrorMessage":true,"sessionId":"s1","cwd":"/a/foo","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error"}]}}"#
+                .to_string();
+        data.push('\n');
+        data.push_str(&assistant("s1", "resumed", 5, 1));
+        data.push('\n');
+        fs.feed(data.as_bytes());
+
+        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        assert_eq!(s.status, Status::Active);
+        assert_eq!(s.attention_reason, None);
     }
 
     #[test]

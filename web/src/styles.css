@@ -67,6 +67,7 @@ body {
 .view-board .alert .r1 { display: flex; align-items: center; gap: 10px; }
 .view-board .alert .name { font-weight: 600; font-size: 15px; }
 .view-board .alert .reason { font-weight: 600; margin-top: 8px; }
+.view-board .alert .reason .detail { font-weight: 400; color: var(--ink-muted); }
 .view-board .alert .cta { align-self: center; font: 500 12px var(--font-ui); padding: 8px 14px; border-radius: var(--r-md); background: var(--surface-raised); box-shadow: var(--card-edge); color: var(--ink); white-space: nowrap; cursor: pointer; border: 0; }
 .view-board .row { display: grid; grid-template-columns: auto 150px 1fr auto; gap: 14px; align-items: center; padding: 11px 14px; border-radius: var(--r-md); transition: background var(--t-fast); }
 .view-board .row:hover { background: var(--surface); }
