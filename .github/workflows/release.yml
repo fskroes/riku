@@ -5,23 +5,29 @@ on:
     tags:
       - "v*"
 
+# Least privilege by default: the workflow gets read-only repository access and each
+# job re-declares exactly what it needs. Only the publish job is granted write
+# (issue #17, User Stories 17, 18). To update a pinned Action, bump both the SHA and
+# the trailing version comment together (docs/relay-deployment.md § Action pinning).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   plan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       manifest: ${{ steps.plan.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable (rolling branch)
       - name: Build embedded UI
         working-directory: web
         run: |
@@ -36,6 +42,8 @@ jobs:
 
   build-local-artifacts:
     needs: plan
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -45,13 +53,13 @@ jobs:
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable (rolling branch)
         with:
           targets: ${{ matrix.target }}
       - name: Build embedded UI
@@ -63,25 +71,32 @@ jobs:
         run: cargo install cargo-dist --locked --version 0.32.0
       - name: Build artifacts
         run: cargo dist build --artifacts=local --target=${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: artifacts-${{ matrix.target }}
           path: target/distrib/*
 
+  # The only privileged job. It consumes the artifacts the read-only build jobs
+  # produced and is the sole holder of the Homebrew tap credential, which is exposed
+  # only to the publish command's environment (issue #17, User Stories 18, 19).
   host-and-publish:
     needs: [plan, build-local-artifacts]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: target/distrib
           pattern: artifacts-*
           merge-multiple: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable (rolling branch)
       - name: Install cargo-dist
         run: cargo install cargo-dist --locked --version 0.32.0
       - name: Publish GitHub Release and Homebrew formula
         env:
+          # A fine-grained token restricted to fskroes/homebrew-riku, scoped to this
+          # step alone (docs/relay-deployment.md § Homebrew tap token).
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: cargo dist host --steps=create,upload,release,announce,homebrew

@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 /// Persistent values that can be shared by the Board and Collector. Parsing and
 /// serializing stay in this pure module; filesystem access lives in `config`.
@@ -38,7 +39,14 @@ impl Config {
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
         match key {
-            "relay.url" => self.relay.url = Some(value.to_string()),
+            "relay.url" => {
+                // Refuse to persist a URL that violates the transport-security
+                // policy, so an unattended Collector never reads back an unsafe
+                // Config (User Story 7). The same check runs at resolution, so a
+                // Config written before this rule still fails clearly on use.
+                validate_relay_url(value)?;
+                self.relay.url = Some(value.to_string());
+            }
             "relay.token" => self.relay.token = Some(value.to_string()),
             "paths.root" => self.paths.root = Some(value.to_string()),
             "paths.codex_root" => self.paths.codex_root = Some(value.to_string()),
@@ -138,7 +146,14 @@ fn resolve_board(
         }
         index += 1;
     }
-    let url = resolve_precedence(relay_url, env, "RELAY_URL", config.relay.url.clone());
+    let url = resolve_precedence(relay_url, env, "RELAY_URL", config.relay.url.clone())
+        .filter(|value| !value.is_empty());
+    if let Some(url) = &url {
+        // Validate the resolved URL regardless of its source (flag, environment, or
+        // Config), so precedence can never smuggle in an insecure value and a saved
+        // remote http:// Config fails clearly instead of leaking (User Stories 6, 8).
+        validate_relay_url(url)?;
+    }
     let token = resolve_precedence(token, env, "RELAY_TOKEN", config.relay.token.clone());
     let relay_missing_token = url.is_some() && token.as_deref().is_none_or(str::is_empty);
     let relay = match (url, token.filter(|value| !value.is_empty())) {
@@ -186,7 +201,10 @@ fn resolve_collect(
     }
     let relay_url = resolve_precedence(relay_url, env, "RELAY_URL", config.relay.url.clone())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "a Relay URL is required: pass --relay <http://host:port>, set RELAY_URL, or run 'riku config set relay.url …'".to_string())?;
+        .ok_or_else(|| "a Relay URL is required: pass --relay <https://host>, set RELAY_URL, or run 'riku config set relay.url …'".to_string())?;
+    // The Collector runs unattended, so an insecure URL must fail here rather than
+    // stream this machine's Sessions and token over plaintext (User Stories 1, 8).
+    validate_relay_url(&relay_url)?;
     let token = resolve_precedence(token, env, "RELAY_TOKEN", config.relay.token.clone())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "a shared token is required: pass --token <token>, set RELAY_TOKEN, or run 'riku config set relay.token …'".to_string())?;
@@ -211,7 +229,10 @@ fn resolve_relay(
     env: &BTreeMap<String, String>,
     config: &Config,
 ) -> Result<ResolvedCommand, String> {
-    let mut addr = "0.0.0.0:4343".parse().expect("valid Relay default address");
+    // `riku relay` is a loopback-only development component: a real multi-machine
+    // Relay is a loopback riku process behind a TLS-terminating reverse proxy (User
+    // Stories 10, 11). Default to loopback and refuse a non-loopback bind below.
+    let mut addr: SocketAddr = "127.0.0.1:4343".parse().expect("valid Relay default address");
     let mut token = None;
     let mut index = 0;
     while index < args.len() {
@@ -220,7 +241,7 @@ fn resolve_relay(
                 addr = next_flag_value(args, &mut index, "--addr")?
                     .parse()
                     .map_err(|_| {
-                        "--addr must be a socket address such as 0.0.0.0:4343".to_string()
+                        "--addr must be a socket address such as 127.0.0.1:4343".to_string()
                     })?
             }
             "--token" => token = Some(next_flag_value(args, &mut index, "--token")?),
@@ -228,6 +249,7 @@ fn resolve_relay(
         }
         index += 1;
     }
+    validate_relay_bind(&addr)?;
     let token = resolve_precedence(token, env, "RELAY_TOKEN", config.relay.token.clone())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "a shared token is required: pass --token <token>, set RELAY_TOKEN, or run 'riku config set relay.token …'".to_string())?;
@@ -268,6 +290,60 @@ fn resolve_precedence(
     flag.or_else(|| env.get(env_key).cloned()).or(file)
 }
 
+/// Enforce riku's Relay transport-security policy on a fully resolved URL.
+///
+/// HTTPS is always allowed. Plain `http://` is allowed only to a loopback host —
+/// `localhost`, an IPv4 loopback address (`127.0.0.0/8`), or the IPv6 loopback
+/// (`::1`) — the same-machine development topology. Every other value is refused so
+/// the shared token and the Agent Session stream never cross a network in cleartext:
+/// other schemes, a missing host, embedded userinfo, and any non-loopback `http://`.
+/// The error always names the safe HTTPS alternative (User Story 5).
+fn validate_relay_url(raw: &str) -> Result<(), String> {
+    let url = Url::parse(raw).map_err(|error| {
+        format!("invalid Relay URL '{raw}': {error}. Use an https:// URL, or http://localhost for local development.")
+    })?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!(
+            "Relay URL '{raw}' must not embed credentials; pass the shared token via --token, RELAY_TOKEN, or 'riku config set relay.token …'."
+        ));
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_host(url.host()) => Ok(()),
+        "http" => Err(format!(
+            "insecure Relay URL '{raw}': plain http:// is allowed only for a loopback host (localhost, 127.0.0.1, or [::1]). Use https://{} for a remote Relay, or run the Relay behind a TLS-terminating proxy.",
+            url.host_str().unwrap_or("<host>")
+        )),
+        scheme => Err(format!(
+            "unsupported Relay URL scheme '{scheme}' in '{raw}': use https:// (or http://localhost for local development)."
+        )),
+    }
+}
+
+/// Whether a URL host is exactly a loopback host — the only case where plain
+/// `http://` is permitted.
+fn is_loopback_host(host: Option<Host<&str>>) -> bool {
+    match host {
+        Some(Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(Host::Ipv6(addr)) => addr.is_loopback(),
+        None => false,
+    }
+}
+
+/// `riku relay` is a local development server; it must bind a loopback address so it
+/// cannot accidentally become a plaintext public service (User Story 10). A
+/// multi-machine Relay is a loopback riku process behind an external TLS proxy.
+fn validate_relay_bind(addr: &SocketAddr) -> Result<(), String> {
+    if addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(format!(
+            "'riku relay' binds a loopback address only, but '{addr}' is not loopback. A multi-machine Relay runs as a loopback riku process behind a TLS-terminating reverse proxy (see docs/relay-deployment.md). Use --addr 127.0.0.1:<port> to choose another loopback port."
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -287,7 +363,7 @@ mod tests {
             resolve(&[], &env(&[]), None),
             Ok(ResolvedCommand::Board(_))
         ));
-        let configured = "[relay]\nurl = 'http://hub'\ntoken = 'secret'\n";
+        let configured = "[relay]\nurl = 'https://hub'\ntoken = 'secret'\n";
         assert!(matches!(
             resolve(&["collect".into()], &env(&[]), Some(configured)),
             Ok(ResolvedCommand::Collect(_))
@@ -302,7 +378,7 @@ mod tests {
                     "config".into(),
                     "set".into(),
                     "relay.url".into(),
-                    "http://hub".into()
+                    "https://hub".into()
                 ],
                 &env(&[]),
                 None
@@ -331,14 +407,14 @@ mod tests {
             &[
                 "collect".into(),
                 "--relay".into(),
-                "http://flag".into(),
+                "https://flag".into(),
                 "--token".into(),
                 "flag-token".into(),
                 "--root".into(),
                 "/flag/root".into(),
             ],
             &env(&[
-                ("RELAY_URL", "http://environment"),
+                ("RELAY_URL", "https://environment"),
                 ("RELAY_TOKEN", "environment-token"),
                 ("RIKU_ROOT", "/environment/root"),
             ]),
@@ -349,7 +425,7 @@ mod tests {
         let ResolvedCommand::Collect(options) = command else {
             panic!("expected collector")
         };
-        assert_eq!(options.relay_url, "http://flag");
+        assert_eq!(options.relay_url, "https://flag");
         assert_eq!(options.token, "flag-token");
         assert_eq!(
             options.root.as_deref(),
@@ -359,11 +435,11 @@ mod tests {
 
     #[test]
     fn environment_beats_config_when_no_flag_is_supplied() {
-        let file = "[relay]\nurl = 'http://saved'\ntoken = 'saved-token'\n";
+        let file = "[relay]\nurl = 'https://saved'\ntoken = 'saved-token'\n";
         let command = resolve(
             &["collect".into()],
             &env(&[
-                ("RELAY_URL", "http://environment"),
+                ("RELAY_URL", "https://environment"),
                 ("RELAY_TOKEN", "environment-token"),
             ]),
             Some(file),
@@ -372,7 +448,7 @@ mod tests {
         let ResolvedCommand::Collect(options) = command else {
             panic!("expected collector")
         };
-        assert_eq!(options.relay_url, "http://environment");
+        assert_eq!(options.relay_url, "https://environment");
         assert_eq!(options.token, "environment-token");
     }
 
@@ -382,7 +458,7 @@ mod tests {
             .unwrap_err()
             .contains("Relay URL is required"));
         assert!(resolve(
-            &["collect".into(), "--relay".into(), "http://hub".into()],
+            &["collect".into(), "--relay".into(), "https://hub".into()],
             &env(&[]),
             None
         )
@@ -393,10 +469,121 @@ mod tests {
     #[test]
     fn config_serialization_round_trips() {
         let mut config = Config::default();
-        config.set("relay.url", "http://hub").unwrap();
+        config.set("relay.url", "https://hub").unwrap();
         config.set("relay.token", "secret").unwrap();
         config.set("paths.root", "/sessions").unwrap();
         let parsed = Config::parse(&config.serialize().unwrap()).unwrap();
         assert_eq!(parsed, config);
+    }
+
+    /// The resolved Collector URL for a given source, or the resolution error.
+    fn collect_url(flag: Option<&str>, env_url: Option<&str>, config_url: Option<&str>) -> Result<String, String> {
+        let mut args = vec!["collect".to_string(), "--token".into(), "t".into()];
+        if let Some(flag) = flag {
+            args.push("--relay".into());
+            args.push(flag.into());
+        }
+        let env = match env_url {
+            Some(url) => env(&[("RELAY_URL", url)]),
+            None => env(&[]),
+        };
+        let config = config_url.map(|url| format!("[relay]\nurl = '{url}'\n"));
+        match resolve(&args, &env, config.as_deref())? {
+            ResolvedCommand::Collect(options) => Ok(options.relay_url),
+            other => panic!("expected collector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepts_https_and_loopback_http_from_every_source() {
+        // HTTPS is always allowed; loopback http:// is allowed for local development
+        // (User Stories 1, 4, 9). The policy holds identically for flag, environment,
+        // and Config so precedence never changes the security decision (User Story 8).
+        for url in [
+            "https://hub.example.com:4343",
+            "http://localhost:4343",
+            "http://127.0.0.1:4343",
+            "http://[::1]:4343",
+        ] {
+            assert_eq!(collect_url(Some(url), None, None).as_deref(), Ok(url), "flag {url}");
+            assert_eq!(collect_url(None, Some(url), None).as_deref(), Ok(url), "env {url}");
+            assert_eq!(collect_url(None, None, Some(url)).as_deref(), Ok(url), "config {url}");
+        }
+    }
+
+    #[test]
+    fn rejects_non_loopback_http_from_every_source() {
+        // A remote plaintext URL must fail no matter how it arrives, and the error
+        // must name the safe HTTPS alternative (User Stories 3, 5, 6, 8).
+        let url = "http://hub.example.com:4343";
+        for resolved in [
+            collect_url(Some(url), None, None),
+            collect_url(None, Some(url), None),
+            collect_url(None, None, Some(url)), // a saved unsafe Config fails at resolution
+        ] {
+            let error = resolved.unwrap_err();
+            assert!(error.contains("insecure Relay URL"), "unexpected error: {error}");
+            assert!(error.contains("https://hub.example.com"), "error should name the HTTPS fix: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_schemes_and_embedded_credentials() {
+        assert!(collect_url(Some("ftp://hub"), None, None)
+            .unwrap_err()
+            .contains("unsupported Relay URL scheme"));
+        assert!(collect_url(Some("not a url"), None, None)
+            .unwrap_err()
+            .contains("invalid Relay URL"));
+        // A wss:// (websocket) or file:// scheme is not http(s) either.
+        assert!(collect_url(Some("wss://hub"), None, None).is_err());
+        // Userinfo would carry a secret in the URL; refuse it outright.
+        assert!(collect_url(Some("https://user:pass@hub"), None, None)
+            .unwrap_err()
+            .contains("must not embed credentials"));
+    }
+
+    #[test]
+    fn board_rejects_a_saved_remote_plaintext_relay() {
+        // Upgrading with an old remote http:// Config must fail clearly for the Board
+        // too, never silently keep streaming the token in plaintext (User Story 6).
+        let config = "[relay]\nurl = 'http://hub.example.com'\ntoken = 'secret'\n";
+        let error = resolve(&[], &env(&[]), Some(config)).unwrap_err();
+        assert!(error.contains("insecure Relay URL"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn config_set_refuses_to_persist_a_remote_plaintext_url() {
+        // `config set relay.url` is the write path for an unattended Collector: it must
+        // accept secure/loopback values and refuse a remote plaintext one (User Story 7).
+        assert!(Config::default().set("relay.url", "https://hub").is_ok());
+        assert!(Config::default().set("relay.url", "http://localhost:4343").is_ok());
+        let error = Config::default()
+            .set("relay.url", "http://hub.example.com")
+            .unwrap_err();
+        assert!(error.contains("insecure Relay URL"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn relay_binds_loopback_by_default_and_refuses_a_public_bind() {
+        // The default bind is loopback so `riku relay` cannot accidentally become a
+        // plaintext public service (User Story 10).
+        let ResolvedCommand::Relay(options) = resolve(
+            &["relay".into(), "--token".into(), "t".into()],
+            &env(&[]),
+            None,
+        )
+        .unwrap() else {
+            panic!("expected relay")
+        };
+        assert!(options.addr.ip().is_loopback(), "default bind must be loopback: {}", options.addr);
+
+        let error = resolve(
+            &["relay".into(), "--addr".into(), "0.0.0.0:4343".into(), "--token".into(), "t".into()],
+            &env(&[]),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("loopback"), "unexpected error: {error}");
     }
 }

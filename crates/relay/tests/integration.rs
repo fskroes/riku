@@ -8,6 +8,7 @@
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -193,6 +194,64 @@ async fn rejects_a_wrong_token_before_any_state_flows() {
         .await
         .unwrap();
     assert_eq!(sub.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// Bind a TLS listener on an ephemeral loopback port that presents a self-signed
+/// certificate and completes the handshake (then drops the connection). This is a
+/// certificate the system trust store does not know, so a client that verifies
+/// certificates normally must reject it.
+async fn spawn_self_signed_tls_server() -> SocketAddr {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let cert_der = cert.cert.der().clone();
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()),
+    );
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let _ = acceptor.accept(stream).await;
+            });
+        }
+    });
+    addr
+}
+
+/// The transport contract: the HTTP clients the Collector and board use
+/// (`reqwest::Client::new()`) verify TLS certificates by default, so encrypted
+/// transport cannot be silently downgraded (issue #17, User Story 12). A request to
+/// an https:// endpoint serving an untrusted self-signed certificate fails with a
+/// certificate error rather than connecting.
+#[tokio::test]
+async fn https_clients_verify_certificates_by_default() {
+    // The process-wide crypto provider the rustls ServerConfig builder needs.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let addr = spawn_self_signed_tls_server().await;
+    let url = format!("https://localhost:{}/health", addr.port());
+
+    let error = reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .expect_err("an untrusted self-signed certificate must be rejected");
+    let rendered = format!("{error:?} {error}").to_lowercase();
+    assert!(
+        rendered.contains("certificate") || rendered.contains("unknownissuer") || rendered.contains("tls"),
+        "expected a certificate verification failure, got: {rendered}"
+    );
 }
 
 /// Build one Claude Code assistant transcript line.

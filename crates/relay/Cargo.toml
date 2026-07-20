@@ -3,7 +3,6 @@ name = "relay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-autobins = false
 
 [dependencies]
 collector = { path = "../collector" }
@@ -16,11 +15,17 @@ tokio = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = "0.7"
 futures = "0.3"
-hostname = "0.4"
-# HTTP client for the Collector's push and the board's subscription. No TLS
-# feature: the Relay speaks plain HTTP (TLS termination is an operator concern,
-# out of scope for this ticket — see ADR 0007).
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+# HTTP client for the Collector's push and the board's subscription. `rustls-tls`
+# gives encrypted transport with normal certificate + hostname verification for a
+# remote https:// Relay, with no OpenSSL system dependency in the shipped binary.
+# Verification is never disabled: no `danger_accept_invalid_*` path exists (issue
+# #17 transport contract). Plain http:// remains available for a loopback Relay
+# behind a TLS-terminating proxy (see docs/relay-deployment.md).
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"
+# A self-signed HTTPS server to prove the client verifies certificates by default.
+rcgen = "0.13"
+rustls = "0.23"
+tokio-rustls = "0.26"
