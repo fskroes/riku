@@ -232,11 +232,14 @@ impl FileState {
         let status = status_for(p.attention, mtime, now);
         // Carry the reason only when the status is actually Attention, so the two
         // can never disagree on the wire.
-        let attention_reason = (status == Status::Attention).then_some(p.attention).flatten();
+        let attention_reason = (status == Status::Attention)
+            .then_some(p.attention)
+            .flatten();
         // Cost is pure (tokens × the model's list price); computed before `p.model`
         // is moved into the session below. The live git `diff` is out-of-transcript,
         // so the board fills it and the collector leaves it None.
-        let cost_usd = crate::pricing::estimate_cost_usd(p.model.as_deref(), p.tokens_in, p.tokens_out);
+        let cost_usd =
+            crate::pricing::estimate_cost_usd(p.model.as_deref(), p.tokens_in, p.tokens_out);
         Some(Session {
             id: p.id,
             tool: p.tool,
@@ -292,7 +295,9 @@ mod tests {
         data.push('\n');
         fs.feed(data.as_bytes());
 
-        let s = fs.build(ts("2026-07-19T10:01:00Z"), ts("2026-07-19T10:02:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:01:00Z"), ts("2026-07-19T10:02:00Z"))
+            .unwrap();
         assert_eq!(s.id, "s1");
         assert_eq!(s.tool, Tool::Claude);
         assert_eq!(s.project, "foo");
@@ -313,7 +318,9 @@ mod tests {
         data.push('\n');
         fs.feed(data.as_bytes());
 
-        let s = fs.build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
+            .unwrap();
         assert_eq!(s.id, "main");
         assert_eq!(s.tokens_in, 5); // sidechain 999 not counted
         assert_eq!(s.tokens_out, 1);
@@ -363,7 +370,9 @@ mod tests {
         data.push('\n');
         fs.feed(data.as_bytes());
 
-        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
         assert_eq!(s.status, Status::Attention);
         assert_eq!(s.attention_reason, Some(AttentionReason::Waiting));
     }
@@ -378,7 +387,9 @@ mod tests {
         data.push('\n');
         fs.feed(data.as_bytes());
 
-        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
         assert_eq!(s.status, Status::Active);
         assert_eq!(s.attention_reason, None);
     }
@@ -393,7 +404,9 @@ mod tests {
         data.push('\n');
         fs.feed(data.as_bytes());
 
-        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
         assert_eq!(s.status, Status::Attention);
         assert_eq!(s.attention_reason, Some(AttentionReason::Error));
         // The synthetic record must not clobber the card's real model/activity.
@@ -410,7 +423,9 @@ mod tests {
         fs.feed(data.as_bytes());
 
         // File quiet for 30 min (well past ACTIVITY_WINDOW), yet still waiting.
-        let s = fs.build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z"))
+            .unwrap();
         assert_eq!(s.status, Status::Attention);
         assert_eq!(s.attention_reason, Some(AttentionReason::Waiting));
     }
@@ -427,7 +442,9 @@ mod tests {
         data.push('\n');
         fs.feed(data.as_bytes());
 
-        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
         assert_eq!(s.status, Status::Active);
         assert_eq!(s.attention_reason, None);
     }
@@ -453,7 +470,9 @@ mod tests {
         data.push('\n');
         fs.feed(data.as_bytes());
 
-        let s = fs.build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
+            .unwrap();
         assert_eq!(s.id, "s1");
         assert_eq!(s.tokens_in, 3); // survived the bad line
     }
@@ -470,7 +489,9 @@ mod tests {
 
         // Offset stops at the end of the complete line; the fragment is deferred.
         assert_eq!(fs.offset(), complete_len);
-        let s = fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .unwrap();
         assert_eq!(s.tokens_in, 4);
 
         // The rest of the line arrives; feeding from the retained offset completes it.
@@ -482,7 +503,9 @@ mod tests {
             d
         };
         fs.feed(&full.as_bytes()[fs.offset() as usize..]);
-        let s = fs.build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
+            .unwrap();
         assert_eq!(s.tokens_in, 10);
         assert_eq!(s.activity.as_deref(), Some("two"));
     }
@@ -493,14 +516,21 @@ mod tests {
         let mut data = assistant("s1", "one", 100, 10);
         data.push('\n');
         fs.feed(data.as_bytes());
-        assert_eq!(fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).unwrap().tokens_in, 100);
+        assert_eq!(
+            fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+                .unwrap()
+                .tokens_in,
+            100
+        );
 
         // Simulate a rewrite shorter than our offset.
         fs.reset();
         let mut rewritten = assistant("s1", "fresh", 7, 3);
         rewritten.push('\n');
         fs.feed(rewritten.as_bytes());
-        let s = fs.build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
+            .unwrap();
         assert_eq!(s.tokens_in, 7); // not 107
     }
 
@@ -511,7 +541,9 @@ mod tests {
         let mut data = line.to_string();
         data.push('\n');
         fs.feed(data.as_bytes());
-        assert!(fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).is_none());
+        assert!(fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .is_none());
     }
 
     #[test]
@@ -524,7 +556,9 @@ mod tests {
         data.push_str(&assistant("s1", "reply", 2, 1));
         data.push('\n');
         fs.feed(data.as_bytes());
-        let s = fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .unwrap();
         assert_eq!(s.activity.as_deref(), Some("reply"));
     }
 }

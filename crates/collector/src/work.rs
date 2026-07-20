@@ -125,7 +125,10 @@ fn parse_work_line(line: &str) -> Option<WorkItem> {
         title,
         status,
         effort: effort_inner.map(|s| s.trim().to_string()),
-        blocked_by: blocked_inner.as_deref().map(parse_blocked_ids).unwrap_or_default(),
+        blocked_by: blocked_inner
+            .as_deref()
+            .map(parse_blocked_ids)
+            .unwrap_or_default(),
     })
 }
 
@@ -213,10 +216,12 @@ pub fn parse_github_issues(json: &str) -> Vec<WorkItem> {
     issues
         .into_iter()
         .map(|issue| {
-            let doing = issue
-                .labels
-                .iter()
-                .any(|l| matches!(l.name.to_ascii_lowercase().as_str(), "in-progress" | "doing"));
+            let doing = issue.labels.iter().any(|l| {
+                matches!(
+                    l.name.to_ascii_lowercase().as_str(),
+                    "in-progress" | "doing"
+                )
+            });
             let status = if doing {
                 WorkStatus::Doing
             } else if issue.state.eq_ignore_ascii_case("closed") {

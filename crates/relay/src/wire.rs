@@ -68,7 +68,11 @@ impl LineBuffer {
             let line: Vec<u8> = self.buf.drain(..=nl).collect();
             // Drop the trailing '\n' (and a '\r' if the sender used CRLF).
             let end = line.len() - 1;
-            let end = if end > 0 && line[end - 1] == b'\r' { end - 1 } else { end };
+            let end = if end > 0 && line[end - 1] == b'\r' {
+                end - 1
+            } else {
+                end
+            };
             lines.push(String::from_utf8_lossy(&line[..end]).into_owned());
         }
         lines
@@ -182,7 +186,9 @@ mod tests {
         events.extend(dec.push(tail));
 
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], Event::Upsert(s) if s.id == "a1" && s.machine.as_deref() == Some("desk")));
+        assert!(
+            matches!(&events[0], Event::Upsert(s) if s.id == "a1" && s.machine.as_deref() == Some("desk"))
+        );
         assert!(matches!(&events[1], Event::Removed { id } if id == "a1"));
     }
 

@@ -39,8 +39,8 @@ where
 {
     let (tx, rx) = mpsc::channel::<PathBuf>();
 
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        match res {
+    let mut watcher =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
             Ok(event) => {
                 for path in event.paths {
                     if is_transcript(&path) {
@@ -49,8 +49,7 @@ where
                 }
             }
             Err(e) => warn!(error = %e, "watch error"),
-        }
-    })?;
+        })?;
     for root in roots {
         if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
             warn!(?root, error = %e, "cannot watch source root; skipping");
@@ -86,7 +85,11 @@ fn debounce_loop<F: FnMut(Change)>(rx: mpsc::Receiver<PathBuf>, on_change: &mut 
 
 /// Emit `Change`s for files whose debounce window has elapsed (or all of them
 /// when `force`). A file that no longer exists becomes `Removed`.
-fn flush<F: FnMut(Change)>(pending: &mut HashMap<PathBuf, Instant>, on_change: &mut F, force: bool) {
+fn flush<F: FnMut(Change)>(
+    pending: &mut HashMap<PathBuf, Instant>,
+    on_change: &mut F,
+    force: bool,
+) {
     let ready: Vec<PathBuf> = pending
         .iter()
         .filter(|(_, seen)| force || seen.elapsed() >= DEBOUNCE)

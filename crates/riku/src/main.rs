@@ -83,7 +83,6 @@ fn run_board(options: BoardOptions) -> Result<(), String> {
         axum::serve(listener, app)
             .await
             .map_err(|error| format!("Board server error: {error}"))?;
-        drop(started.watch_guard);
         Ok(())
     })
 }

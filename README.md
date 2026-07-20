@@ -10,9 +10,11 @@ Cargo.toml            workspace
 crates/collector/     lib — the Session Sources (Claude Code + Codex CLI) behind a
                       shared trait: discovery, transcript tailing, the Session
                       model, status heuristic, live git diff enrichment
+crates/session-engine/ lib — shared Tokio runtime: discovery, watch, refresh,
+                      enrich + stamp, local snapshots and events
 crates/board/         lib — axum server: embedded UI + /api/sessions + SSE
 crates/relay/         lib — Relay + Collector runtime and shared wire codec
-                      and the shared wire codec; the board subscribes to a Relay
+                      the board subscribes to a Relay
 crates/riku/          bin — `riku` umbrella CLI (Board, Collector, Relay, Config)
 web/                  React 18 + Vite 5 + TypeScript board (attention stream)
 ```

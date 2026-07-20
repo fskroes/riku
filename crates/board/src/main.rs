@@ -102,7 +102,4 @@ async fn main() {
         eprintln!("server error: {e}");
         std::process::exit(1);
     }
-
-    // Keep the watcher alive for the process lifetime.
-    drop(started.watch_guard);
 }

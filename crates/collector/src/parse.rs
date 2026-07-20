@@ -121,25 +121,25 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
         _ => return Ok(None),
     };
 
-    let (model, input_tokens, output_tokens, activity, has_tool_use, stop_reason) = match raw.message
-    {
-        Some(msg) => {
-            let (usage_in, usage_out) = msg
-                .usage
-                .map(|u| (u.input_tokens, u.output_tokens))
-                .unwrap_or((0, 0));
-            let (activity, has_tool_use) = summarize_content(&msg.content, is_assistant);
-            (
-                msg.model,
-                usage_in,
-                usage_out,
-                activity,
-                has_tool_use,
-                msg.stop_reason,
-            )
-        }
-        None => (None, 0, 0, None, false, None),
-    };
+    let (model, input_tokens, output_tokens, activity, has_tool_use, stop_reason) =
+        match raw.message {
+            Some(msg) => {
+                let (usage_in, usage_out) = msg
+                    .usage
+                    .map(|u| (u.input_tokens, u.output_tokens))
+                    .unwrap_or((0, 0));
+                let (activity, has_tool_use) = summarize_content(&msg.content, is_assistant);
+                (
+                    msg.model,
+                    usage_in,
+                    usage_out,
+                    activity,
+                    has_tool_use,
+                    msg.stop_reason,
+                )
+            }
+            None => (None, 0, 0, None, false, None),
+        };
 
     Ok(Some(Entry {
         is_assistant,

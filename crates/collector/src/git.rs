@@ -71,7 +71,12 @@ fn base_rev(dir: &Path) -> Option<String> {
 fn default_branch(dir: &Path) -> Option<String> {
     // `origin/HEAD` → `refs/remotes/origin/main`; strip to `origin/main`.
     let out = Command::new("git")
-        .args(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ])
         .current_dir(dir)
         .output();
     if let Ok(o) = out {
@@ -91,7 +96,12 @@ fn default_branch(dir: &Path) -> Option<String> {
 /// Whether `rev` resolves to a commit in `dir`.
 fn rev_exists(dir: &Path, rev: &str) -> bool {
     Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")])
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])
         .current_dir(dir)
         .output()
         .map(|o| o.status.success())
@@ -137,18 +147,36 @@ mod tests {
     #[test]
     fn sums_added_and_removed_across_files() {
         let numstat = "12\t3\tsrc/a.rs\n0\t7\tsrc/b.rs\n40\t0\tREADME.md\n";
-        assert_eq!(parse_numstat(numstat), DiffStat { added: 52, removed: 10 });
+        assert_eq!(
+            parse_numstat(numstat),
+            DiffStat {
+                added: 52,
+                removed: 10
+            }
+        );
     }
 
     #[test]
     fn binary_files_and_blank_lines_contribute_nothing() {
         let numstat = "-\t-\tlogo.png\n\n5\t2\tsrc/a.rs\n";
-        assert_eq!(parse_numstat(numstat), DiffStat { added: 5, removed: 2 });
+        assert_eq!(
+            parse_numstat(numstat),
+            DiffStat {
+                added: 5,
+                removed: 2
+            }
+        );
     }
 
     #[test]
     fn empty_diff_is_zero() {
-        assert_eq!(parse_numstat(""), DiffStat { added: 0, removed: 0 });
+        assert_eq!(
+            parse_numstat(""),
+            DiffStat {
+                added: 0,
+                removed: 0
+            }
+        );
     }
 
     #[test]

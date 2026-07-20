@@ -37,23 +37,41 @@ fn price_for(model: &str) -> Option<Price> {
     // mini/nano tiers are substrings-of a `gpt-5` id, so test them first.
     if m.contains("gpt-5") || m.starts_with("o3") || m.starts_with("o4") {
         if m.contains("nano") {
-            return Some(Price { input_per_mtok: 0.05, output_per_mtok: 0.40 });
+            return Some(Price {
+                input_per_mtok: 0.05,
+                output_per_mtok: 0.40,
+            });
         }
         if m.contains("mini") {
-            return Some(Price { input_per_mtok: 0.25, output_per_mtok: 2.00 });
+            return Some(Price {
+                input_per_mtok: 0.25,
+                output_per_mtok: 2.00,
+            });
         }
-        return Some(Price { input_per_mtok: 1.25, output_per_mtok: 10.00 });
+        return Some(Price {
+            input_per_mtok: 1.25,
+            output_per_mtok: 10.00,
+        });
     }
 
     // Anthropic / Claude Code.
     if m.contains("opus") {
-        return Some(Price { input_per_mtok: 15.00, output_per_mtok: 75.00 });
+        return Some(Price {
+            input_per_mtok: 15.00,
+            output_per_mtok: 75.00,
+        });
     }
     if m.contains("sonnet") {
-        return Some(Price { input_per_mtok: 3.00, output_per_mtok: 15.00 });
+        return Some(Price {
+            input_per_mtok: 3.00,
+            output_per_mtok: 15.00,
+        });
     }
     if m.contains("haiku") {
-        return Some(Price { input_per_mtok: 0.80, output_per_mtok: 4.00 });
+        return Some(Price {
+            input_per_mtok: 0.80,
+            output_per_mtok: 4.00,
+        });
     }
 
     None
