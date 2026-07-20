@@ -25,6 +25,14 @@ const MAX_SCAN_DEPTH: usize = 6;
 
 /// A change the store wants pushed to boards. Each carries a full Session so the
 /// SSE stream is idempotent — clients upsert by `id`.
+///
+/// The size gap between `Upsert` (a whole Session) and `Removed` is deliberate:
+/// carrying the full snapshot is the wire contract that makes the stream
+/// self-healing (a dropped message or reconnect re-syncs on the next Upsert), and
+/// C7 reuses this same `Event` as the Collector→Relay→Board currency. Boxing to
+/// even the variants out would trade that clarity for an allocation on the hot
+/// path, so the lint is allowed rather than worked around.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Event {
     Upsert(Session),

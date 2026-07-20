@@ -91,4 +91,11 @@ pub struct Session {
     /// Lines added / removed in the session's repo (C5). Live git state, so the
     /// collector leaves it `None`; the board fills it before serving/streaming.
     pub diff: Option<DiffStat>,
+    /// The machine this Session runs on — the host's name (C7). Stamped at the
+    /// source: the board's own local runtime (and, later, a Collector on a remote
+    /// machine) sets it to the local hostname before the Session leaves the watcher,
+    /// so every card can show which machine an Agent Session is on. Like `diff`, the
+    /// collector projection leaves it `None`; a `None` still serializes cleanly,
+    /// keeping the field additive on the wire for local-only, pre-C7 boards.
+    pub machine: Option<String>,
 }

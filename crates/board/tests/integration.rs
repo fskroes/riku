@@ -237,6 +237,9 @@ async fn discovery_exposes_sessions_snapshot() {
     assert_eq!(sessions[0]["tokensIn"], 100);
     assert_eq!(sessions[0]["tokensOut"], 10);
     assert_eq!(sessions[0]["status"], "active");
+    // C7: a session served through the board path is stamped with this machine's
+    // name, so every card is labelled (no unlabelled "local" special case).
+    assert_eq!(sessions[0]["machine"], board::runtime::local_hostname());
 }
 
 #[tokio::test]
@@ -264,6 +267,9 @@ async fn append_emits_session_event() {
     assert!(buf.contains("event: session"), "expected a session event: {buf:?}");
     // Tokens accumulated across the appended line.
     assert!(buf.contains("\"tokensIn\":150"), "expected summed tokens: {buf:?}");
+    // C7: the streamed event is stamped with this machine's name, like the snapshot.
+    let stamp = format!("\"machine\":\"{}\"", board::runtime::local_hostname());
+    assert!(buf.contains(&stamp), "expected machine stamp {stamp:?} in: {buf:?}");
 }
 
 #[tokio::test]

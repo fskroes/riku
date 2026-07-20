@@ -33,6 +33,10 @@ export interface Session {
   costUsd: number | null;
   // Live git `+/-` for the session's repo, or `null` when there is none.
   diff: DiffStat | null;
+  // The machine this session runs on — the host's name (C7). Stamped by the board
+  // (or a Collector) so every card shows which machine it is on; `null` only for a
+  // pre-C7 session that was never stamped.
+  machine: string | null;
 }
 
 export interface SessionsResponse {
@@ -64,6 +68,8 @@ export interface LinkedSession {
   model: string | null;
   branch: string | null;
   status: Status;
+  // The machine the linked session is on (C7), shown on the Work Link chip.
+  machine: string | null;
 }
 
 export interface WorkItem {

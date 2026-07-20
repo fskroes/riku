@@ -1,7 +1,7 @@
 import type { Session } from "./types";
 import type { OpenController } from "./useOpen";
 import { abbrevTokens, domId, relativeAge } from "./format";
-import { Cost, Diff, Meta, Tile, useFlash } from "./ui";
+import { Cost, Diff, Machine, Meta, Tile, useFlash } from "./ui";
 
 /** The glyph + headline for each Attention cause (issue #7). Falls back to
  *  waiting when a card is in Attention without an explicit reason. */
@@ -129,6 +129,7 @@ function CompactRow({
           ↑{abbrevTokens(session.tokensIn)}/{abbrevTokens(session.tokensOut)}
         </span>
         <Cost usd={session.costUsd} show={showCost} />
+        <Machine host={session.machine} />
         <span className="age">{relativeAge(session.lastEventAt, now)}</span>
       </div>
     </div>

@@ -36,6 +36,9 @@ pub struct AppState {
     /// How the board opens a local session (a terminal launch); injectable so
     /// tests can record the deep link instead of spawning Terminal.
     pub launcher: Arc<dyn Launcher>,
+    /// This machine's name, stamped onto every local session and Work Link (C7) so
+    /// each card shows which machine it is on.
+    pub machine: Arc<str>,
 }
 
 /// The plain-text message shown when the UI has not been built yet.
@@ -75,9 +78,11 @@ async fn sessions(State(state): State<AppState>) -> Json<SessionsResponse> {
         store.snapshot(Utc::now())
     };
     let cache = state.diff_cache.clone();
+    let machine = state.machine.clone();
     let sessions = tokio::task::spawn_blocking(move || {
         for s in &mut sessions {
             cache.enrich(s);
+            crate::runtime::stamp_local(s, &machine);
         }
         sessions
     })
@@ -171,6 +176,10 @@ struct LinkedSession {
     model: Option<String>,
     branch: Option<String>,
     status: Status,
+    /// The machine the linked session is on (C7). A Work Link is always to a local
+    /// session, so this is the board's own host; carried so the chip in the Work
+    /// Items view labels it consistently with the same session's card on the Board.
+    machine: Option<String>,
 }
 
 /// `GET /api/work?cwd=<dir>` — the Work Items for the project rooted at `cwd`.
@@ -204,7 +213,7 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
         .items
         .into_iter()
         .map(|item| {
-            let session = link_session(&item, &candidates);
+            let session = link_session(&item, &candidates, &state.machine);
             WorkItemOut { item, session }
         })
         .collect();
@@ -219,7 +228,7 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
 
 /// The Work Link for `item`: the most-recently-active candidate session whose
 /// branch the item's id can be inferred from. `None` if nothing links.
-fn link_session(item: &WorkItem, candidates: &[Session]) -> Option<LinkedSession> {
+fn link_session(item: &WorkItem, candidates: &[Session], machine: &str) -> Option<LinkedSession> {
     candidates
         .iter()
         .filter(|s| s.branch.as_deref().is_some_and(|b| branch_links(b, &item.id)))
@@ -231,6 +240,9 @@ fn link_session(item: &WorkItem, candidates: &[Session]) -> Option<LinkedSession
             model: s.model.clone(),
             branch: s.branch.clone(),
             status: s.status,
+            // Snapshot candidates are unstamped; a Work Link is local, so use this
+            // machine's name (falling back to the session's own tag if present).
+            machine: s.machine.clone().or_else(|| Some(machine.to_string())),
         })
 }
 
