@@ -19,6 +19,16 @@ export function abbrevTokens(n: number): string {
   return `${str.replace(/\.0$/, "")}k`;
 }
 
+/** The source badge label for a project's Work Items. */
+export function sourceLabel(source: "workMd" | "github"): string {
+  return source === "workMd" ? "WORK.md" : "GitHub Issues";
+}
+
+/** A DOM-safe element id from an arbitrary Work Item id (`#5` → `item-5`). */
+export function domId(prefix: string, raw: string): string {
+  return `${prefix}-${raw.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+}
+
 /** Turn a model id like `claude-opus-4-8` into `Opus 4.8`; falls back to raw. */
 export function shortModel(model: string | null): string | null {
   if (!model) return model;

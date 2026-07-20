@@ -2,7 +2,8 @@
 
 A local mission-control board for AI coding agent sessions. It watches your local
 Claude Code **and** Codex CLI transcripts and renders every session live on an
-attention-first board (issues #2, #5).
+attention-first board (issues #2, #5), with a per-project **Work Items** view that
+links each session to the plan it is carrying out (issue #1, C4).
 
 ```
 Cargo.toml            workspace
@@ -68,3 +69,24 @@ The board serves a full snapshot at `GET /api/sessions` and streams full-Session
 updates over SSE at `GET /api/events` (`session` / `removed` events; the client
 upserts by `id` and re-syncs the snapshot on reconnect). See
 `docs/adr/0005-*` for the UI decision and `CONTEXT.md` for the domain language.
+
+## Work Items (C4)
+
+The **Work Items** tab shows one project's plan at a time, rendered two ways over
+the same item set — a **To do / In progress / Done** kanban and a **dependency
+graph** laid out by blocked-by depth. A project selector switches projects (drawn
+from the live sessions), and a source badge shows whether the items came from
+`WORK.md` or GitHub Issues.
+
+Each project has a single **Work Source**, resolved by `GET /api/work?cwd=<dir>`:
+if `<dir>/WORK.md` exists it wins, otherwise GitHub Issues via `gh` (degrading to
+an empty list when `gh` is unavailable or the dir is not a repo). `WORK.md` is a
+Markdown checklist — `- [ ]` To do, `- [x]` Done, `- [~]`/`- [-]`/`- [/]` In
+progress — where the first token is a stable id (`W-14`) and `(~2d)` /
+`(blocked by: W-12, W-13)` annotations give effort and dependencies.
+
+The **Work Link** is made visible: an item shows the Agent Session working it as an
+inset chip, inferred by matching the item's id against each same-project session's
+git branch (`W-12` ↔ `fix/W-12-…`, `#42` ↔ `issue-42`). The chip cross-links both
+ways with the session's card on the Board — a session's `plan ↗` jumps to its item,
+and an item's chip jumps back to the live card.
