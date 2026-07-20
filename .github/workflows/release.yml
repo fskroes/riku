@@ -37,7 +37,7 @@ jobs:
         run: cargo install cargo-dist --locked --version 0.32.0
       - id: plan
         run: |
-          cargo dist plan --output-format=json > dist-manifest.json
+          dist plan --output-format=json > dist-manifest.json
           echo "manifest=$(jq -c . dist-manifest.json)" >> "$GITHUB_OUTPUT"
 
   build-local-artifacts:
@@ -70,7 +70,7 @@ jobs:
       - name: Install cargo-dist
         run: cargo install cargo-dist --locked --version 0.32.0
       - name: Build artifacts
-        run: cargo dist build --artifacts=local --target=${{ matrix.target }}
+        run: dist build --artifacts=local --target=${{ matrix.target }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: artifacts-${{ matrix.target }}
@@ -99,4 +99,4 @@ jobs:
           # A fine-grained token restricted to fskroes/homebrew-riku, scoped to this
           # step alone (docs/relay-deployment.md § Homebrew tap token).
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: cargo dist host --steps=create,upload,release,announce,homebrew
+        run: dist host --steps=create,upload,release,announce,homebrew
