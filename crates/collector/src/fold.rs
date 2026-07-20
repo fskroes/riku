@@ -92,11 +92,43 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-/// Last path segment of a `cwd` (the project name shown on a card). Shared.
+/// Project name shown on a card, derived from a `cwd`. Shared.
+///
+/// Normally the last path segment. Conductor worktrees live at
+/// `…/conductor/workspaces/<repo>/<workspace>`, where the last segment is an
+/// auto-generated workspace name that says nothing about the repo — those
+/// render as `<workspace> (<repo>)`.
 pub(crate) fn project_from_cwd(cwd: &str) -> String {
-    cwd.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or(cwd)
-        .to_string()
+    let mut segs = cwd.trim_end_matches('/').rsplit('/');
+    let last = segs.next().unwrap_or(cwd);
+    if let (Some(repo), Some("workspaces"), Some("conductor")) =
+        (segs.next(), segs.next(), segs.next())
+    {
+        return format!("{last} ({repo})");
+    }
+    last.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_from_cwd;
+
+    #[test]
+    fn plain_cwd_uses_last_segment() {
+        assert_eq!(project_from_cwd("/Users/x/repos/foo"), "foo");
+        assert_eq!(project_from_cwd("/Users/x/repos/foo/"), "foo");
+    }
+
+    #[test]
+    fn conductor_workspace_includes_repo_name() {
+        assert_eq!(
+            project_from_cwd("/Users/x/conductor/workspaces/riku/surat"),
+            "surat (riku)"
+        );
+    }
+
+    #[test]
+    fn workspaces_dir_outside_conductor_is_untouched() {
+        assert_eq!(project_from_cwd("/Users/x/workspaces/riku/surat"), "surat");
+    }
 }
