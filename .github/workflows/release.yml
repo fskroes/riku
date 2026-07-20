@@ -64,6 +64,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
+          # dist leaves a staging directory in distrib/ alongside the artifacts;
+          # upload only the regular files so gh doesn't choke on the directory.
+          mapfile -t files < <(find distrib -maxdepth 1 -type f)
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --verify-tag \
@@ -74,7 +77,7 @@ jobs:
           brew tap fskroes/riku
           brew install riku
           \`\`\`" \
-            distrib/*
+            "${files[@]}"
 
   # Publish the Homebrew formula to the personal tap. Sole holder of the tap
   # credential, which is exposed only to the checkout of the external tap repo
