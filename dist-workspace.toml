@@ -8,7 +8,7 @@ ci = "github"
 installers = ["homebrew"]
 tap = "fskroes/homebrew-riku"
 publish-jobs = ["homebrew"]
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+targets = ["aarch64-apple-darwin"]
 hosting = "github"
 install-updater = false
 # release.yml is a hand-maintained, security-hardened workflow (pinned action SHAs,
