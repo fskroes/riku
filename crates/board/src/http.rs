@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
@@ -17,28 +17,29 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use chrono::Utc;
-use collector::{DeepLink, Event, Session, SessionStore, Status, Tool, WorkItem, WorkSourceKind};
+use collector::{DeepLink, Event, Session, Status, Tool, WorkItem, WorkSourceKind};
 use futures::StreamExt;
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
-use rust_embed::RustEmbed;
 
 use crate::open::{is_safe_session_id, Launcher};
-use crate::runtime::{RelayStatus, RemoteSessions};
+use crate::runtime::{BoardEvents, RelayStatus, RemoteSessions};
+use session_engine::Engine;
 
 /// Shared state handed to every request handler.
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<Mutex<SessionStore>>,
-    pub tx: broadcast::Sender<Event>,
+    /// The shared local-session pipeline. Its interface hides discovery,
+    /// filesystem watching, status refresh, git enrichment, stamping, and the
+    /// broadcast wiring from this HTTP adapter.
+    pub engine: Arc<Engine>,
+    /// Board-facing event stream: local Engine events plus Relay events.
+    pub events: BoardEvents,
     /// A contributor-provided UI directory. When absent, the compiled-in UI is
     /// served, so an installed binary never depends on its current directory.
     pub web_dist: Option<PathBuf>,
-    /// Live git `+/-` per repo, filled onto session cards at the output boundary.
-    pub diff_cache: Arc<collector::DiffCache>,
     /// How the board opens a local session (a terminal launch); injectable so
     /// tests can record the deep link instead of spawning Terminal.
     pub launcher: Arc<dyn Launcher>,
@@ -53,8 +54,7 @@ pub struct AppState {
 }
 
 /// The plain-text message shown when the UI has not been built yet.
-const WEB_DIST_MISSING: &str =
-    "web/dist not found — run: cd web && npm install && npm run build";
+const WEB_DIST_MISSING: &str = "web/dist not found — run: cd web && npm install && npm run build";
 
 #[derive(RustEmbed)]
 #[folder = "../../web/dist/"]
@@ -86,7 +86,11 @@ pub fn router(state: AppState) -> Router {
 /// explicitly requested `--web-dist` path can produce the old 503 developer hint.
 async fn embedded_ui(uri: Uri) -> axum::response::Response {
     let requested = uri.path().trim_start_matches('/');
-    let requested = if requested.is_empty() { "index.html" } else { requested };
+    let requested = if requested.is_empty() {
+        "index.html"
+    } else {
+        requested
+    };
     let (asset, content_path) = WebAssets::get(requested)
         .map(|asset| (asset, requested))
         .or_else(|| WebAssets::get("index.html").map(|asset| (asset, "index.html")))
@@ -111,21 +115,10 @@ struct SessionsResponse {
 /// machine — so a late-connecting browser sees the full multi-machine picture from
 /// its first fetch, not only once each remote session next updates.
 async fn sessions(State(state): State<AppState>) -> Json<SessionsResponse> {
-    let mut sessions = {
-        let store = state.store.lock().unwrap();
-        store.snapshot(Utc::now())
-    };
-    let cache = state.diff_cache.clone();
-    let machine = state.machine.clone();
-    let mut sessions = tokio::task::spawn_blocking(move || {
-        for s in &mut sessions {
-            cache.enrich(s);
-            crate::runtime::stamp_local(s, &machine);
-        }
-        sessions
-    })
-    .await
-    .expect("diff enrichment does not panic");
+    let engine = state.engine.clone();
+    let mut sessions = tokio::task::spawn_blocking(move || engine.snapshot())
+        .await
+        .expect("session snapshot does not panic");
 
     // Merge in remote sessions, keeping a local session when an id somehow appears
     // in both (this board also collects the same machine): local carries live git.
@@ -168,16 +161,17 @@ async fn open_session(State(state): State<AppState>, Path(id): Path<String>) -> 
         return error(StatusCode::BAD_REQUEST, "not a valid session id");
     }
 
-    let resolved = {
-        let store = state.store.lock().unwrap();
-        store.find_by_id(&id, Utc::now())
-    };
+    let resolved = state.engine.find_by_id(&id);
     let Some((transcript, session)) = resolved else {
         return error(StatusCode::NOT_FOUND, "no live session with that id");
     };
 
-    let Some(link) = DeepLink::resume(session.tool, &session.id, session.cwd.as_deref(), &transcript)
-    else {
+    let Some(link) = DeepLink::resume(
+        session.tool,
+        &session.id,
+        session.cwd.as_deref(),
+        &transcript,
+    ) else {
         return error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "this session has no known working directory to open",
@@ -256,14 +250,7 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
     // Snapshot the sessions in this project, releasing the lock before the
     // (potentially slow) source read. Only same-cwd sessions are Work-Link
     // candidates: a branch belongs to one repo.
-    let candidates: Vec<Session> = {
-        let store = state.store.lock().unwrap();
-        store
-            .snapshot(Utc::now())
-            .into_iter()
-            .filter(|s| s.cwd.as_deref() == Some(q.cwd.as_str()))
-            .collect()
-    };
+    let candidates = state.engine.sessions_in(&q.cwd);
     let Some(project) = candidates.first().map(|s| s.project.clone()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -295,7 +282,11 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
 fn link_session(item: &WorkItem, candidates: &[Session], machine: &str) -> Option<LinkedSession> {
     candidates
         .iter()
-        .filter(|s| s.branch.as_deref().is_some_and(|b| branch_links(b, &item.id)))
+        .filter(|s| {
+            s.branch
+                .as_deref()
+                .is_some_and(|b| branch_links(b, &item.id))
+        })
         .max_by_key(|s| s.last_event_at)
         .map(|s| LinkedSession {
             id: s.id.clone(),
@@ -350,7 +341,7 @@ fn contains_token(hay: &str, needle: &str) -> bool {
 /// events carry `{ "id": ... }`. A `: ping` comment every 15s keeps the
 /// connection warm and lets the client detect a dead stream.
 async fn events(State(state): State<AppState>) -> impl IntoResponse {
-    let rx = state.tx.subscribe();
+    let rx = state.events.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|res| async move {
         match res {
             Ok(event) => Some(Ok::<_, Infallible>(to_sse(event))),

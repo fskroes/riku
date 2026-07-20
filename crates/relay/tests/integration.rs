@@ -102,20 +102,35 @@ async fn merges_two_machines_and_fans_out_live_updates() {
 
     // Two machines' Collectors push one session each.
     let desk = connect_collector(addr, TOKEN);
-    desk.send(upsert_line("a1", "desk", "on desk")).await.unwrap();
+    desk.send(upsert_line("a1", "desk", "on desk"))
+        .await
+        .unwrap();
     let mate = connect_collector(addr, TOKEN);
-    mate.send(upsert_line("b1", "mate", "on mate")).await.unwrap();
+    mate.send(upsert_line("b1", "mate", "on mate"))
+        .await
+        .unwrap();
 
     // The subscriber receives both machines' sessions.
     let buf = read_until(board, "b1", Duration::from_secs(10)).await;
-    assert!(buf.contains("a1") && buf.contains("\"machine\":\"desk\""), "missing desk: {buf:?}");
-    assert!(buf.contains("b1") && buf.contains("\"machine\":\"mate\""), "missing mate: {buf:?}");
+    assert!(
+        buf.contains("a1") && buf.contains("\"machine\":\"desk\""),
+        "missing desk: {buf:?}"
+    );
+    assert!(
+        buf.contains("b1") && buf.contains("\"machine\":\"mate\""),
+        "missing mate: {buf:?}"
+    );
 
     // A later update from one machine reaches the subscriber too.
     let board = subscribe(addr, TOKEN).await;
-    desk.send(upsert_line("a1", "desk", "UPDATED_MARKER")).await.unwrap();
+    desk.send(upsert_line("a1", "desk", "UPDATED_MARKER"))
+        .await
+        .unwrap();
     let buf = read_until(board, "UPDATED_MARKER", Duration::from_secs(10)).await;
-    assert!(buf.contains("UPDATED_MARKER"), "update not fanned out: {buf:?}");
+    assert!(
+        buf.contains("UPDATED_MARKER"),
+        "update not fanned out: {buf:?}"
+    );
 }
 
 #[tokio::test]
@@ -124,14 +139,19 @@ async fn serves_a_snapshot_to_a_late_subscriber() {
 
     // A Collector pushes before any board is listening.
     let desk = connect_collector(addr, TOKEN);
-    desk.send(upsert_line("snap-1", "desk", "already here")).await.unwrap();
+    desk.send(upsert_line("snap-1", "desk", "already here"))
+        .await
+        .unwrap();
 
     // Give the Relay a moment to ingest, then subscribe: the current state must be
     // delivered as a snapshot, proving the self-healing re-sync (ADR 0004).
     tokio::time::sleep(Duration::from_millis(200)).await;
     let board = subscribe(addr, TOKEN).await;
     let buf = read_until(board, "snap-1", Duration::from_secs(10)).await;
-    assert!(buf.contains("\"machine\":\"desk\""), "snapshot missing machine: {buf:?}");
+    assert!(
+        buf.contains("\"machine\":\"desk\""),
+        "snapshot missing machine: {buf:?}"
+    );
 }
 
 #[tokio::test]
@@ -140,7 +160,9 @@ async fn collector_disconnect_removes_its_sessions() {
     let board = subscribe(addr, TOKEN).await;
 
     let desk = connect_collector(addr, TOKEN);
-    desk.send(upsert_line("gone-1", "desk", "here for now")).await.unwrap();
+    desk.send(upsert_line("gone-1", "desk", "here for now"))
+        .await
+        .unwrap();
 
     // Read the upsert through, then drop the Collector's connection.
     let mut stream = board.bytes_stream();
@@ -169,7 +191,10 @@ async fn collector_disconnect_removes_its_sessions() {
             .expect("chunk");
         buf.push_str(&String::from_utf8_lossy(&chunk));
     }
-    assert!(buf.contains("gone-1"), "removal should name the dropped session: {buf:?}");
+    assert!(
+        buf.contains("gone-1"),
+        "removal should name the dropped session: {buf:?}"
+    );
 }
 
 #[tokio::test]
@@ -249,7 +274,9 @@ async fn https_clients_verify_certificates_by_default() {
         .expect_err("an untrusted self-signed certificate must be rejected");
     let rendered = format!("{error:?} {error}").to_lowercase();
     assert!(
-        rendered.contains("certificate") || rendered.contains("unknownissuer") || rendered.contains("tls"),
+        rendered.contains("certificate")
+            || rendered.contains("unknownissuer")
+            || rendered.contains("tls"),
         "expected a certificate verification failure, got: {rendered}"
     );
 }
@@ -308,6 +335,12 @@ async fn real_collector_loop_stamps_and_pushes_local_sessions() {
     // Collector's machine name — the whole watcher→stamp→push→relay→board path.
     let board = subscribe(addr, TOKEN).await;
     let buf = read_until(board, "real-1", Duration::from_secs(15)).await;
-    assert!(buf.contains("\"machine\":\"loki.local\""), "expected machine stamp: {buf:?}");
-    assert!(buf.contains("\"tokensIn\":100"), "expected the session's stats: {buf:?}");
+    assert!(
+        buf.contains("\"machine\":\"loki.local\""),
+        "expected machine stamp: {buf:?}"
+    );
+    assert!(
+        buf.contains("\"tokensIn\":100"),
+        "expected the session's stats: {buf:?}"
+    );
 }

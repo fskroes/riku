@@ -28,7 +28,10 @@ pub trait Launcher: Send + Sync {
 /// it reaches a shell or AppleScript string — belt-and-suspenders on top of the
 /// quoting below, and a clear 4xx rather than a mangled launch.
 pub fn is_safe_session_id(id: &str) -> bool {
-    !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// The default launcher: a new macOS Terminal window running the resume command.
@@ -122,7 +125,10 @@ mod tests {
     fn a_workspace_path_with_spaces_and_quotes_is_inert() {
         // A single quote in the path cannot break out of the quoting.
         let cmd = terminal_command(&link("/Users/x/My Repos/it's mine"));
-        assert_eq!(cmd, "cd '/Users/x/My Repos/it'\\''s mine' && claude '--resume' 'sess-1'");
+        assert_eq!(
+            cmd,
+            "cd '/Users/x/My Repos/it'\\''s mine' && claude '--resume' 'sess-1'"
+        );
     }
 
     #[test]

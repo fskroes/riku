@@ -57,7 +57,13 @@ impl DiffCache {
         // must not block cache reads for every other card.
         let stat = diff_stat(dir);
         let mut cache = self.inner.lock().unwrap();
-        cache.insert(dir.to_path_buf(), Entry { stat, at: Instant::now() });
+        cache.insert(
+            dir.to_path_buf(),
+            Entry {
+                stat,
+                at: Instant::now(),
+            },
+        );
         stat
     }
 

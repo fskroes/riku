@@ -340,7 +340,9 @@ mod tests {
                 assistant_message("wiring the collector"),
             ],
         );
-        let s = fs.build(ts("2026-07-19T10:01:00Z"), ts("2026-07-19T10:02:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:01:00Z"), ts("2026-07-19T10:02:00Z"))
+            .unwrap();
         assert_eq!(s.id, "rollout-1");
         assert_eq!(s.tool, Tool::Codex);
         assert_eq!(s.project, "foo");
@@ -376,9 +378,15 @@ mod tests {
         let mut fs = codex();
         feed(
             &mut fs,
-            &[meta("rollout-1", "user"), event("task_started"), event("turn_aborted")],
+            &[
+                meta("rollout-1", "user"),
+                event("task_started"),
+                event("turn_aborted"),
+            ],
         );
-        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
         assert_eq!(s.status, crate::model::Status::Attention);
         assert_eq!(s.attention_reason, Some(AttentionReason::Error));
     }
@@ -388,10 +396,16 @@ mod tests {
         let mut fs = codex();
         feed(
             &mut fs,
-            &[meta("rollout-1", "user"), event("task_started"), event("task_complete")],
+            &[
+                meta("rollout-1", "user"),
+                event("task_started"),
+                event("task_complete"),
+            ],
         );
         // 30 min quiet, cleanly completed → Finished, never Attention.
-        let s = fs.build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z"))
+            .unwrap();
         assert_eq!(s.status, crate::model::Status::Finished);
         assert_eq!(s.attention_reason, None);
     }
@@ -400,7 +414,9 @@ mod tests {
     fn task_started_fresh_is_active() {
         let mut fs = codex();
         feed(&mut fs, &[meta("rollout-1", "user"), event("task_started")]);
-        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
         assert_eq!(s.status, crate::model::Status::Active);
         assert_eq!(s.attention_reason, None);
     }
@@ -410,15 +426,23 @@ mod tests {
         let mut fs = codex();
         feed(
             &mut fs,
-            &[meta("rollout-1", "user"), event("task_started"), approval("exec_approval_request")],
+            &[
+                meta("rollout-1", "user"),
+                event("task_started"),
+                approval("exec_approval_request"),
+            ],
         );
-        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
         assert_eq!(s.status, crate::model::Status::Attention);
         assert_eq!(s.attention_reason, Some(AttentionReason::Waiting));
 
         // Answering it (forward progress) drops the card out of Attention.
         feed(&mut fs, &[assistant_message("running the command")]);
-        let s = fs.build(ts("2026-07-19T10:04:30Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:04:30Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
         assert_eq!(s.status, crate::model::Status::Active);
         assert_eq!(s.attention_reason, None);
     }
@@ -429,9 +453,15 @@ mod tests {
         let mut fs = codex();
         feed(
             &mut fs,
-            &[meta("rollout-1", "user"), event("turn_aborted"), event("task_started")],
+            &[
+                meta("rollout-1", "user"),
+                event("turn_aborted"),
+                event("task_started"),
+            ],
         );
-        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
         assert_eq!(s.status, crate::model::Status::Active);
         assert_eq!(s.attention_reason, None);
     }
@@ -440,7 +470,9 @@ mod tests {
     fn subagent_rollout_yields_no_card() {
         let mut fs = codex();
         feed(&mut fs, &[meta("sub-1", "subagent"), token_count(999, 999)]);
-        assert!(fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).is_none());
+        assert!(fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .is_none());
     }
 
     #[test]
@@ -454,7 +486,9 @@ mod tests {
                 token_count(1700, 350),
             ],
         );
-        let s = fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .unwrap();
         // Latest cumulative total, not 1000+1700.
         assert_eq!(s.tokens_in, 1700);
         assert_eq!(s.tokens_out, 350);
@@ -471,7 +505,9 @@ mod tests {
                 turn_context("gpt-5.6-terra"),
             ],
         );
-        let s = fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .unwrap();
         assert_eq!(s.model.as_deref(), Some("gpt-5.6-terra"));
     }
 
@@ -486,7 +522,9 @@ mod tests {
         })
         .to_string();
         feed(&mut fs, &[meta, token_count(10, 2)]);
-        let s = fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .unwrap();
         assert_eq!(s.id, "rollout-old");
     }
 
@@ -500,8 +538,13 @@ mod tests {
             "payload": { "type": "token_count", "info": null }
         })
         .to_string();
-        feed(&mut fs, &[meta("rollout-1", "user"), token_count(50, 5), null_tc]);
-        let s = fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).unwrap();
+        feed(
+            &mut fs,
+            &[meta("rollout-1", "user"), token_count(50, 5), null_tc],
+        );
+        let s = fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .unwrap();
         assert_eq!(s.tokens_in, 50); // last real count retained
     }
 
@@ -509,8 +552,13 @@ mod tests {
     fn unknown_types_and_fields_are_ignored() {
         let mut fs = codex();
         let weird = r#"{"timestamp":"2026-07-19T10:00:05Z","type":"future_event","payload":{"whatever":1},"extra":true}"#.to_string();
-        feed(&mut fs, &[meta("rollout-1", "user"), weird, token_count(7, 1)]);
-        let s = fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).unwrap();
+        feed(
+            &mut fs,
+            &[meta("rollout-1", "user"), weird, token_count(7, 1)],
+        );
+        let s = fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .unwrap();
         assert_eq!(s.id, "rollout-1");
         assert_eq!(s.tokens_in, 7);
     }
@@ -520,7 +568,9 @@ mod tests {
         let mut fs = codex();
         // token_count before any session_meta: no id, so no card.
         feed(&mut fs, &[token_count(10, 2)]);
-        assert!(fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).is_none());
+        assert!(fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .is_none());
     }
 
     #[test]
@@ -532,7 +582,9 @@ mod tests {
         body.push_str(&token_count(9, 3));
         body.push('\n');
         fs.feed(body.as_bytes());
-        let s = fs.build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z")).unwrap();
+        let s = fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .unwrap();
         assert_eq!(s.id, "rollout-1");
         assert_eq!(s.tokens_in, 9);
     }

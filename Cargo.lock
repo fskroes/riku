@@ -156,13 +156,13 @@ dependencies = [
  "chrono",
  "collector",
  "futures",
- "hostname",
  "mime_guess",
  "relay",
  "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
+ "session-engine",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -1282,6 +1282,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "session-engine",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -1555,6 +1556,19 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "session-engine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "collector",
+ "hostname",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

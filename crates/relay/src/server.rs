@@ -113,7 +113,11 @@ pub fn router(state: RelayState) -> Router {
 /// the connection ends (the Collector went offline or the network dropped), every
 /// session this connection still owns is removed so boards clear its stale cards
 /// (User Story 7); on reconnect the Collector re-pushes its current state.
-async fn collect(State(state): State<RelayState>, headers: HeaderMap, body: Body) -> impl IntoResponse {
+async fn collect(
+    State(state): State<RelayState>,
+    headers: HeaderMap,
+    body: Body,
+) -> impl IntoResponse {
     if !authorized(&headers, &state.token) {
         return StatusCode::UNAUTHORIZED;
     }

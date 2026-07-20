@@ -45,7 +45,10 @@ impl DeepLink {
     ) -> Option<DeepLink> {
         let dir = PathBuf::from(cwd?);
         let (program, args) = match tool {
-            Tool::Claude => ("claude", vec!["--resume".to_string(), session_id.to_string()]),
+            Tool::Claude => (
+                "claude",
+                vec!["--resume".to_string(), session_id.to_string()],
+            ),
             Tool::Codex => ("codex", vec!["resume".to_string(), session_id.to_string()]),
         };
         Some(DeepLink {

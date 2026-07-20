@@ -283,12 +283,21 @@ async fn append_emits_session_event() {
     append_line(&path, &assistant_line("sess-1", "APPENDED_MARKER", 50, 5));
 
     let buf = read_until(resp, "APPENDED_MARKER", Duration::from_secs(15)).await;
-    assert!(buf.contains("event: session"), "expected a session event: {buf:?}");
+    assert!(
+        buf.contains("event: session"),
+        "expected a session event: {buf:?}"
+    );
     // Tokens accumulated across the appended line.
-    assert!(buf.contains("\"tokensIn\":150"), "expected summed tokens: {buf:?}");
+    assert!(
+        buf.contains("\"tokensIn\":150"),
+        "expected summed tokens: {buf:?}"
+    );
     // C7: the streamed event is stamped with this machine's name, like the snapshot.
     let stamp = format!("\"machine\":\"{}\"", board::runtime::local_hostname());
-    assert!(buf.contains(&stamp), "expected machine stamp {stamp:?} in: {buf:?}");
+    assert!(
+        buf.contains(&stamp),
+        "expected machine stamp {stamp:?} in: {buf:?}"
+    );
 }
 
 #[tokio::test]
@@ -312,7 +321,10 @@ async fn delete_emits_removed_event() {
     fs::remove_file(&path).unwrap();
 
     let buf = read_until(resp, "sess-del", Duration::from_secs(15)).await;
-    assert!(buf.contains("event: removed"), "expected a removed event: {buf:?}");
+    assert!(
+        buf.contains("event: removed"),
+        "expected a removed event: {buf:?}"
+    );
 }
 
 #[tokio::test]
@@ -331,8 +343,11 @@ async fn claude_and_codex_render_side_by_side() {
         &codex_rollout("codex-1", "hi from codex", 1000, 200),
     );
 
-    let (addr, _started) =
-        spawn_server_with(claude.path().to_path_buf(), Some(codex.path().to_path_buf())).await;
+    let (addr, _started) = spawn_server_with(
+        claude.path().to_path_buf(),
+        Some(codex.path().to_path_buf()),
+    )
+    .await;
 
     let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
         .await
@@ -367,8 +382,11 @@ async fn codex_append_emits_session_event() {
         &codex_rollout("codex-2", "starting", 500, 50),
     );
 
-    let (addr, _started) =
-        spawn_server_with(claude.path().to_path_buf(), Some(codex.path().to_path_buf())).await;
+    let (addr, _started) = spawn_server_with(
+        claude.path().to_path_buf(),
+        Some(codex.path().to_path_buf()),
+    )
+    .await;
 
     let resp = reqwest::Client::new()
         .get(format!("http://{addr}/api/events"))
@@ -391,9 +409,15 @@ async fn codex_append_emits_session_event() {
     );
 
     let buf = read_until(resp, "\"tokensIn\":1400", Duration::from_secs(15)).await;
-    assert!(buf.contains("event: session"), "expected a session event: {buf:?}");
+    assert!(
+        buf.contains("event: session"),
+        "expected a session event: {buf:?}"
+    );
     // Cumulative, not summed (500+1400 would be 1900).
-    assert!(buf.contains("\"tokensOut\":130"), "expected cumulative tokens: {buf:?}");
+    assert!(
+        buf.contains("\"tokensOut\":130"),
+        "expected cumulative tokens: {buf:?}"
+    );
 }
 
 #[tokio::test]
@@ -414,8 +438,11 @@ async fn codex_subagent_rollout_is_not_a_card() {
         &lines,
     );
 
-    let (addr, _started) =
-        spawn_server_with(claude.path().to_path_buf(), Some(codex.path().to_path_buf())).await;
+    let (addr, _started) = spawn_server_with(
+        claude.path().to_path_buf(),
+        Some(codex.path().to_path_buf()),
+    )
+    .await;
 
     let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
         .await
@@ -425,7 +452,10 @@ async fn codex_subagent_rollout_is_not_a_card() {
         .unwrap();
 
     let sessions = body["sessions"].as_array().unwrap();
-    assert!(sessions.is_empty(), "subagent rollout must not render: {sessions:?}");
+    assert!(
+        sessions.is_empty(),
+        "subagent rollout must not render: {sessions:?}"
+    );
 }
 
 #[tokio::test]
@@ -449,10 +479,17 @@ async fn attention_reason_surfaces_for_both_tools() {
         })
         .to_string(),
     );
-    write_codex_rollout(codex.path(), "rollout-2026-07-19T10-00-00-codex-err.jsonl", &codex_lines);
+    write_codex_rollout(
+        codex.path(),
+        "rollout-2026-07-19T10-00-00-codex-err.jsonl",
+        &codex_lines,
+    );
 
-    let (addr, _started) =
-        spawn_server_with(claude.path().to_path_buf(), Some(codex.path().to_path_buf())).await;
+    let (addr, _started) = spawn_server_with(
+        claude.path().to_path_buf(),
+        Some(codex.path().to_path_buf()),
+    )
+    .await;
 
     let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
         .await
@@ -493,8 +530,14 @@ async fn answering_a_wait_drops_out_of_attention_over_sse() {
     append_line(&path, &claude_tool_result_line("sess-wait"));
 
     let buf = read_until(resp, "sess-wait", Duration::from_secs(15)).await;
-    assert!(buf.contains("event: session"), "expected a session event: {buf:?}");
-    assert!(buf.contains("\"status\":\"active\""), "expected active after answer: {buf:?}");
+    assert!(
+        buf.contains("event: session"),
+        "expected a session event: {buf:?}"
+    );
+    assert!(
+        buf.contains("\"status\":\"active\""),
+        "expected active after answer: {buf:?}"
+    );
     assert!(
         buf.contains("\"attentionReason\":null"),
         "attention reason should clear: {buf:?}"
@@ -520,7 +563,11 @@ async fn work_map_items_carry_their_work_link() {
         claude.path(),
         "-proj",
         "aaaa.jsonl",
-        &[assistant_line_in("sess-dl", &proj_cwd, "fix/W-12-download-flow")],
+        &[assistant_line_in(
+            "sess-dl",
+            &proj_cwd,
+            "fix/W-12-download-flow",
+        )],
     );
 
     let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
@@ -548,7 +595,10 @@ async fn work_map_items_carry_their_work_link() {
 
     let w14 = items.iter().find(|i| i["id"] == "W-14").unwrap();
     assert_eq!(w14["blockedBy"], serde_json::json!(["W-12"]));
-    assert!(w14["session"].is_null(), "W-14 has no matching branch: {w14:?}");
+    assert!(
+        w14["session"].is_null(),
+        "W-14 has no matching branch: {w14:?}"
+    );
 }
 
 /// Run a git command in `dir`, asserting it succeeds.
@@ -608,7 +658,9 @@ async fn card_carries_cost_estimate_and_live_git_diff() {
 
     // Cost: assistant_line_in uses claude-opus-4-8 with 10 in / 1 out tokens.
     // 10/1e6*15 + 1/1e6*75 = 0.00015 + 0.000075 = 0.000225.
-    let cost = card["costUsd"].as_f64().expect("costUsd present for a priced model");
+    let cost = card["costUsd"]
+        .as_f64()
+        .expect("costUsd present for a priced model");
     assert!((cost - 0.000225).abs() < 1e-9, "unexpected cost: {cost}");
 
     // Diff: three lines appended to the one tracked file.
@@ -636,7 +688,10 @@ async fn non_repo_cwd_reports_no_diff() {
         .unwrap();
 
     let card = &body["sessions"].as_array().unwrap()[0];
-    assert!(card["diff"].is_null(), "no diff for a non-repo cwd: {card:?}");
+    assert!(
+        card["diff"].is_null(),
+        "no diff for a non-repo cwd: {card:?}"
+    );
     // Cost still shows — it needs only tokens + model, not a repo.
     assert!(card["costUsd"].as_f64().unwrap() > 0.0);
 }
@@ -710,7 +765,10 @@ async fn open_404s_for_an_unknown_session() {
         .unwrap()
         .status();
     assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
-    assert!(opened.lock().unwrap().is_empty(), "nothing should have launched");
+    assert!(
+        opened.lock().unwrap().is_empty(),
+        "nothing should have launched"
+    );
 }
 
 /// Start a Relay on an ephemeral port, returning its base URL.
@@ -732,7 +790,10 @@ async fn spawn_board_subscribed(relay_url: String, token: String) -> (SocketAddr
         empty.path().to_path_buf(),
         None,
         None,
-        Some(runtime::RelayConfig { url: relay_url, token }),
+        Some(runtime::RelayConfig {
+            url: relay_url,
+            token,
+        }),
     );
     // Keep the empty root alive for the board's lifetime.
     std::mem::forget(empty);
@@ -806,6 +867,49 @@ async fn subscribed_board_surfaces_a_remote_session() {
         .unwrap();
     assert_eq!(relay_status["configured"], true);
     assert_eq!(relay_status["connected"], true);
+}
+
+#[tokio::test]
+async fn subscribed_board_streams_remote_session_events() {
+    let token = "team-token";
+    let relay_url = spawn_relay(token).await;
+    let (addr, _started) = spawn_board_subscribed(relay_url.clone(), token.to_string()).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/api/events"))
+        .send()
+        .await
+        .unwrap();
+
+    let remote = tempfile::tempdir().unwrap();
+    write_transcript(
+        remote.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line(
+            "remote-stream-1",
+            "REMOTE_STREAM_MARKER",
+            100,
+            10,
+        )],
+    );
+    tokio::spawn(relay::run_collector(relay::CollectorConfig {
+        relay_url,
+        token: token.to_string(),
+        claude_root: remote.path().to_path_buf(),
+        codex_root: None,
+        machine: "remote-desk".to_string(),
+    }));
+
+    let buf = read_until(resp, "REMOTE_STREAM_MARKER", Duration::from_secs(15)).await;
+    assert!(
+        buf.contains("event: session"),
+        "expected a session event: {buf:?}"
+    );
+    assert!(
+        buf.contains("\"machine\":\"remote-desk\""),
+        "expected remote machine stamp in: {buf:?}"
+    );
 }
 
 #[tokio::test]

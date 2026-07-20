@@ -49,11 +49,11 @@ connection before the old one's cleanup runs is not clobbered.
 a `remote` map beside the file-backed local `SessionStore` (they have no local
 transcript to tail). `/api/sessions` unions the two so a late-connecting browser sees
 the whole fleet from its first fetch, and each relayed `Event` is also forwarded onto
-the board's existing `broadcast::Sender<Event>` so a live browser streams remote and
-local cards down one identical path — no second rendering path in the UI. On each
-fresh Relay connection the board resets its remote view (clearing stale cards) and
-lets the incoming snapshot rebuild it, so a Relay restart never strands a card for a
-machine that has since gone.
+the board's own event stream beside local Engine events, so a live browser streams
+remote and local cards down one identical UI path without putting Relay events inside
+the local-session Engine. On each fresh Relay connection the board resets its remote
+view (clearing stale cards) and lets the incoming snapshot rebuild it, so a Relay
+restart never strands a card for a machine that has since gone.
 
 **One shared token, presented as `Authorization: Bearer …`, is the whole auth model.**
 It gates both roles; a wrong or missing token is rejected before any state is

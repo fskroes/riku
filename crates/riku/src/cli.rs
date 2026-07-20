@@ -232,7 +232,9 @@ fn resolve_relay(
     // `riku relay` is a loopback-only development component: a real multi-machine
     // Relay is a loopback riku process behind a TLS-terminating reverse proxy (User
     // Stories 10, 11). Default to loopback and refuse a non-loopback bind below.
-    let mut addr: SocketAddr = "127.0.0.1:4343".parse().expect("valid Relay default address");
+    let mut addr: SocketAddr = "127.0.0.1:4343"
+        .parse()
+        .expect("valid Relay default address");
     let mut token = None;
     let mut index = 0;
     while index < args.len() {
@@ -477,7 +479,11 @@ mod tests {
     }
 
     /// The resolved Collector URL for a given source, or the resolution error.
-    fn collect_url(flag: Option<&str>, env_url: Option<&str>, config_url: Option<&str>) -> Result<String, String> {
+    fn collect_url(
+        flag: Option<&str>,
+        env_url: Option<&str>,
+        config_url: Option<&str>,
+    ) -> Result<String, String> {
         let mut args = vec!["collect".to_string(), "--token".into(), "t".into()];
         if let Some(flag) = flag {
             args.push("--relay".into());
@@ -505,9 +511,21 @@ mod tests {
             "http://127.0.0.1:4343",
             "http://[::1]:4343",
         ] {
-            assert_eq!(collect_url(Some(url), None, None).as_deref(), Ok(url), "flag {url}");
-            assert_eq!(collect_url(None, Some(url), None).as_deref(), Ok(url), "env {url}");
-            assert_eq!(collect_url(None, None, Some(url)).as_deref(), Ok(url), "config {url}");
+            assert_eq!(
+                collect_url(Some(url), None, None).as_deref(),
+                Ok(url),
+                "flag {url}"
+            );
+            assert_eq!(
+                collect_url(None, Some(url), None).as_deref(),
+                Ok(url),
+                "env {url}"
+            );
+            assert_eq!(
+                collect_url(None, None, Some(url)).as_deref(),
+                Ok(url),
+                "config {url}"
+            );
         }
     }
 
@@ -522,8 +540,14 @@ mod tests {
             collect_url(None, None, Some(url)), // a saved unsafe Config fails at resolution
         ] {
             let error = resolved.unwrap_err();
-            assert!(error.contains("insecure Relay URL"), "unexpected error: {error}");
-            assert!(error.contains("https://hub.example.com"), "error should name the HTTPS fix: {error}");
+            assert!(
+                error.contains("insecure Relay URL"),
+                "unexpected error: {error}"
+            );
+            assert!(
+                error.contains("https://hub.example.com"),
+                "error should name the HTTPS fix: {error}"
+            );
         }
     }
 
@@ -549,7 +573,10 @@ mod tests {
         // too, never silently keep streaming the token in plaintext (User Story 6).
         let config = "[relay]\nurl = 'http://hub.example.com'\ntoken = 'secret'\n";
         let error = resolve(&[], &env(&[]), Some(config)).unwrap_err();
-        assert!(error.contains("insecure Relay URL"), "unexpected error: {error}");
+        assert!(
+            error.contains("insecure Relay URL"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -557,11 +584,16 @@ mod tests {
         // `config set relay.url` is the write path for an unattended Collector: it must
         // accept secure/loopback values and refuse a remote plaintext one (User Story 7).
         assert!(Config::default().set("relay.url", "https://hub").is_ok());
-        assert!(Config::default().set("relay.url", "http://localhost:4343").is_ok());
+        assert!(Config::default()
+            .set("relay.url", "http://localhost:4343")
+            .is_ok());
         let error = Config::default()
             .set("relay.url", "http://hub.example.com")
             .unwrap_err();
-        assert!(error.contains("insecure Relay URL"), "unexpected error: {error}");
+        assert!(
+            error.contains("insecure Relay URL"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -576,10 +608,20 @@ mod tests {
         .unwrap() else {
             panic!("expected relay")
         };
-        assert!(options.addr.ip().is_loopback(), "default bind must be loopback: {}", options.addr);
+        assert!(
+            options.addr.ip().is_loopback(),
+            "default bind must be loopback: {}",
+            options.addr
+        );
 
         let error = resolve(
-            &["relay".into(), "--addr".into(), "0.0.0.0:4343".into(), "--token".into(), "t".into()],
+            &[
+                "relay".into(),
+                "--addr".into(),
+                "0.0.0.0:4343".into(),
+                "--token".into(),
+                "t".into(),
+            ],
             &env(&[]),
             None,
         )

@@ -228,7 +228,11 @@ fn read_from(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
 }
 
 fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
-    fs::metadata(path).ok()?.modified().ok().map(system_time_to_utc)
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()
+        .map(system_time_to_utc)
 }
 
 fn system_time_to_utc(t: SystemTime) -> DateTime<Utc> {
