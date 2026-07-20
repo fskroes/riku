@@ -1,0 +1,28 @@
+name: Source-install smoke test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build embedded UI and test workspace
+        run: |
+          cd web && npm ci && npm run build
+          cd .. && cargo test --workspace
+      # The formula is generated into fskroes/homebrew-riku on a tagged release.
+      # This smoke path deliberately exercises the same source-build sequence.
+      - name: Source-install smoke test
+        run: |
+          cd web && npm ci && npm run build
+          cd .. && cargo install --path crates/riku --root "$RUNNER_TEMP/riku"
+          "$RUNNER_TEMP/riku/bin/riku" --help

@@ -166,7 +166,7 @@ async fn spawn_server_with(
     claude_root: PathBuf,
     codex_root: Option<PathBuf>,
 ) -> (SocketAddr, Started) {
-    let started = runtime::init(claude_root, codex_root, PathBuf::from("does-not-exist"), None);
+    let started = runtime::init(claude_root, codex_root, None, None);
     let app = http::router(started.state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -179,7 +179,7 @@ async fn spawn_server_with(
 /// Start the server with a [`RecordingLauncher`] wired in, returning the recorder
 /// so a test can assert which deep link `POST …/open` resolved.
 async fn spawn_server_recording(root: PathBuf) -> (SocketAddr, Started, Arc<Mutex<Vec<DeepLink>>>) {
-    let mut started = runtime::init(root, None, PathBuf::from("does-not-exist"), None);
+    let mut started = runtime::init(root, None, None, None);
     let recorder = RecordingLauncher::default();
     let opened = recorder.opened.clone();
     started.state.launcher = Arc::new(recorder);
@@ -190,6 +190,25 @@ async fn spawn_server_recording(root: PathBuf) -> (SocketAddr, Started, Arc<Mute
         axum::serve(listener, app).await.unwrap();
     });
     (addr, started, opened)
+}
+
+#[tokio::test]
+async fn embedded_ui_is_served_without_a_web_dist_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let (addr, _started) = spawn_server(temp.path().to_path_buf()).await;
+
+    let index = reqwest::get(format!("http://{addr}/")).await.unwrap();
+    assert_eq!(index.status(), reqwest::StatusCode::OK);
+    let body = index.text().await.unwrap();
+    assert!(body.contains("<div id=\"root\"></div>"));
+
+    let asset = body
+        .split("src=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("index.html should reference its hashed JavaScript asset");
+    let asset = reqwest::get(format!("http://{addr}{asset}")).await.unwrap();
+    assert_eq!(asset.status(), reqwest::StatusCode::OK);
 }
 
 /// Read from an SSE response until `needle` appears (or time out).
@@ -712,7 +731,7 @@ async fn spawn_board_subscribed(relay_url: String, token: String) -> (SocketAddr
     let started = runtime::init(
         empty.path().to_path_buf(),
         None,
-        PathBuf::from("does-not-exist"),
+        None,
         Some(runtime::RelayConfig { url: relay_url, token }),
     );
     // Keep the empty root alive for the board's lifetime.

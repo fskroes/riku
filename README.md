@@ -10,30 +10,62 @@ Cargo.toml            workspace
 crates/collector/     lib — the Session Sources (Claude Code + Codex CLI) behind a
                       shared trait: discovery, transcript tailing, the Session
                       model, status heuristic, live git diff enrichment
-crates/board/         bin — axum server: serves web/dist + /api/sessions + SSE
-crates/relay/         bins — `relay` (team hub) + `collector` (headless watcher→push)
+crates/board/         lib — axum server: embedded UI + /api/sessions + SSE
+crates/relay/         lib — Relay + Collector runtime and shared wire codec
                       and the shared wire codec; the board subscribes to a Relay
+crates/riku/          bin — `riku` umbrella CLI (Board, Collector, Relay, Config)
 web/                  React 18 + Vite 5 + TypeScript board (attention stream)
 ```
 
 ## Run it
 
 ```sh
-# 1. Build the UI (once, and after web/ changes)
+# 1. Build the UI (once, and after web/ changes). Cargo embeds this output.
 cd web && npm install && npm run build && cd ..
 
 # 2. Run the board
-cargo run -p board            # then open http://localhost:4242
+cargo run -p riku             # then open http://localhost:4242
 ```
 
 Flags: `--port <n>` (default 4242, binds `127.0.0.1` only), `--root <dir>`
 (Claude Code projects, default `~/.claude/projects`), `--codex-root <dir>` (Codex
-CLI sessions, default `$CODEX_HOME/sessions` or `~/.codex/sessions`), `--web-dist
-<dir>` (default `web/dist`). A missing Codex root degrades gracefully — Claude
-sessions still show.
+CLI sessions, default `$CODEX_HOME/sessions` or `~/.codex/sessions`), and
+`--web-dist <dir>` (a development-only disk override). Without `--web-dist`, riku
+serves the UI compiled into its binary from any current directory. A missing Codex
+root degrades gracefully — Claude sessions still show.
 
-If `web/dist` is missing the server stays up and `/` returns a 503 telling you to
-build the UI; the API keeps working.
+`web/dist` must exist before Cargo builds so it can be embedded; the build fails with
+a direct `npm ci && npm run build` instruction if it is absent. The old 503 page is
+retained only when an explicit `--web-dist` path does not exist.
+
+## Install on macOS
+
+The release configuration is ready to publish a source-build formula followed by
+tagged bottles to `fskroes/homebrew-riku`. The source repository must be public (or
+the release artifacts hosted publicly) before Homebrew can fetch it; until then,
+build locally with the commands above. Once published, installation is:
+
+```sh
+brew tap fskroes/riku
+brew install riku
+riku
+```
+
+Use `riku --help` to discover the umbrella commands. `riku collect` is the
+per-Mac Collector; `riku relay` remains available for local development but is not
+installed as a Homebrew service. Configure an unattended Collector once, then use
+Homebrew to manage it:
+
+```sh
+riku config set relay.url http://hub:4343
+riku config set relay.token "$RELAY_TOKEN"
+brew services start riku
+```
+
+Config is stored at `~/.config/riku/config.toml` with `0600` permissions. Values
+resolve in this order: explicit flags, `RELAY_URL` / `RELAY_TOKEN` / `RIKU_ROOT` /
+`RIKU_CODEX_ROOT`, then the Config file. `brew services stop riku` stops the
+Collector; its logs use Homebrew's standard `~/Library/Logs` location.
 
 ## Team / multi-machine (C7)
 
@@ -45,13 +77,13 @@ strictly one-way read-only — it transports session state, never commands (ADR 
 
 ```sh
 # On the hub (the one network service; binds 0.0.0.0):
-cargo run -p relay --bin relay -- --addr 0.0.0.0:4343 --token "$RELAY_TOKEN"
+cargo run -p riku -- relay --addr 0.0.0.0:4343 --token "$RELAY_TOKEN"
 
 # On each machine whose agents you want to see (headless, no UI):
-cargo run -p relay --bin collector -- --relay http://hub:4343 --token "$RELAY_TOKEN"
+cargo run -p riku -- collect --relay http://hub:4343 --token "$RELAY_TOKEN"
 
 # Point your board at the Relay (still binds localhost; local sessions keep working):
-cargo run -p board -- --relay http://hub:4343 --token "$RELAY_TOKEN"
+cargo run -p riku -- --relay http://hub:4343 --token "$RELAY_TOKEN"
 ```
 
 The token may also come from the `RELAY_TOKEN` environment variable for all three.
@@ -65,7 +97,7 @@ your call.
 ## Develop the UI with hot reload
 
 ```sh
-cargo run -p board            # API on :4242
+cargo run -p riku             # API on :4242
 cd web && npm run dev         # UI on :5173, proxies /api to :4242
 ```
 
