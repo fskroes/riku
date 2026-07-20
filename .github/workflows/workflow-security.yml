@@ -1,0 +1,23 @@
+name: Workflow security
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/scripts/check-workflow-security.sh"
+  push:
+    branches: [main]
+
+# Read-only: this check only reads the workflow files.
+permissions:
+  contents: read
+
+jobs:
+  pinning-and-permissions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - name: Check Action pinning and permission scoping
+        run: bash .github/scripts/check-workflow-security.sh

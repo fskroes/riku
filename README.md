@@ -57,10 +57,15 @@ installed as a Homebrew service. Configure an unattended Collector once, then us
 Homebrew to manage it:
 
 ```sh
-riku config set relay.url http://hub:4343
+riku config set relay.url https://relay.example.com
 riku config set relay.token "$RELAY_TOKEN"
 brew services start riku
 ```
+
+The Relay URL must be `https://` for a remote hub; riku refuses to persist or connect
+to a remote `http://` URL so the shared token and Session stream are never sent in
+cleartext. Plain `http://localhost` is accepted only for a single-machine loopback
+setup. See [Team / multi-machine](#team--multi-machine-c7).
 
 Config is stored at `~/.config/riku/config.toml` with `0600` permissions. Values
 resolve in this order: explicit flags, `RELAY_URL` / `RELAY_TOKEN` / `RIKU_ROOT` /
@@ -75,24 +80,35 @@ each machine, then point the board at the Relay. A single shared token gates
 everyone; the Relay holds only live in-memory state (nothing to back up) and is
 strictly one-way read-only — it transports session state, never commands (ADR 0002).
 
+Remote transport is encrypted, and that is enforced, not advised: the Collector and
+board require an `https://` Relay URL. `riku relay` is a **loopback-only development
+server** — a real multi-machine Relay is a loopback riku process behind a
+TLS-terminating reverse proxy that presents the certificate. See
+**[docs/relay-deployment.md](docs/relay-deployment.md)** for one supported shape and
+its certificate, forwarding, and token requirements.
+
 ```sh
-# On the hub (the one network service; binds 0.0.0.0):
-cargo run -p riku -- relay --addr 0.0.0.0:4343 --token "$RELAY_TOKEN"
+# A remote Relay sits behind a TLS proxy (nginx/Caddy) → 127.0.0.1:4343.
+# Run the Relay bound to loopback; the proxy terminates TLS:
+cargo run -p riku -- relay --addr 127.0.0.1:4343 --token "$RELAY_TOKEN"
 
 # On each machine whose agents you want to see (headless, no UI):
-cargo run -p riku -- collect --relay http://hub:4343 --token "$RELAY_TOKEN"
+cargo run -p riku -- collect --relay https://relay.example.com --token "$RELAY_TOKEN"
 
 # Point your board at the Relay (still binds localhost; local sessions keep working):
-cargo run -p riku -- --relay http://hub:4343 --token "$RELAY_TOKEN"
+cargo run -p riku -- --relay https://relay.example.com --token "$RELAY_TOKEN"
 ```
+
+For a single-machine setup where Board, Collector, and Relay all run on the same host,
+plain `http://localhost:4343` is accepted — the one loopback exception to the HTTPS
+rule.
 
 The token may also come from the `RELAY_TOKEN` environment variable for all three.
 The Collector reuses the same `--root`/`--codex-root` flags as the board and
 `--machine <name>` to override the host label. Remote sessions flow into the same
 Active / Attention / Finished columns, each card labelled with its machine; the
 topbar pill shows `relay ✓ · N machines`. If a Collector goes offline its cards
-disappear; on reconnect it re-pushes its state. TLS and where you host the Relay are
-your call.
+disappear; on reconnect it re-pushes its state.
 
 ## Develop the UI with hot reload
 
