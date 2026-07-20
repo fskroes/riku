@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import type { LinkedSession, ProjectRef, WorkItem, WorkStatus } from "./types";
 import { domId, shortModel, sourceLabel } from "./format";
 import { Machine, Tile, useFlash } from "./ui";
@@ -177,40 +178,212 @@ function computeDepths(items: WorkItem[]): Map<string, number> {
   return depth;
 }
 
-/** The dependency-graph rendering (ADR 0005): the same item set laid out left to
- *  right by blocked-by depth, with edges from each blocker to its dependents. */
-function Graph({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: OpenSession }) {
+/** The accent colour for a status: green done, indigo doing, faint todo. */
+function statusColor(status: WorkStatus): string {
+  return status === "done" ? "var(--positive)" : status === "doing" ? "var(--info)" : "var(--ink-faint)";
+}
+
+interface GraphModel {
+  edges: { from: string; to: string }[];
+  blockers: Map<string, string[]>; // id -> in-set ids it is blocked by
+  dependents: Map<string, string[]>; // id -> in-set ids blocked by it
+  criticalNodes: Set<string>;
+  criticalEdges: Set<string>; // "from->to" keys along the critical path
+}
+
+/** Blocker/dependent adjacency, the blocker→dependent edge list, and the critical
+ *  path: the single longest dependency chain, so it can be drawn as a spine. Uses
+ *  only in-set edges and is cycle-guarded (matches computeDepths' tolerance). */
+function buildGraphModel(items: WorkItem[], depth: Map<string, number>): GraphModel {
   const byId = new Map(items.map((i) => [i.id, i]));
-  const depth = computeDepths(items);
-
-  // Assign each item a (column, row) slot: column = depth, row = order within it.
-  const rows = new Map<number, number>();
-  const pos = new Map<string, { x: number; y: number }>();
-  for (const item of items) {
-    const col = depth.get(item.id) ?? 0;
-    const row = rows.get(col) ?? 0;
-    rows.set(col, row + 1);
-    pos.set(item.id, { x: col * (NODE_W + GAP_X), y: row * (NODE_H + GAP_Y) });
+  const blockers = new Map<string, string[]>();
+  const dependents = new Map<string, string[]>();
+  for (const it of items) dependents.set(it.id, []);
+  for (const it of items) {
+    const bs = it.blockedBy.filter((b) => byId.has(b));
+    blockers.set(it.id, bs);
+    for (const b of bs) dependents.get(b)!.push(it.id);
   }
-
-  const maxCol = Math.max(0, ...[...depth.values()]);
-  const maxRow = Math.max(0, ...[...rows.values()]);
-  const width = (maxCol + 1) * NODE_W + maxCol * GAP_X;
-  const height = maxRow * NODE_H + Math.max(0, maxRow - 1) * GAP_Y;
-
   const edges: { from: string; to: string }[] = [];
-  for (const item of items) {
-    for (const b of item.blockedBy) {
-      if (byId.has(b)) edges.push({ from: b, to: item.id });
+  for (const it of items) for (const b of blockers.get(it.id)!) edges.push({ from: b, to: it.id });
+
+  // Longest downstream chain from each node (by node count), cycle-guarded.
+  const best = new Map<string, { len: number; next: string | null }>();
+  const visiting = new Set<string>();
+  const longest = (id: string): { len: number; next: string | null } => {
+    const memo = best.get(id);
+    if (memo) return memo;
+    if (visiting.has(id)) return { len: 1, next: null };
+    visiting.add(id);
+    let pick: { len: number; next: string | null } = { len: 1, next: null };
+    for (const dep of dependents.get(id)!) {
+      const sub = longest(dep);
+      if (sub.len + 1 > pick.len) pick = { len: sub.len + 1, next: dep };
+    }
+    visiting.delete(id);
+    best.set(id, pick);
+    return pick;
+  };
+  items.forEach((i) => longest(i.id));
+
+  // The critical path starts at the root (depth 0) with the longest chain.
+  let start: string | null = null;
+  let bestLen = 0;
+  for (const it of items) {
+    if ((depth.get(it.id) ?? 0) !== 0) continue;
+    const len = best.get(it.id)!.len;
+    if (len > bestLen) {
+      bestLen = len;
+      start = it.id;
     }
   }
+  const criticalNodes = new Set<string>();
+  const criticalEdges = new Set<string>();
+  for (let cur = start; cur; cur = best.get(cur)!.next) {
+    criticalNodes.add(cur);
+    const nxt = best.get(cur)!.next;
+    if (nxt) criticalEdges.add(`${cur}->${nxt}`);
+  }
+  return { edges, blockers, dependents, criticalNodes, criticalEdges };
+}
+
+/** The lineage of `id`: itself plus every ancestor (up the blocked-by chain) and
+ *  every descendant (down the dependents chain) — what hovering highlights. */
+function lineageOf(model: GraphModel, id: string): Set<string> {
+  const set = new Set<string>([id]);
+  const up = (x: string): void => {
+    for (const b of model.blockers.get(x) ?? []) if (!set.has(b)) (set.add(b), up(b));
+  };
+  const down = (x: string): void => {
+    for (const dep of model.dependents.get(x) ?? []) if (!set.has(dep)) (set.add(dep), down(dep));
+  };
+  up(id);
+  down(id);
+  return set;
+}
+
+/** The graph viewport: native overflow scroll plus grab-and-drag panning, so a
+ *  wide dependency graph can be moved left↔right (and up/down) with the mouse.
+ *  A drag starting on a node is left to the node — its click opens the session. */
+function GraphScroll({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const from = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+
+  const onMouseDown = (e: ReactMouseEvent): void => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
+    const el = ref.current;
+    if (!el) return;
+    from.current = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop };
+    setPanning(true);
+  };
+
+  useEffect(() => {
+    if (!panning) return;
+    const move = (e: MouseEvent): void => {
+      const f = from.current;
+      const el = ref.current;
+      if (!f || !el) return;
+      el.scrollLeft = f.left - (e.clientX - f.x);
+      el.scrollTop = f.top - (e.clientY - f.y);
+    };
+    const stop = (): void => {
+      from.current = null;
+      setPanning(false);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", stop);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", stop);
+    };
+  }, [panning]);
+
+  return (
+    <div ref={ref} className={`graph-scroll${panning ? " panning" : ""}`} onMouseDown={onMouseDown}>
+      {children}
+    </div>
+  );
+}
+
+/** Decodes the node encoding at a glance — status glyphs, the critical spine, and
+ *  the live-agent rings. */
+function GraphLegend() {
+  return (
+    <div className="graph-legend">
+      <span>
+        <i className="lg" style={{ color: "var(--positive)" }}>
+          ✓
+        </i>{" "}
+        done
+      </span>
+      <span>
+        <i className="lg" style={{ color: "var(--info)" }}>
+          ◐
+        </i>{" "}
+        doing
+      </span>
+      <span>
+        <i className="lg" style={{ color: "var(--ink-faint)" }}>
+          ○
+        </i>{" "}
+        todo
+      </span>
+      <span>
+        <i className="lg-crit" /> critical path
+      </span>
+      <span>
+        <i className="lg-pulse active" /> agent working
+      </span>
+      <span>
+        <i className="lg-pulse attention" /> needs attention
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The dependency-graph rendering (ADR 0005): the item set laid out left to right
+ * by blocked-by depth, edges from each blocker to its dependent. The longest
+ * dependency chain is drawn as an amber "critical path" spine; hovering a node
+ * highlights its full lineage (ancestors + descendants) and dims the rest; a node
+ * an agent is live on gets a status-coloured pulsing ring (green active, amber
+ * attention). Done items read at a glance via a ✓ glyph and a green wash.
+ */
+function Graph({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: OpenSession }) {
+  const [hover, setHover] = useState<string | null>(null);
+
+  const { pos, width, height, model } = useMemo(() => {
+    const depth = computeDepths(items);
+    const model = buildGraphModel(items, depth);
+
+    // Assign each item a (column, row) slot: column = depth, row = order within it.
+    const rows = new Map<number, number>();
+    const pos = new Map<string, { x: number; y: number }>();
+    for (const item of items) {
+      const col = depth.get(item.id) ?? 0;
+      const row = rows.get(col) ?? 0;
+      rows.set(col, row + 1);
+      pos.set(item.id, { x: col * (NODE_W + GAP_X), y: row * (NODE_H + GAP_Y) });
+    }
+    const maxCol = Math.max(0, ...[...depth.values()]);
+    const maxRow = Math.max(0, ...[...rows.values()]);
+    return {
+      pos,
+      model,
+      width: (maxCol + 1) * NODE_W + maxCol * GAP_X,
+      height: maxRow * NODE_H + Math.max(0, maxRow - 1) * GAP_Y,
+    };
+  }, [items]);
+
+  const lineage = useMemo(() => (hover ? lineageOf(model, hover) : null), [model, hover]);
 
   if (items.length === 0) return <div className="empty">No Work Items to graph.</div>;
 
   return (
     <div className="graph" style={{ width, height }}>
       <svg className="edges" width={width} height={height} aria-hidden>
-        {edges.map(({ from, to }) => {
+        {model.edges.map(({ from, to }) => {
           const a = pos.get(from)!;
           const b = pos.get(to)!;
           const x1 = a.x + NODE_W;
@@ -218,11 +391,14 @@ function Graph({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: Ope
           const x2 = b.x;
           const y2 = b.y + NODE_H / 2;
           const dx = Math.max(24, (x2 - x1) / 2);
+          const crit = model.criticalEdges.has(`${from}->${to}`);
+          const lit = lineage ? lineage.has(from) && lineage.has(to) : false;
+          const cls = `edge${crit ? " crit" : ""}${lineage ? (lit ? " lit" : " dim") : ""}`;
           return (
             <path
               key={`${from}->${to}`}
               d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`}
-              className="edge"
+              className={cls}
               fill="none"
             />
           );
@@ -230,20 +406,39 @@ function Graph({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: Ope
       </svg>
       {items.map((item) => {
         const p = pos.get(item.id)!;
+        const crit = model.criticalNodes.has(item.id);
+        const dim = lineage ? !lineage.has(item.id) : false;
+        const agent = item.session ? ` has-agent agent-${item.session.status}` : "";
         return (
           <button
             key={item.id}
             type="button"
-            className={`gnode is-${item.status}`}
+            className={`gnode is-${item.status}${crit ? " crit" : ""}${dim ? " dim" : ""}${agent}`}
             id={domId("item", item.id)}
             style={{ left: p.x, top: p.y, width: NODE_W, height: NODE_H }}
             title={item.session ? "Open the linked session on the Board" : item.title}
+            onMouseEnter={() => setHover(item.id)}
+            onMouseLeave={() => setHover(null)}
             onClick={() => item.session && onOpenSession(item.session.id)}
           >
             <div className="gtop">
+              <span className="glyph" style={{ color: statusColor(item.status) }}>
+                {STATUS_GLYPH[item.status]}
+              </span>
               <span className="id">{item.id}</span>
-              {item.effort && <span className="eff">{item.effort}</span>}
-              {item.session && <span className="dot live" />}
+              {crit && <span className="crit-tag">critical</span>}
+              <span className="gright">
+                {item.session && (
+                  <span className={`agent-pill ${item.session.status}`}>
+                    {item.session.status === "attention"
+                      ? "⚠ attention"
+                      : item.session.status === "finished"
+                        ? "idle"
+                        : "◉ agent"}
+                  </span>
+                )}
+                {item.effort && <span className="eff">{item.effort}</span>}
+              </span>
             </div>
             <div className="gtitle">{item.title}</div>
           </button>
@@ -322,9 +517,12 @@ export function WorkItems({
       ) : mode === "kanban" ? (
         <Kanban items={items} onOpenSession={onOpenSession} />
       ) : (
-        <div className="graph-scroll">
-          <Graph items={items} onOpenSession={onOpenSession} />
-        </div>
+        <>
+          <GraphLegend />
+          <GraphScroll>
+            <Graph items={items} onOpenSession={onOpenSession} />
+          </GraphScroll>
+        </>
       )}
     </>
   );
