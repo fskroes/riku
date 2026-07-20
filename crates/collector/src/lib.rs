@@ -8,6 +8,7 @@
 //! async runtime it uses.
 
 mod codex;
+mod deeplink;
 mod fold;
 mod model;
 mod parse;
@@ -19,6 +20,7 @@ mod work;
 
 use std::path::PathBuf;
 
+pub use deeplink::DeepLink;
 pub use fold::{Fold, Projection, ACTIVITY_WINDOW};
 pub use model::{Session, Status, Tool};
 pub use session::{Accumulator, FileState};

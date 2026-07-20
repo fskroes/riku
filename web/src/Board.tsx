@@ -1,4 +1,5 @@
 import type { Session } from "./types";
+import type { OpenController } from "./useOpen";
 import { abbrevTokens, domId, relativeAge } from "./format";
 import { Meta, Tile, useFlash } from "./ui";
 
@@ -28,9 +29,37 @@ function PlanLink({ session, onOpenPlan }: { session: Session; onOpenPlan: OpenP
   );
 }
 
+/** Deep-link a session into its local terminal (C6). Disabled while its own launch
+ *  is in flight; without a `cwd` there is no workspace to resume into. */
+function OpenLink({ session, open }: { session: Session; open: OpenController }) {
+  if (!session.cwd) return null;
+  const pending = open.pendingId === session.id;
+  return (
+    <button
+      className="openlink"
+      type="button"
+      title="Open this session in a local terminal"
+      disabled={pending}
+      onClick={() => open.onOpen(session)}
+    >
+      {pending ? "opening…" : "open ↗"}
+    </button>
+  );
+}
+
 /** An Attention session: a loud full-width alert pinned to the top. */
-function AlertRow({ session, onOpenPlan }: { session: Session; onOpenPlan: OpenPlan }) {
+function AlertRow({
+  session,
+  open,
+  onOpenPlan,
+}: {
+  session: Session;
+  open: OpenController;
+  onOpenPlan: OpenPlan;
+}) {
   const { icon, label } = REASON[session.attentionReason ?? "waiting"];
+  const pending = open.pendingId === session.id;
+  const failed = open.error?.id === session.id ? open.error.message : null;
   return (
     <div className="alert" id={domId("board", session.id)}>
       <Tile tool={session.tool} />
@@ -46,9 +75,16 @@ function AlertRow({ session, onOpenPlan }: { session: Session; onOpenPlan: OpenP
         <div className="meta" style={{ marginTop: 8 }}>
           <Meta session={session} />
         </div>
+        {failed && <div className="openerr">{failed}</div>}
       </div>
-      <button className="cta" type="button" title="Deep-link lands in C6">
-        Review →
+      <button
+        className="cta"
+        type="button"
+        title="Open this session in a local terminal to respond"
+        disabled={pending || !session.cwd}
+        onClick={() => open.onOpen(session)}
+      >
+        {pending ? "Opening…" : "Review →"}
       </button>
     </div>
   );
@@ -59,13 +95,16 @@ function CompactRow({
   session,
   now,
   done,
+  open,
   onOpenPlan,
 }: {
   session: Session;
   now: number;
   done?: boolean;
+  open: OpenController;
   onOpenPlan: OpenPlan;
 }) {
+  const failed = open.error?.id === session.id ? open.error.message : null;
   return (
     <div className={done ? "row done" : "row"} id={domId("board", session.id)}>
       <Tile tool={session.tool} small />
@@ -78,6 +117,8 @@ function CompactRow({
         {session.activity ?? ""}
       </div>
       <div className="mini">
+        {failed && <span className="openerr" title={failed}>open failed</span>}
+        <OpenLink session={session} open={open} />
         <PlanLink session={session} onOpenPlan={onOpenPlan} />
         <span>
           ↑{abbrevTokens(session.tokensIn)}/{abbrevTokens(session.tokensOut)}
@@ -107,11 +148,13 @@ export function Board({
   sessions,
   now,
   focusId,
+  open,
   onOpenPlan,
 }: {
   sessions: Session[];
   now: number;
   focusId: string | null;
+  open: OpenController;
   onOpenPlan: OpenPlan;
 }) {
   useFlash(focusId ? domId("board", focusId) : null);
@@ -132,17 +175,17 @@ export function Board({
     <div className="stream">
       <Band dot="attention" label="Needs you" count={attention.length} />
       {attention.map((s) => (
-        <AlertRow key={s.id} session={s} onOpenPlan={onOpenPlan} />
+        <AlertRow key={s.id} session={s} open={open} onOpenPlan={onOpenPlan} />
       ))}
 
       <Band dot="active" label="Running" count={active.length} />
       {active.map((s) => (
-        <CompactRow key={s.id} session={s} now={now} onOpenPlan={onOpenPlan} />
+        <CompactRow key={s.id} session={s} now={now} open={open} onOpenPlan={onOpenPlan} />
       ))}
 
       <Band dot="finished" label="Finished" count={finished.length} />
       {finished.map((s) => (
-        <CompactRow key={s.id} session={s} now={now} done onOpenPlan={onOpenPlan} />
+        <CompactRow key={s.id} session={s} now={now} done open={open} onOpenPlan={onOpenPlan} />
       ))}
     </div>
   );

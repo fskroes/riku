@@ -99,6 +99,17 @@ impl SessionStore {
             .collect()
     }
 
+    /// Find a live session by its `id`, returning its transcript path alongside
+    /// the built Session. Used by the deep-link endpoint to resolve which local
+    /// transcript / directory a client-supplied id refers to — the id is the only
+    /// client input; the path and `cwd` come from the store, never the caller.
+    pub fn find_by_id(&self, id: &str, now: DateTime<Utc>) -> Option<(PathBuf, Session)> {
+        self.files.iter().find_map(|(path, entry)| {
+            let session = entry.state.build(entry.mtime, now)?;
+            (session.id == id).then(|| (path.clone(), session))
+        })
+    }
+
     /// Ingest new bytes for a created/modified transcript. Returns an `Upsert`
     /// event iff the resulting Session changed.
     pub fn ingest(&mut self, path: &Path, now: DateTime<Utc>) -> Option<Event> {

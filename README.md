@@ -70,6 +70,21 @@ updates over SSE at `GET /api/events` (`session` / `removed` events; the client
 upserts by `id` and re-syncs the snapshot on reconnect). See
 `docs/adr/0005-*` for the UI decision and `CONTEXT.md` for the domain language.
 
+## Deep-link into a session (C6)
+
+The board's one action on a card is to **deep-link into the local session** — never
+to control it remotely (ADR 0002). Because the board runs on your own machine, an
+Attention card's `Review →` (and every card's `open ↗`) opens a new terminal that
+`cd`s into the session's workspace and resumes it — `claude --resume <id>` or `codex
+resume <id>` — so you land back in the exact conversation to answer or review it.
+
+`POST /api/sessions/:id/open` drives it. The only input is the session `id`; the
+tool, working directory, and transcript are read from the store, so a request can
+never point the launch at an arbitrary command or directory. The resume command is
+run inside a fresh **Terminal.app** window (macOS); if a CLI names its resume flag
+differently the terminal still opens in the right workspace. A launch failure is
+surfaced on the card.
+
 ## Work Items (C4)
 
 The **Work Items** tab shows one project's plan at a time, rendered two ways over

@@ -13,6 +13,7 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use crate::http::AppState;
+use crate::open::TerminalLauncher;
 
 /// How often statuses are re-evaluated so time-based transitions (e.g. a quiet
 /// session crossing into Finished) reach connected boards without a file change.
@@ -58,7 +59,12 @@ pub fn init(claude_root: PathBuf, codex_root: Option<PathBuf>, web_dist: PathBuf
     spawn_refresh(store.clone(), tx.clone());
 
     Started {
-        state: AppState { store, tx, web_dist },
+        state: AppState {
+            store,
+            tx,
+            web_dist,
+            launcher: Arc::new(TerminalLauncher),
+        },
         watch_guard,
     }
 }
