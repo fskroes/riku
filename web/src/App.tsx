@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ProjectRef, Session } from "./types";
 import { useSessions } from "./useSessions";
+import { useOpen } from "./useOpen";
 import { useNow } from "./ui";
 import { Board } from "./Board";
 import { WorkItems } from "./WorkItems";
@@ -19,6 +20,7 @@ function projectsOf(sessions: Session[]): ProjectRef[] {
 
 export default function App() {
   const { sessions, connected } = useSessions();
+  const open = useOpen();
   const now = useNow(15000);
 
   const [view, setView] = useState<View>("board");
@@ -87,7 +89,7 @@ export default function App() {
 
       <div className={`stage ${view === "work" ? "view-work" : "view-board"}`}>
         {view === "board" ? (
-          <Board sessions={sessions} now={now} focusId={boardFocus} onOpenPlan={openPlan} />
+          <Board sessions={sessions} now={now} focusId={boardFocus} open={open} onOpenPlan={openPlan} />
         ) : (
           <WorkItems
             project={project}

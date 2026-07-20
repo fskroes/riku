@@ -6,22 +6,24 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use chrono::Utc;
-use collector::{Event, Session, SessionStore, Status, Tool, WorkItem, WorkSourceKind};
+use collector::{DeepLink, Event, Session, SessionStore, Status, Tool, WorkItem, WorkSourceKind};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
+
+use crate::open::{is_safe_session_id, Launcher};
 
 /// Shared state handed to every request handler.
 #[derive(Clone)]
@@ -29,6 +31,9 @@ pub struct AppState {
     pub store: Arc<Mutex<SessionStore>>,
     pub tx: broadcast::Sender<Event>,
     pub web_dist: PathBuf,
+    /// How the board opens a local session (a terminal launch); injectable so
+    /// tests can record the deep link instead of spawning Terminal.
+    pub launcher: Arc<dyn Launcher>,
 }
 
 /// The plain-text message shown when the UI has not been built yet.
@@ -39,6 +44,7 @@ const WEB_DIST_MISSING: &str =
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/api/sessions", get(sessions))
+        .route("/api/sessions/:id/open", post(open_session))
         .route("/api/events", get(events))
         .route("/api/work", get(work))
         .with_state(state.clone());
@@ -66,6 +72,53 @@ async fn sessions(State(state): State<AppState>) -> Json<SessionsResponse> {
         store.snapshot(Utc::now())
     };
     Json(SessionsResponse { sessions })
+}
+
+/// `POST /api/sessions/:id/open` — deep-link into the local session (ADR 0002).
+///
+/// The board is local, so this genuinely opens a terminal on the human's machine,
+/// resuming the exact session. The only client input is `id`; the tool, working
+/// directory, and transcript all come from the store, so the caller cannot point
+/// the launch at an arbitrary command or directory. `404` if no live session has
+/// that id; `422` if it has no known `cwd` to resume into; `502` if the launch
+/// itself fails (the launcher's reason is passed through for the UI to show).
+async fn open_session(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    if !is_safe_session_id(&id) {
+        return error(StatusCode::BAD_REQUEST, "not a valid session id");
+    }
+
+    let resolved = {
+        let store = state.store.lock().unwrap();
+        store.find_by_id(&id, Utc::now())
+    };
+    let Some((transcript, session)) = resolved else {
+        return error(StatusCode::NOT_FOUND, "no live session with that id");
+    };
+
+    let Some(link) = DeepLink::resume(session.tool, &session.id, session.cwd.as_deref(), &transcript)
+    else {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this session has no known working directory to open",
+        );
+    };
+
+    // The launch shells out to `osascript`; keep it off the async runtime.
+    let launcher = state.launcher.clone();
+    let dir = link.dir.to_string_lossy().to_string();
+    let result = tokio::task::spawn_blocking(move || launcher.open(&link))
+        .await
+        .expect("launcher does not panic");
+
+    match result {
+        Ok(()) => (StatusCode::OK, Json(json!({ "opened": true, "dir": dir }))).into_response(),
+        Err(message) => error(StatusCode::BAD_GATEWAY, &message),
+    }
+}
+
+/// A `{ "error": <message> }` body at `status`, for the UI to surface.
+fn error(status: StatusCode, message: &str) -> axum::response::Response {
+    (status, Json(json!({ "error": message }))).into_response()
 }
 
 #[derive(Deserialize)]

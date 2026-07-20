@@ -99,6 +99,14 @@ body {
 .planlink { border: 0; background: transparent; color: var(--info); font: 500 11px var(--font-mono); padding: 2px 6px; border-radius: var(--r-pill); cursor: pointer; }
 .planlink:hover { background: var(--info-soft); }
 
+/* Deep-link into the local session (C6): the alert CTA + the compact-row affordance */
+.openlink { border: 0; background: transparent; color: var(--positive); font: 500 11px var(--font-mono); padding: 2px 6px; border-radius: var(--r-pill); cursor: pointer; }
+.openlink:hover:not(:disabled) { background: rgba(51, 196, 129, 0.16); }
+.view-board .alert .cta:disabled, .openlink:disabled { opacity: .55; cursor: default; }
+.openerr { color: var(--negative); font-size: 11px; }
+.view-board .alert .openerr { margin-top: 8px; font-weight: 500; }
+.view-board .row .mini .openerr { white-space: nowrap; cursor: help; }
+
 /* WORK ITEMS — per-project kanban plan (variant A layout, repurposed) */
 .work-head { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
 .work-head .src { color: var(--ink-muted); font-family: var(--font-mono); font-size: 12px; }

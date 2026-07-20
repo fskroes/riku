@@ -5,10 +5,26 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use board::{http, runtime, Started};
+use board::{http, runtime, Launcher, Started};
+use collector::DeepLink;
 use futures::StreamExt;
+
+/// A [`Launcher`] that records the deep links it is asked to open instead of
+/// spawning Terminal, so the open endpoint can be tested end-to-end.
+#[derive(Default, Clone)]
+struct RecordingLauncher {
+    opened: Arc<Mutex<Vec<DeepLink>>>,
+}
+
+impl Launcher for RecordingLauncher {
+    fn open(&self, link: &DeepLink) -> Result<(), String> {
+        self.opened.lock().unwrap().push(link.clone());
+        Ok(())
+    }
+}
 
 /// Build one Claude Code assistant transcript line.
 fn assistant_line(id: &str, activity: &str, tin: u64, tout: u64) -> String {
@@ -158,6 +174,22 @@ async fn spawn_server_with(
         axum::serve(listener, app).await.unwrap();
     });
     (addr, started)
+}
+
+/// Start the server with a [`RecordingLauncher`] wired in, returning the recorder
+/// so a test can assert which deep link `POST …/open` resolved.
+async fn spawn_server_recording(root: PathBuf) -> (SocketAddr, Started, Arc<Mutex<Vec<DeepLink>>>) {
+    let mut started = runtime::init(root, None, PathBuf::from("does-not-exist"));
+    let recorder = RecordingLauncher::default();
+    let opened = recorder.opened.clone();
+    started.state.launcher = Arc::new(recorder);
+    let app = http::router(started.state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, started, opened)
 }
 
 /// Read from an SSE response until `needle` appears (or time out).
@@ -513,6 +545,57 @@ async fn work_endpoint_404s_for_an_unknown_project() {
         .unwrap()
         .status();
     assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn open_deep_links_into_the_local_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_transcript(
+        tmp.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-open", "waiting on you", 10, 1)],
+    );
+
+    let (addr, _started, opened) = spawn_server_recording(tmp.path().to_path_buf()).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/sessions/sess-open/open"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["opened"], true);
+
+    // The launcher was handed the session's own tool, id, and cwd — resolved from
+    // the store, not the request.
+    let links = opened.lock().unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].program, "claude");
+    assert_eq!(links[0].args, ["--resume", "sess-open"]);
+    assert_eq!(links[0].dir, PathBuf::from("/Users/x/repos/foo"));
+}
+
+#[tokio::test]
+async fn open_404s_for_an_unknown_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_transcript(
+        tmp.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-known", "hi", 10, 1)],
+    );
+    let (addr, _started, opened) = spawn_server_recording(tmp.path().to_path_buf()).await;
+
+    let status = reqwest::Client::new()
+        .post(format!("http://{addr}/api/sessions/sess-missing/open"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+    assert!(opened.lock().unwrap().is_empty(), "nothing should have launched");
 }
 
 #[tokio::test]
