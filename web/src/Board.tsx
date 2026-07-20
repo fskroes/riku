@@ -1,7 +1,7 @@
 import type { Session } from "./types";
 import type { OpenController } from "./useOpen";
 import { abbrevTokens, domId, relativeAge } from "./format";
-import { Meta, Tile, useFlash } from "./ui";
+import { Cost, Diff, Meta, Tile, useFlash } from "./ui";
 
 /** The glyph + headline for each Attention cause (issue #7). Falls back to
  *  waiting when a card is in Attention without an explicit reason. */
@@ -51,10 +51,12 @@ function OpenLink({ session, open }: { session: Session; open: OpenController })
 function AlertRow({
   session,
   open,
+  showCost,
   onOpenPlan,
 }: {
   session: Session;
   open: OpenController;
+  showCost: boolean;
   onOpenPlan: OpenPlan;
 }) {
   const { icon, label } = REASON[session.attentionReason ?? "waiting"];
@@ -73,7 +75,7 @@ function AlertRow({
           {session.activity && <span className="detail"> · {session.activity}</span>}
         </div>
         <div className="meta" style={{ marginTop: 8 }}>
-          <Meta session={session} />
+          <Meta session={session} showCost={showCost} />
         </div>
         {failed && <div className="openerr">{failed}</div>}
       </div>
@@ -94,12 +96,14 @@ function AlertRow({
 function CompactRow({
   session,
   now,
+  showCost,
   done,
   open,
   onOpenPlan,
 }: {
   session: Session;
   now: number;
+  showCost: boolean;
   done?: boolean;
   open: OpenController;
   onOpenPlan: OpenPlan;
@@ -120,9 +124,11 @@ function CompactRow({
         {failed && <span className="openerr" title={failed}>open failed</span>}
         <OpenLink session={session} open={open} />
         <PlanLink session={session} onOpenPlan={onOpenPlan} />
+        <Diff diff={session.diff} />
         <span>
           ↑{abbrevTokens(session.tokensIn)}/{abbrevTokens(session.tokensOut)}
         </span>
+        <Cost usd={session.costUsd} show={showCost} />
         <span className="age">{relativeAge(session.lastEventAt, now)}</span>
       </div>
     </div>
@@ -147,12 +153,14 @@ export type OpenPlan = (session: Session) => void;
 export function Board({
   sessions,
   now,
+  showCost,
   focusId,
   open,
   onOpenPlan,
 }: {
   sessions: Session[];
   now: number;
+  showCost: boolean;
   focusId: string | null;
   open: OpenController;
   onOpenPlan: OpenPlan;
@@ -175,17 +183,17 @@ export function Board({
     <div className="stream">
       <Band dot="attention" label="Needs you" count={attention.length} />
       {attention.map((s) => (
-        <AlertRow key={s.id} session={s} open={open} onOpenPlan={onOpenPlan} />
+        <AlertRow key={s.id} session={s} open={open} showCost={showCost} onOpenPlan={onOpenPlan} />
       ))}
 
       <Band dot="active" label="Running" count={active.length} />
       {active.map((s) => (
-        <CompactRow key={s.id} session={s} now={now} open={open} onOpenPlan={onOpenPlan} />
+        <CompactRow key={s.id} session={s} now={now} open={open} showCost={showCost} onOpenPlan={onOpenPlan} />
       ))}
 
       <Band dot="finished" label="Finished" count={finished.length} />
       {finished.map((s) => (
-        <CompactRow key={s.id} session={s} now={now} done open={open} onOpenPlan={onOpenPlan} />
+        <CompactRow key={s.id} session={s} now={now} open={open} showCost={showCost} done onOpenPlan={onOpenPlan} />
       ))}
     </div>
   );

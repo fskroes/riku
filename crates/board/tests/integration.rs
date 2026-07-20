@@ -526,6 +526,96 @@ async fn work_map_items_carry_their_work_link() {
     assert!(w14["session"].is_null(), "W-14 has no matching branch: {w14:?}");
 }
 
+/// Run a git command in `dir`, asserting it succeeds.
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(status.status.success(), "git {args:?} failed: {status:?}");
+}
+
+/// A git repo with one committed file, then three uncommitted lines added to it —
+/// a deterministic working-tree diff of `+3 / -0`.
+fn repo_with_uncommitted_change() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    let p = repo.path();
+    git(p, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(p, &["config", "user.email", "test@example.com"]);
+    git(p, &["config", "user.name", "Test"]);
+    fs::write(p.join("base.txt"), "one\ntwo\nthree\n").unwrap();
+    git(p, &["add", "-A"]);
+    git(p, &["commit", "-q", "-m", "base"]);
+    // Append three lines to the tracked file — uncommitted, so it shows in the diff.
+    fs::write(p.join("base.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+    repo
+}
+
+#[tokio::test]
+async fn card_carries_cost_estimate_and_live_git_diff() {
+    let claude = tempfile::tempdir().unwrap();
+    let repo = repo_with_uncommitted_change();
+    let repo_cwd = repo.path().to_string_lossy().to_string();
+    // A Claude session whose cwd is the git repo above.
+    write_transcript(
+        claude.path(),
+        "-repo",
+        "aaaa.jsonl",
+        &[assistant_line_in("sess-diff", &repo_cwd, "main")],
+    );
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let card = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "sess-diff")
+        .unwrap();
+
+    // Cost: assistant_line_in uses claude-opus-4-8 with 10 in / 1 out tokens.
+    // 10/1e6*15 + 1/1e6*75 = 0.00015 + 0.000075 = 0.000225.
+    let cost = card["costUsd"].as_f64().expect("costUsd present for a priced model");
+    assert!((cost - 0.000225).abs() < 1e-9, "unexpected cost: {cost}");
+
+    // Diff: three lines appended to the one tracked file.
+    assert_eq!(card["diff"]["added"], 3, "card: {card:?}");
+    assert_eq!(card["diff"]["removed"], 0, "card: {card:?}");
+}
+
+#[tokio::test]
+async fn non_repo_cwd_reports_no_diff() {
+    let claude = tempfile::tempdir().unwrap();
+    // /Users/x/repos/foo does not exist, so it is not a git repo.
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "hello", 100, 10)],
+    );
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let card = &body["sessions"].as_array().unwrap()[0];
+    assert!(card["diff"].is_null(), "no diff for a non-repo cwd: {card:?}");
+    // Cost still shows — it needs only tokens + model, not a repo.
+    assert!(card["costUsd"].as_f64().unwrap() > 0.0);
+}
+
 #[tokio::test]
 async fn work_endpoint_404s_for_an_unknown_project() {
     let claude = tempfile::tempdir().unwrap();

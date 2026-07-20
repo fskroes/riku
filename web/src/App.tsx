@@ -18,10 +18,25 @@ function projectsOf(sessions: Session[]): ProjectRef[] {
   return [...byCwd.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** Whether estimated costs are shown. Persisted so a subscription user, who pays no
+ *  marginal per-token cost, can hide the (misleading-for-them) estimate for good. */
+function useShowCost(): [boolean, () => void] {
+  const [show, setShow] = useState(() => localStorage.getItem("hideCost") !== "1");
+  const toggle = (): void => {
+    setShow((prev) => {
+      const next = !prev;
+      localStorage.setItem("hideCost", next ? "0" : "1");
+      return next;
+    });
+  };
+  return [show, toggle];
+}
+
 export default function App() {
   const { sessions, connected } = useSessions();
   const open = useOpen();
   const now = useNow(15000);
+  const [showCost, toggleCost] = useShowCost();
 
   const [view, setView] = useState<View>("board");
   // Cross-link focus: a session id to reveal on the Board, and a project +
@@ -81,6 +96,19 @@ export default function App() {
           </button>
         </span>
         <span className="spacer" />
+        <button
+          type="button"
+          className="costtoggle"
+          aria-pressed={showCost}
+          onClick={toggleCost}
+          title={
+            showCost
+              ? "Hide estimated costs (for subscription plans, which pay no marginal cost)"
+              : "Show estimated costs"
+          }
+        >
+          $ est. {showCost ? "on" : "off"}
+        </button>
         <span className="remote" title={connected ? "Live stream connected" : "Reconnecting…"}>
           <span className={`dot ${connected ? "live" : "finished"}`} />
           {connected ? "connected" : "offline"}
@@ -89,7 +117,14 @@ export default function App() {
 
       <div className={`stage ${view === "work" ? "view-work" : "view-board"}`}>
         {view === "board" ? (
-          <Board sessions={sessions} now={now} focusId={boardFocus} open={open} onOpenPlan={openPlan} />
+          <Board
+            sessions={sessions}
+            now={now}
+            showCost={showCost}
+            focusId={boardFocus}
+            open={open}
+            onOpenPlan={openPlan}
+          />
         ) : (
           <WorkItems
             project={project}

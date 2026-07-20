@@ -12,6 +12,7 @@ use collector::{
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
+use crate::diff::DiffCache;
 use crate::http::AppState;
 use crate::open::TerminalLauncher;
 
@@ -48,6 +49,7 @@ pub fn init(claude_root: PathBuf, codex_root: Option<PathBuf>, web_dist: PathBuf
 
     let store = Arc::new(Mutex::new(SessionStore::new(sources)));
     let (tx, _) = broadcast::channel::<Event>(1024);
+    let diff_cache = Arc::new(DiffCache::new());
 
     let count = {
         let mut guard = store.lock().unwrap();
@@ -55,14 +57,15 @@ pub fn init(claude_root: PathBuf, codex_root: Option<PathBuf>, web_dist: PathBuf
     };
     info!(?roots, sessions = count, "discovered sessions");
 
-    let watch_guard = start_watch(&roots, store.clone(), tx.clone());
-    spawn_refresh(store.clone(), tx.clone());
+    let watch_guard = start_watch(&roots, store.clone(), tx.clone(), diff_cache.clone());
+    spawn_refresh(store.clone(), tx.clone(), diff_cache.clone());
 
     Started {
         state: AppState {
             store,
             tx,
             web_dist,
+            diff_cache,
             launcher: Arc::new(TerminalLauncher),
         },
         watch_guard,
@@ -73,6 +76,7 @@ fn start_watch(
     roots: &[PathBuf],
     store: Arc<Mutex<SessionStore>>,
     tx: broadcast::Sender<Event>,
+    diff_cache: Arc<DiffCache>,
 ) -> Option<WatchGuard> {
     let result = collector::watch(roots, move |change| {
         let now = Utc::now();
@@ -83,7 +87,10 @@ fn start_watch(
                 Change::Removed(path) => guard.remove(&path),
             }
         };
-        if let Some(event) = event {
+        // Runs on the watcher thread, so filling the live `+/-` (a git call, TTL-
+        // cached) here keeps it off the async workers.
+        if let Some(mut event) = event {
+            diff_cache.enrich_event(&mut event);
             let _ = tx.send(event);
         }
     });
@@ -96,16 +103,31 @@ fn start_watch(
     }
 }
 
-fn spawn_refresh(store: Arc<Mutex<SessionStore>>, tx: broadcast::Sender<Event>) {
+fn spawn_refresh(
+    store: Arc<Mutex<SessionStore>>,
+    tx: broadcast::Sender<Event>,
+    diff_cache: Arc<DiffCache>,
+) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(REFRESH_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            let events = {
+            let mut events = {
                 let mut guard = store.lock().unwrap();
                 guard.refresh(Utc::now())
             };
+            // Enrich off the runtime: the git calls (mostly TTL cache hits) must not
+            // stall the async workers for the handful of just-changed sessions.
+            let cache = diff_cache.clone();
+            let events = tokio::task::spawn_blocking(move || {
+                for event in &mut events {
+                    cache.enrich_event(event);
+                }
+                events
+            })
+            .await
+            .expect("diff enrichment does not panic");
             for event in events {
                 let _ = tx.send(event);
             }
