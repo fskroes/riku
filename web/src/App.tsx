@@ -47,8 +47,18 @@ function Meta({ session }: { session: Session }) {
   );
 }
 
-/** An Attention session: a loud full-width alert pinned to the top. */
+/** The glyph + headline for each Attention cause (issue #7). Falls back to
+ *  waiting when a card is in Attention without an explicit reason. */
+const REASON: Record<NonNullable<Session["attentionReason"]>, { icon: string; label: string }> = {
+  waiting: { icon: "💬", label: "Waiting for you" },
+  error: { icon: "⚠", label: "Exited with error" },
+};
+
+/** An Attention session: a loud full-width alert pinned to the top. The reason
+ *  line names *why* it needs a human (waiting vs error); the activity is the
+ *  supporting detail. */
 function AlertRow({ session }: { session: Session }) {
+  const { icon, label } = REASON[session.attentionReason ?? "waiting"];
   return (
     <div className="alert">
       <Tile tool={session.tool} />
@@ -56,7 +66,10 @@ function AlertRow({ session }: { session: Session }) {
         <div className="r1">
           <span className="name">{session.project}</span>
         </div>
-        <div className="reason pillstat">💬 {session.activity ?? "Waiting for you"}</div>
+        <div className="reason pillstat">
+          {icon} {label}
+          {session.activity && <span className="detail"> · {session.activity}</span>}
+        </div>
         <div className="meta" style={{ marginTop: 8 }}>
           <Meta session={session} />
         </div>

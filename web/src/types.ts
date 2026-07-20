@@ -3,6 +3,9 @@
 
 export type Status = "active" | "attention" | "finished";
 
+// Why a card is in Attention. Present only when status === "attention".
+export type AttentionReason = "waiting" | "error";
+
 export type Tool = "claude" | "codex";
 
 export interface Session {
@@ -17,6 +20,7 @@ export interface Session {
   activity: string | null;
   lastEventAt: string; // ISO 8601
   status: Status;
+  attentionReason: AttentionReason | null;
 }
 
 export interface SessionsResponse {

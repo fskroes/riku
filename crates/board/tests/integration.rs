@@ -28,6 +28,34 @@ fn assistant_line(id: &str, activity: &str, tin: u64, tout: u64) -> String {
     .to_string()
 }
 
+/// A Claude assistant turn that ended to call a tool (waiting on the human).
+fn claude_waiting_line(id: &str) -> String {
+    serde_json::json!({
+        "type": "assistant",
+        "sessionId": id,
+        "timestamp": "2026-07-19T10:00:00Z",
+        "cwd": "/Users/x/repos/foo",
+        "gitBranch": "main",
+        "message": {
+            "model": "claude-opus-4-8",
+            "stop_reason": "tool_use",
+            "content": [{ "type": "tool_use", "id": "toolu_1", "name": "Bash" }]
+        }
+    })
+    .to_string()
+}
+
+/// A user turn answering a `tool_use` — clears the wait.
+fn claude_tool_result_line(id: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "sessionId": id,
+        "cwd": "/Users/x/repos/foo",
+        "message": { "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok" }] }
+    })
+    .to_string()
+}
+
 /// The lines of a minimal Codex rollout: session_meta + turn_context + token_count
 /// + one assistant message.
 fn codex_rollout(id: &str, activity: &str, tin: u64, tout: u64) -> Vec<String> {
@@ -322,6 +350,79 @@ async fn codex_subagent_rollout_is_not_a_card() {
 
     let sessions = body["sessions"].as_array().unwrap();
     assert!(sessions.is_empty(), "subagent rollout must not render: {sessions:?}");
+}
+
+#[tokio::test]
+async fn attention_reason_surfaces_for_both_tools() {
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    // Claude: an unanswered tool_use → waiting.
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[claude_waiting_line("claude-wait")],
+    );
+    // Codex: an aborted turn → error.
+    let mut codex_lines = codex_rollout("codex-err", "started", 100, 10);
+    codex_lines.push(
+        serde_json::json!({
+            "timestamp": "2026-07-19T10:00:04Z",
+            "type": "event_msg",
+            "payload": { "type": "turn_aborted", "reason": "interrupted" }
+        })
+        .to_string(),
+    );
+    write_codex_rollout(codex.path(), "rollout-2026-07-19T10-00-00-codex-err.jsonl", &codex_lines);
+
+    let (addr, _started) =
+        spawn_server_with(claude.path().to_path_buf(), Some(codex.path().to_path_buf())).await;
+
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let sessions = body["sessions"].as_array().unwrap();
+
+    let waiting = sessions.iter().find(|s| s["id"] == "claude-wait").unwrap();
+    assert_eq!(waiting["status"], "attention");
+    assert_eq!(waiting["attentionReason"], "waiting");
+
+    let errored = sessions.iter().find(|s| s["id"] == "codex-err").unwrap();
+    assert_eq!(errored["status"], "attention");
+    assert_eq!(errored["attentionReason"], "error");
+}
+
+#[tokio::test]
+async fn answering_a_wait_drops_out_of_attention_over_sse() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_transcript(
+        tmp.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[claude_waiting_line("sess-wait")],
+    );
+
+    let (addr, _started) = spawn_server(tmp.path().to_path_buf()).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/api/events"))
+        .send()
+        .await
+        .unwrap();
+
+    // The human answers the tool_use; the card must leave Attention.
+    append_line(&path, &claude_tool_result_line("sess-wait"));
+
+    let buf = read_until(resp, "sess-wait", Duration::from_secs(15)).await;
+    assert!(buf.contains("event: session"), "expected a session event: {buf:?}");
+    assert!(buf.contains("\"status\":\"active\""), "expected active after answer: {buf:?}");
+    assert!(
+        buf.contains("\"attentionReason\":null"),
+        "attention reason should clear: {buf:?}"
+    );
 }
 
 #[tokio::test]

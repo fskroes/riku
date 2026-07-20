@@ -16,12 +16,20 @@
 //!   for the session*, so we take the latest one rather than summing.
 //! * `response_item` / `message` with `role == "assistant"` — its `output_text`
 //!   drives the activity line.
+//!
+//! Attention (C3, issue #7) is derived from the newest lifecycle event:
+//! `turn_aborted` (an interrupted / killed turn) raises Attention(Error); a
+//! `task_started` / `task_complete` / assistant message clears it (recovery is
+//! free). Codex approval-waits are handled by [`is_approval_request`] — see its
+//! note; no local rollout could verify the marker (all ran `approval_policy:
+//! never`), so a real approval degrades safely to no-attention if the CLI names
+//! the event differently.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::fold::{first_line, project_from_cwd, Fold, Projection};
-use crate::model::Tool;
+use crate::model::{AttentionReason, Tool};
 
 /// A raw Codex rollout line, deserialized leniently. Every field is optional so
 /// partial / drifting records still parse; unmodeled fields are dropped.
@@ -97,6 +105,10 @@ pub struct CodexFold {
     tokens_in: u64,
     tokens_out: u64,
     latest_timestamp: Option<DateTime<Utc>>,
+    /// Attention per the newest lifecycle event: `turn_aborted` → Error, a pending
+    /// approval → Waiting, cleared by any forward progress. `None` when the session
+    /// needs nothing from the human.
+    attention: Option<AttentionReason>,
 }
 
 impl CodexFold {
@@ -111,6 +123,16 @@ impl CodexFold {
             Some(p) => p,
             None => return,
         };
+
+        // A pending approval can surface either as its own line `type` or as an
+        // `event_msg` `payload.type`; accept both. Unverified against a live run
+        // (see `is_approval_request`), so an unrecognised name simply never fires.
+        if is_approval_request(raw.line_type.as_deref())
+            || is_approval_request(payload.payload_type.as_deref())
+        {
+            self.attention = Some(AttentionReason::Waiting);
+            return;
+        }
 
         match raw.line_type.as_deref() {
             Some("session_meta") => {
@@ -138,19 +160,28 @@ impl CodexFold {
                     self.cwd = Some(cwd);
                 }
             }
-            Some("event_msg") => {
-                if payload.payload_type.as_deref() == Some("token_count") {
+            Some("event_msg") => match payload.payload_type.as_deref() {
+                Some("token_count") => {
                     // Cumulative for the session — overwrite, do not sum.
                     if let Some(usage) = payload.info.and_then(|i| i.total_token_usage) {
                         self.tokens_in = usage.input_tokens;
                         self.tokens_out = usage.output_tokens;
                     }
                 }
-            }
+                // An interrupted / killed turn is an abnormal ending.
+                Some("turn_aborted") => self.attention = Some(AttentionReason::Error),
+                // A turn starting or completing cleanly needs nothing from the
+                // human and clears any prior error/approval (recovery).
+                Some("task_started") | Some("task_complete") => self.attention = None,
+                _ => {}
+            },
             Some("response_item")
                 if payload.payload_type.as_deref() == Some("message")
                     && payload.role.as_deref() == Some("assistant") =>
             {
+                // Forward progress: an assistant message clears any prior error /
+                // answered approval.
+                self.attention = None;
                 if let Some(activity) = activity_from_content(&payload.content) {
                     self.activity = Some(activity);
                 }
@@ -195,11 +226,28 @@ impl Fold for CodexFold {
             tokens_out: self.tokens_out,
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
-            // Codex's approval-wait signal is unverified (all sampled rollouts ran
-            // `approval_policy: never`); Attention for Codex is deferred to C3.
-            pending_input: false,
+            attention: self.attention,
         })
     }
+}
+
+/// Whether a Codex event name denotes a pending approval request.
+///
+/// The expected markers per issue #7 are `exec_approval_request` /
+/// `apply_patch_approval_request`. **Unverified against a live run**: every local
+/// rollout ran `approval_policy: never`, so no approval was ever observed. These
+/// names are unambiguous (a `*_approval_request` cannot mean anything else), so
+/// there is no false-positive risk on normal runs; if a real approval-gated CLI
+/// emits a differently-named event, this simply does not fire and the session
+/// stays out of Attention (a safe degradation, never a crash or false alert). The
+/// secondary "unanswered `function_call` at the tail" proxy from the issue is
+/// deliberately *not* used: a tool call is momentarily unanswered on every normal
+/// turn, which would resurrect exactly the false-Attention noise C3 removes.
+fn is_approval_request(name: Option<&str>) -> bool {
+    matches!(
+        name,
+        Some("exec_approval_request") | Some("apply_patch_approval_request")
+    )
 }
 
 /// First non-empty text line across a message's content blocks, truncated to 80.
@@ -301,6 +349,91 @@ mod tests {
         assert_eq!(s.tokens_in, 1000);
         assert_eq!(s.tokens_out, 200);
         assert_eq!(s.activity.as_deref(), Some("wiring the collector"));
+    }
+
+    /// An `event_msg` carrying a bare lifecycle `payload.type`.
+    fn event(payload_type: &str) -> String {
+        serde_json::json!({
+            "timestamp": "2026-07-19T10:00:05Z",
+            "type": "event_msg",
+            "payload": { "type": payload_type, "turn_id": "t1" }
+        })
+        .to_string()
+    }
+
+    /// An approval request as its own top-level line `type`.
+    fn approval(line_type: &str) -> String {
+        serde_json::json!({
+            "timestamp": "2026-07-19T10:00:06Z",
+            "type": line_type,
+            "payload": { "call_id": "c1", "command": ["rm", "-rf", "x"] }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn turn_aborted_is_attention_error() {
+        let mut fs = codex();
+        feed(
+            &mut fs,
+            &[meta("rollout-1", "user"), event("task_started"), event("turn_aborted")],
+        );
+        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        assert_eq!(s.status, crate::model::Status::Attention);
+        assert_eq!(s.attention_reason, Some(AttentionReason::Error));
+    }
+
+    #[test]
+    fn task_complete_and_quiet_is_finished() {
+        let mut fs = codex();
+        feed(
+            &mut fs,
+            &[meta("rollout-1", "user"), event("task_started"), event("task_complete")],
+        );
+        // 30 min quiet, cleanly completed → Finished, never Attention.
+        let s = fs.build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z")).unwrap();
+        assert_eq!(s.status, crate::model::Status::Finished);
+        assert_eq!(s.attention_reason, None);
+    }
+
+    #[test]
+    fn task_started_fresh_is_active() {
+        let mut fs = codex();
+        feed(&mut fs, &[meta("rollout-1", "user"), event("task_started")]);
+        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        assert_eq!(s.status, crate::model::Status::Active);
+        assert_eq!(s.attention_reason, None);
+    }
+
+    #[test]
+    fn approval_request_is_attention_waiting_and_clears() {
+        let mut fs = codex();
+        feed(
+            &mut fs,
+            &[meta("rollout-1", "user"), event("task_started"), approval("exec_approval_request")],
+        );
+        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        assert_eq!(s.status, crate::model::Status::Attention);
+        assert_eq!(s.attention_reason, Some(AttentionReason::Waiting));
+
+        // Answering it (forward progress) drops the card out of Attention.
+        feed(&mut fs, &[assistant_message("running the command")]);
+        let s = fs.build(ts("2026-07-19T10:04:30Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        assert_eq!(s.status, crate::model::Status::Active);
+        assert_eq!(s.attention_reason, None);
+    }
+
+    #[test]
+    fn activity_after_abort_clears_attention() {
+        // Recovery (story 19): a new turn after an abort leaves the error state.
+        let mut fs = codex();
+        feed(
+            &mut fs,
+            &[meta("rollout-1", "user"), event("turn_aborted"), event("task_started")],
+        );
+        let s = fs.build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z")).unwrap();
+        assert_eq!(s.status, crate::model::Status::Active);
+        assert_eq!(s.attention_reason, None);
     }
 
     #[test]
