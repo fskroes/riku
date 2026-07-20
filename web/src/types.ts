@@ -43,6 +43,14 @@ export interface SessionsResponse {
   sessions: Session[];
 }
 
+// The board's Relay-subscription state (C7), for the topbar pill. `configured` is
+// whether a Relay was set up at all (else zero-setup solo mode); `connected` is
+// whether the board's subscription is currently live (else reconnecting).
+export interface RelayStatus {
+  configured: boolean;
+  connected: boolean;
+}
+
 // One project the Work Items view can show: a display name plus the directory
 // (`cwd`) that identifies it to `GET /api/work`. Derived client-side from the
 // sessions, so a project appears once it has a session in the last 24h.

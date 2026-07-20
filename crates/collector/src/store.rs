@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::model::Session;
@@ -32,8 +33,15 @@ const MAX_SCAN_DEPTH: usize = 6;
 /// C7 reuses this same `Event` as the Collector→Relay→Board currency. Boxing to
 /// even the variants out would trade that clarity for an allocation on the hot
 /// path, so the lint is allowed rather than worked around.
+///
+/// `Serialize`/`Deserialize` (C7): the wire currency for both remote hops. The
+/// internally-tagged `type` discriminator rides alongside a flattened `Session`,
+/// so an `Upsert` is `{"type":"upsert", <session fields…>}` and a `Removed` is
+/// `{"type":"removed","id":…}` — one JSON object per event, NDJSON on the
+/// Collector→Relay push and inside the SSE `data:` on the Relay→Board fan-out.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum Event {
     Upsert(Session),
     Removed { id: String },

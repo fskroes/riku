@@ -9,8 +9,10 @@ links each session to the plan it is carrying out (issue #1, C4).
 Cargo.toml            workspace
 crates/collector/     lib — the Session Sources (Claude Code + Codex CLI) behind a
                       shared trait: discovery, transcript tailing, the Session
-                      model, status heuristic
+                      model, status heuristic, live git diff enrichment
 crates/board/         bin — axum server: serves web/dist + /api/sessions + SSE
+crates/relay/         bins — `relay` (team hub) + `collector` (headless watcher→push)
+                      and the shared wire codec; the board subscribes to a Relay
 web/                  React 18 + Vite 5 + TypeScript board (attention stream)
 ```
 
@@ -32,6 +34,33 @@ sessions still show.
 
 If `web/dist` is missing the server stays up and `/` returns a 503 telling you to
 build the UI; the API keeps working.
+
+## Team / multi-machine (C7)
+
+Solo use needs nothing above. To see sessions from other machines — a second laptop,
+a teammate's box — run a **Relay** once (anywhere reachable) and a **Collector** on
+each machine, then point the board at the Relay. A single shared token gates
+everyone; the Relay holds only live in-memory state (nothing to back up) and is
+strictly one-way read-only — it transports session state, never commands (ADR 0002).
+
+```sh
+# On the hub (the one network service; binds 0.0.0.0):
+cargo run -p relay --bin relay -- --addr 0.0.0.0:4343 --token "$RELAY_TOKEN"
+
+# On each machine whose agents you want to see (headless, no UI):
+cargo run -p relay --bin collector -- --relay http://hub:4343 --token "$RELAY_TOKEN"
+
+# Point your board at the Relay (still binds localhost; local sessions keep working):
+cargo run -p board -- --relay http://hub:4343 --token "$RELAY_TOKEN"
+```
+
+The token may also come from the `RELAY_TOKEN` environment variable for all three.
+The Collector reuses the same `--root`/`--codex-root` flags as the board and
+`--machine <name>` to override the host label. Remote sessions flow into the same
+Active / Attention / Finished columns, each card labelled with its machine; the
+topbar pill shows `relay ✓ · N machines`. If a Collector goes offline its cards
+disappear; on reconnect it re-pushes its state. TLS and where you host the Relay are
+your call.
 
 ## Develop the UI with hot reload
 

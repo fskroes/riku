@@ -42,6 +42,12 @@ body {
 .topbar .spacer { flex: 1; }
 .topbar .remote { color: var(--ink-muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
 
+/* Relay pill (C7). Green when subscribed + live, amber while reconnecting, greyed
+   'local only' with no Relay (zero-setup solo mode). */
+.relaypill { display: flex; align-items: center; gap: 8px; padding: 5px 11px; border-radius: var(--r-pill); background: var(--surface-raised); box-shadow: var(--card-edge); font: 500 12px var(--font-mono); color: var(--ink-muted); white-space: nowrap; }
+.relaypill .rl { color: var(--ink); }
+.relaypill.off { color: var(--ink-faint); }
+
 .stage { padding: 22px; }
 
 /* shared bits */
