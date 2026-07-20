@@ -6,50 +6,21 @@ on:
       - "v*"
 
 # Least privilege by default: the workflow gets read-only repository access and each
-# job re-declares exactly what it needs. Only the publish job is granted write
-# (issue #17, User Stories 17, 18). To update a pinned Action, bump both the SHA and
-# the trailing version comment together (docs/relay-deployment.md § Action pinning).
+# job re-declares exactly what it needs. Only publish-release is granted write, and
+# only publish-homebrew holds the tap credential (issue #17, User Stories 17, 18).
+# To update a pinned Action, bump both the SHA and the trailing version comment
+# together (docs/relay-deployment.md § Action pinning).
 permissions:
   contents: read
 
 jobs:
-  plan:
-    runs-on: ubuntu-latest
+  # Build every release artifact in one shot on an Apple Silicon runner:
+  # the platform tarball + checksums (local) and the source archive + Homebrew
+  # formula riku.rb (global). Single target means no cross-runner artifact passing.
+  build:
+    runs-on: macos-14
     permissions:
       contents: read
-    outputs:
-      val: ${{ steps.plan.outputs.manifest }}
-      manifest: ${{ steps.plan.outputs.manifest }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable (rolling branch)
-      - name: Build embedded UI
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
-      - name: Install cargo-dist
-        run: cargo install cargo-dist --locked --version 0.32.0
-      - id: plan
-        run: |
-          dist plan --output-format=json > dist-manifest.json
-          echo "manifest=$(jq -c . dist-manifest.json)" >> "$GITHUB_OUTPUT"
-
-  build-local-artifacts:
-    needs: plan
-    permissions:
-      contents: read
-    strategy:
-      matrix:
-        include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -59,7 +30,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable (rolling branch)
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
       - name: Build embedded UI
         working-directory: web
         run: |
@@ -68,33 +39,72 @@ jobs:
       - name: Install cargo-dist
         run: cargo install cargo-dist --locked --version 0.32.0
       - name: Build artifacts
-        run: dist build --artifacts=local --target=${{ matrix.target }}
+        run: dist build --artifacts=all --target=aarch64-apple-darwin
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: artifacts-${{ matrix.target }}
+          name: distrib
           path: target/distrib/*
+          if-no-files-found: error
 
-  # The only privileged job. It consumes the artifacts the read-only build jobs
-  # produced and is the sole holder of the Homebrew tap credential, which is exposed
-  # only to the publish command's environment (issue #17, User Stories 18, 19).
-  host-and-publish:
-    needs: [plan, build-local-artifacts]
+  # Create the GitHub Release from the built artifacts. The only job that writes to
+  # this repository; it never touches the tap.
+  publish-release:
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          path: target/distrib
-          pattern: artifacts-*
-          merge-multiple: true
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable (rolling branch)
-      - name: Install cargo-dist
-        run: cargo install cargo-dist --locked --version 0.32.0
-      - name: Publish GitHub Release and Homebrew formula
+          name: distrib
+          path: distrib
+      - name: Create GitHub Release
         env:
-          # A fine-grained token restricted to fskroes/homebrew-riku, scoped to this
-          # step alone (docs/relay-deployment.md § Homebrew tap token).
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: dist host --steps=create,upload,release,announce,homebrew
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --verify-tag \
+            --title "riku $version" \
+            --notes "Install (macOS, Apple Silicon):
+
+          \`\`\`sh
+          brew tap fskroes/riku
+          brew install riku
+          \`\`\`" \
+            distrib/*
+
+  # Publish the Homebrew formula to the personal tap. Sole holder of the tap
+  # credential, which is exposed only to the checkout of the external tap repo
+  # (issue #17, User Stories 18, 19). Needs no write access to this repository.
+  publish-homebrew:
+    needs: publish-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tap
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          repository: fskroes/homebrew-riku
+          # A fine-grained token restricted to fskroes/homebrew-riku
+          # (docs/relay-deployment.md § Homebrew tap token).
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          persist-credentials: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: distrib
+          path: distrib
+      - name: Commit formula
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p Formula
+          cp distrib/riku.rb Formula/riku.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/riku.rb
+          git commit -m "riku ${TAG#v}"
+          git push
