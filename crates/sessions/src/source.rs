@@ -8,13 +8,10 @@ use std::path::{Path, PathBuf};
 
 use crate::codex::CodexFold;
 use crate::fold::Fold;
-use crate::model::Tool;
 use crate::session::Accumulator;
 
 /// An adapter that discovers and reads Agent Sessions for one agent tool.
 pub trait SessionSource: Send + Sync {
-    /// Which tool this source represents (carried onto every Session it builds).
-    fn tool(&self) -> Tool;
     /// Directories to scan on startup and watch for changes. Each is unique to the
     /// source, so a path under one root belongs unambiguously to that source.
     fn roots(&self) -> Vec<PathBuf>;
@@ -37,10 +34,6 @@ impl ClaudeSource {
 }
 
 impl SessionSource for ClaudeSource {
-    fn tool(&self) -> Tool {
-        Tool::Claude
-    }
-
     fn roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
     }
@@ -67,10 +60,6 @@ impl CodexSource {
 }
 
 impl SessionSource for CodexSource {
-    fn tool(&self) -> Tool {
-        Tool::Codex
-    }
-
     fn roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
     }

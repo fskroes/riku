@@ -27,14 +27,21 @@ pub struct WatchGuard {
     _handle: thread::JoinHandle<()>,
 }
 
-/// Watch each of `roots` recursively for `*.jsonl` changes, invoking `on_change`
+/// Watch each of `roots` recursively for transcript changes, invoking `on_change`
 /// once per file per debounce window. `on_change` runs on a dedicated thread.
+/// `should_report` is supplied by the owner of the Session Sources so watch and
+/// discovery use the same ownership predicates.
 ///
 /// A root that cannot be watched (e.g. a missing `~/.codex/sessions`) is warned
 /// about and skipped rather than failing the whole watcher, so one absent source
 /// never takes the others down. Constructing the watcher itself can still fail.
-pub fn watch<F>(roots: &[PathBuf], mut on_change: F) -> notify::Result<WatchGuard>
+pub fn watch<P, F>(
+    roots: &[PathBuf],
+    should_report: P,
+    mut on_change: F,
+) -> notify::Result<WatchGuard>
 where
+    P: Fn(&Path) -> bool + Send + Sync + 'static,
     F: FnMut(Change) + Send + 'static,
 {
     let (tx, rx) = mpsc::channel::<PathBuf>();
@@ -43,7 +50,7 @@ where
         notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
             Ok(event) => {
                 for path in event.paths {
-                    if is_transcript(&path) {
+                    if should_report(&path) {
                         let _ = tx.send(path);
                     }
                 }
@@ -104,8 +111,4 @@ fn flush<F: FnMut(Change)>(
         };
         on_change(change);
     }
-}
-
-fn is_transcript(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()) == Some("jsonl")
 }

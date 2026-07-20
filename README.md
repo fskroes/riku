@@ -7,7 +7,7 @@ links each session to the plan it is carrying out (issue #1, C4).
 
 ```
 Cargo.toml            workspace
-crates/collector/     lib — the Session Sources (Claude Code + Codex CLI) behind a
+crates/sessions/      lib — the Session Sources (Claude Code + Codex CLI) behind a
                       shared trait: discovery, transcript tailing, the Session
                       model, status heuristic, live git diff enrichment
 crates/session-engine/ lib — shared Tokio runtime: discovery, watch, refresh,
@@ -122,7 +122,7 @@ cd web && npm run dev         # UI on :5173, proxies /api to :4242
 ## Test
 
 ```sh
-cargo test                    # collector unit tests + board integration tests
+cargo test                    # sessions unit tests + board integration tests
 cd web && npm run build       # type-checks the frontend (tsc, strict)
 ```
 

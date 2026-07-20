@@ -1,7 +1,7 @@
 //! The live local-session pipeline shared by the Board and the Collector.
 //!
 //! [`Engine`] owns the runtime-dependent work around the runtime-agnostic
-//! `collector` crate: discovery, filesystem watching, periodic status refresh,
+//! `sessions` crate: discovery, filesystem watching, periodic status refresh,
 //! diff enrichment, machine stamping, and broadcasting complete local events.
 //! Callers use its small interface to take a snapshot, subscribe to local changes,
 //! or resolve a local transcript; transport and presentation stay in their
@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
-use collector::{
+use sessions::{
     Change, ClaudeSource, CodexSource, DiffCache, Event, Session, SessionSource, SessionStore,
     WatchGuard,
 };
@@ -152,7 +152,11 @@ fn start_watch(
     diff_cache: Arc<DiffCache>,
     machine: Arc<str>,
 ) -> Option<WatchGuard> {
-    match collector::watch(roots, move |change| {
+    let should_report = {
+        let store = store.clone();
+        move |path: &std::path::Path| store.lock().unwrap().owns_path(path)
+    };
+    match sessions::watch(roots, should_report, move |change| {
         let event = {
             let mut store = store.lock().unwrap();
             match change {
@@ -209,7 +213,7 @@ mod tests {
 
     use super::{local_hostname, stamp, Engine};
     use chrono::Utc;
-    use collector::{Session, Status, Tool};
+    use sessions::{Session, Status, Tool};
 
     fn bare_session() -> Session {
         Session {

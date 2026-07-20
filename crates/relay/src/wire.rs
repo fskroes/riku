@@ -1,6 +1,6 @@
 //! The shared wire protocol for both remote hops.
 //!
-//! The currency is [`collector::Event`] — every `Upsert` is a full Session
+//! The currency is [`sessions::Event`] — every `Upsert` is a full Session
 //! snapshot, so both streams are idempotent and self-healing (a dropped frame or a
 //! reconnect re-syncs on the next snapshot). One JSON object per event:
 //!
@@ -13,7 +13,7 @@
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use axum::response::sse::Event as SseEvent;
-use collector::Event;
+use sessions::Event;
 
 /// The `Authorization` scheme prefix for the shared token.
 const BEARER: &str = "Bearer ";
@@ -140,7 +140,7 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
     use chrono::Utc;
-    use collector::{Session, Status, Tool};
+    use sessions::{Session, Status, Tool};
 
     fn session(id: &str, machine: &str) -> Session {
         Session {

@@ -115,9 +115,9 @@ fn run_relay(options: RelayOptions) -> Result<(), String> {
 fn session_roots(root: Option<PathBuf>, codex_root: Option<PathBuf>) -> (PathBuf, Option<PathBuf>) {
     (
         root.unwrap_or_else(|| {
-            collector::default_root().unwrap_or_else(|| PathBuf::from(".claude/projects"))
+            sessions::default_root().unwrap_or_else(|| PathBuf::from(".claude/projects"))
         }),
-        codex_root.or_else(collector::codex_default_root),
+        codex_root.or_else(sessions::codex_default_root),
     )
 }
 

@@ -106,6 +106,11 @@ impl SessionStore {
             .map(|s| s.as_ref())
     }
 
+    /// Whether any configured Session Source claims `path`.
+    pub fn owns_path(&self, path: &Path) -> bool {
+        self.source_for(path).is_some()
+    }
+
     /// Current sessions, with status recomputed against `now` (so time-based
     /// transitions like Active -> Finished are reflected without a file change).
     pub fn snapshot(&self, now: DateTime<Utc>) -> Vec<Session> {

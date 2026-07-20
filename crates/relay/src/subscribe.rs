@@ -9,9 +9,9 @@
 
 use std::time::Duration;
 
-use collector::Event;
 use futures::StreamExt;
 use reqwest::header::AUTHORIZATION;
+use sessions::Event;
 use tracing::{info, warn};
 
 use crate::wire::{bearer, SseDecoder};
@@ -22,7 +22,7 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// A change surfaced to the board by [`subscribe`].
 ///
 /// `Event` dominates the enum's size because it carries a full Session snapshot —
-/// the same reason `collector::Event` allows the lint. `Update` is delivered once
+/// the same reason `sessions::Event` allows the lint. `Update` is delivered once
 /// per event to an in-process callback, not a hot path, and boxing it here while the
 /// wire `Event` stays unboxed would be an odd asymmetry, so the lint is allowed.
 #[allow(clippy::large_enum_variant)]

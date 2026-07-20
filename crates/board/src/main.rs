@@ -1,5 +1,5 @@
 //! The `board` binary: an axum server that serves the web UI and streams live
-//! Agent Session updates from the [`collector`] (Claude Code + Codex CLI sources).
+//! Agent Session updates from the [`sessions`] crate (Claude Code + Codex CLI sources).
 //!
 //! Binds `127.0.0.1` only — the board is a local mission-control view, not a
 //! network service.
@@ -21,10 +21,10 @@ struct Config {
 
 fn parse_config() -> Config {
     let mut port = 4242u16;
-    let mut root = collector::default_root().unwrap_or_else(|| PathBuf::from(".claude/projects"));
+    let mut root = sessions::default_root().unwrap_or_else(|| PathBuf::from(".claude/projects"));
     // Codex CLI sessions, honoring CODEX_HOME. `None` only if we cannot resolve a
     // home dir at all; the source then simply finds nothing.
-    let mut codex_root = collector::codex_default_root();
+    let mut codex_root = sessions::codex_default_root();
     let mut web_dist = PathBuf::from("web/dist");
     // Relay subscription (C7). Absent → local-only, zero-setup solo mode. The token
     // may also come from the environment, matching the Collector and Relay.

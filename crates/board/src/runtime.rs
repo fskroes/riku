@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use collector::{Event, Session};
 pub use session_engine::local_hostname;
 use session_engine::Engine;
+use sessions::{Event, Session};
 use tokio::sync::broadcast;
 
 use crate::http::AppState;
