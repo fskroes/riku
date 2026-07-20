@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import type { Session, Tool } from "./types";
-import { abbrevTokens, shortModel } from "./format";
+import type { DiffStat, Session, Tool } from "./types";
+import { abbrevTokens, formatCost, shortModel } from "./format";
 
 /** Per-tool tile glyph + accent. One Session Source per tool (issue #5). */
 export const TOOL: Record<Tool, { label: string; color: string }> = {
@@ -28,8 +28,33 @@ export function Tile({ tool, small }: { tool: Tool; small?: boolean }) {
   );
 }
 
-/** The mono model · branch · tokens line under a session's headline. */
-export function Meta({ session }: { session: Session }) {
+/** The git `+/-` stat for a card (C5). Renders nothing when the session has no
+ *  repo diff (e.g. its cwd is not a git checkout). */
+export function Diff({ diff }: { diff: DiffStat | null }) {
+  if (!diff) return null;
+  return (
+    <span className="diff" title="Lines changed on this branch (uncommitted + since default branch)">
+      <span className="add">+{diff.added}</span>
+      <span className="del">−{diff.removed}</span>
+    </span>
+  );
+}
+
+/** The estimated cost chip (C5), always labelled "est.". Renders nothing when the
+ *  cost toggle is off (subscription sessions) or the model has no list price. */
+export function Cost({ usd, show }: { usd: number | null; show: boolean }) {
+  const text = formatCost(usd);
+  if (!show || text == null) return null;
+  return (
+    <span className="cost" title="Estimated from public list token prices — subscription plans pay no marginal cost">
+      {text} <span className="est">est.</span>
+    </span>
+  );
+}
+
+/** The mono model · branch · tokens · diff · cost line under a session's headline.
+ *  `showCost` gates the estimate chip (off for subscription sessions). */
+export function Meta({ session, showCost }: { session: Session; showCost: boolean }) {
   const model = shortModel(session.model);
   return (
     <span className="meta">
@@ -38,6 +63,8 @@ export function Meta({ session }: { session: Session }) {
       <span>
         ↑ {abbrevTokens(session.tokensIn)} / {abbrevTokens(session.tokensOut)}
       </span>
+      <Diff diff={session.diff} />
+      <Cost usd={session.costUsd} show={showCost} />
     </span>
   );
 }

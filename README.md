@@ -85,6 +85,22 @@ run inside a fresh **Terminal.app** window (macOS); if a CLI names its resume fl
 differently the terminal still opens in the right workspace. A launch failure is
 surfaced on the card.
 
+## Card stats (C5)
+
+Every card carries two more stats beyond model / branch / tokens / age:
+
+- **diff `+/-`** — live git lines changed for the session's repo: the branch's work
+  since it left the repo's default branch (`origin/HEAD`, else `main`/`master`),
+  **plus** uncommitted working-tree edits. It is live repo state, not transcript
+  data, so the collector leaves it empty and the **board** fills it (the same seam
+  as Work Links), shelling out to `git` with a short per-directory TTL cache. A cwd
+  that is not a git checkout simply shows no diff.
+- **cost `est.`** — an estimate of `tokens × the model's public list price`,
+  computed source-agnostically in the collector and always labelled "est.". A
+  header toggle (`$ est. on/off`, remembered in `localStorage`) hides it for
+  **subscription** users, who pay no marginal per-token cost; an unpriced model
+  shows no cost. See `docs/adr/0006-*`.
+
 ## Work Items (C4)
 
 The **Work Items** tab shows one project's plan at a time, rendered two ways over

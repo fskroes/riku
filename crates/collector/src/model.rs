@@ -42,8 +42,22 @@ pub enum AttentionReason {
     Error,
 }
 
+/// Lines added / removed in a session's repo — the card's `+/-` stat (C5). Live
+/// git working-tree state, not transcript-derived: filled in by the board (see
+/// `collector::git::diff_stat`), so the collector always leaves it `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffStat {
+    pub added: u64,
+    pub removed: u64,
+}
+
 /// One Agent Session — a single Claude Code transcript, projected for the UI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// `PartialEq` only (not `Eq`): `cost_usd` is an `f64`. The store compares
+/// successive projections with `!=` to suppress no-op events; cost is deterministic
+/// from tokens + model, so equal projections stay equal (no float churn).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     /// `sessionId` (uuid). Globally unique, so duplicate filename stems across
@@ -70,4 +84,11 @@ pub struct Session {
     /// Why the session needs a human, when `status == Attention`; `None` otherwise.
     /// Explicit and typed so the UI never re-derives blocked-ness from raw fields.
     pub attention_reason: Option<AttentionReason>,
+    /// Estimated USD cost from tokens × the model's public list price (C5). `None`
+    /// for an unpriced/unknown model. A labelled *estimate*: the UI can hide it for
+    /// subscription sessions, which pay no marginal per-token cost.
+    pub cost_usd: Option<f64>,
+    /// Lines added / removed in the session's repo (C5). Live git state, so the
+    /// collector leaves it `None`; the board fills it before serving/streaming.
+    pub diff: Option<DiffStat>,
 }

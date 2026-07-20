@@ -8,6 +8,13 @@ export type AttentionReason = "waiting" | "error";
 
 export type Tool = "claude" | "codex";
 
+// Lines added / removed in a session's repo — the card's `+/-` stat (C5). `null`
+// when the session's cwd is not a git repo.
+export interface DiffStat {
+  added: number;
+  removed: number;
+}
+
 export interface Session {
   id: string;
   tool: Tool;
@@ -21,6 +28,11 @@ export interface Session {
   lastEventAt: string; // ISO 8601
   status: Status;
   attentionReason: AttentionReason | null;
+  // Estimated USD cost (tokens × the model's public list price); `null` for an
+  // unpriced model. A labelled estimate — hidden when the cost toggle is off.
+  costUsd: number | null;
+  // Live git `+/-` for the session's repo, or `null` when there is none.
+  diff: DiffStat | null;
 }
 
 export interface SessionsResponse {

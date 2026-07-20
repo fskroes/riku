@@ -31,6 +31,8 @@ pub struct AppState {
     pub store: Arc<Mutex<SessionStore>>,
     pub tx: broadcast::Sender<Event>,
     pub web_dist: PathBuf,
+    /// Live git `+/-` per repo, filled onto session cards at the output boundary.
+    pub diff_cache: Arc<crate::diff::DiffCache>,
     /// How the board opens a local session (a terminal launch); injectable so
     /// tests can record the deep link instead of spawning Terminal.
     pub launcher: Arc<dyn Launcher>,
@@ -65,12 +67,22 @@ struct SessionsResponse {
     sessions: Vec<Session>,
 }
 
-/// `GET /api/sessions` — full snapshot; the client upserts by `id`.
+/// `GET /api/sessions` — full snapshot; the client upserts by `id`. Each card is
+/// enriched with its live git `+/-` off the async workers (git can block).
 async fn sessions(State(state): State<AppState>) -> Json<SessionsResponse> {
-    let sessions = {
+    let mut sessions = {
         let store = state.store.lock().unwrap();
         store.snapshot(Utc::now())
     };
+    let cache = state.diff_cache.clone();
+    let sessions = tokio::task::spawn_blocking(move || {
+        for s in &mut sessions {
+            cache.enrich(s);
+        }
+        sessions
+    })
+    .await
+    .expect("diff enrichment does not panic");
     Json(SessionsResponse { sessions })
 }
 

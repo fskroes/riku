@@ -233,6 +233,10 @@ impl FileState {
         // Carry the reason only when the status is actually Attention, so the two
         // can never disagree on the wire.
         let attention_reason = (status == Status::Attention).then_some(p.attention).flatten();
+        // Cost is pure (tokens × the model's list price); computed before `p.model`
+        // is moved into the session below. The live git `diff` is out-of-transcript,
+        // so the board fills it and the collector leaves it None.
+        let cost_usd = crate::pricing::estimate_cost_usd(p.model.as_deref(), p.tokens_in, p.tokens_out);
         Some(Session {
             id: p.id,
             tool: p.tool,
@@ -246,6 +250,8 @@ impl FileState {
             last_event_at: p.last_event_at.unwrap_or(mtime),
             status,
             attention_reason,
+            cost_usd,
+            diff: None,
         })
     }
 }

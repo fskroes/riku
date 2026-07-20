@@ -10,8 +10,10 @@
 mod codex;
 mod deeplink;
 mod fold;
+mod git;
 mod model;
 mod parse;
+mod pricing;
 mod session;
 mod source;
 mod store;
@@ -22,7 +24,8 @@ use std::path::PathBuf;
 
 pub use deeplink::DeepLink;
 pub use fold::{Fold, Projection, ACTIVITY_WINDOW};
-pub use model::{Session, Status, Tool};
+pub use git::diff_stat;
+pub use model::{DiffStat, Session, Status, Tool};
 pub use session::{Accumulator, FileState};
 pub use source::{ClaudeSource, CodexSource, SessionSource};
 pub use store::{Event, SessionStore, DISCOVERY_WINDOW};

@@ -29,6 +29,15 @@ export function domId(prefix: string, raw: string): string {
   return `${prefix}-${raw.replace(/[^A-Za-z0-9_-]/g, "-")}`;
 }
 
+/** An estimated cost as a compact USD string: `<$0.01`, `$0.42`, `$12.30`, `$340`.
+ *  `null` when the session has no priced cost. Always paired with an "est." label. */
+export function formatCost(usd: number | null): string | null {
+  if (usd == null) return null;
+  if (usd < 0.01) return "<$0.01";
+  if (usd < 100) return `$${usd.toFixed(2)}`;
+  return `$${Math.round(usd)}`;
+}
+
 /** Turn a model id like `claude-opus-4-8` into `Opus 4.8`; falls back to raw. */
 export function shortModel(model: string | null): string | null {
   if (!model) return model;
