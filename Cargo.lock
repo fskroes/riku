@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "board"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1258,7 +1258,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "riku"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "board",
@@ -1547,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "session-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "hostname",
@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "sessions"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs",
