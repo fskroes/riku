@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en" data-theme="graphite">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Board — C7 Collector + Relay (multi-machine) prototype</title>
+
+<!--
+  THROWAWAY PROTOTYPE — do not ship. Answers the C7 design question (issue #12):
+  once sessions can arrive from other machines via a Relay, HOW does the
+  attention-first board present machine identity + Relay connection state
+  without wrecking the "needs a human" ranking?
+
+  Stops (← / → keys, or the bottom bar; ?variant=today|A|B|C):
+    • today — the board as it is now: LOCAL ONLY, no machine labels, no relay.
+    • A — Inline machine chip: unified stream unchanged; every card gains a
+          machine chip; topbar gains a Relay status pill. (least disruptive)
+    • B — Machine lanes: the board splits into a per-machine mini-stream each
+          with its own needs-you/running/finished. (mission-control per box)
+    • C — Machine rail: a left sidebar of machines (online dot + count) that
+          doubles as a filter; unified stream keeps global attention-first.
+
+  Function, not just looks — the top control strip SIMULATES the network:
+    toggle each machine's Collector online/offline (cards appear / vanish,
+    User Stories 6/7), and flip the Relay connection. Sample data only, no
+    persistence, no real fetch. Fold the winner into web/src later.
+-->
+
+<style>
+/* ---------- Autumn / graphite tokens (subset, mirrors web/src/styles.css) ---------- */
+:root{
+  --r-sm:6px; --r-md:10px; --r-lg:14px; --r-xl:16px; --r-pill:999px;
+  --font-ui:"Inter",-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
+  --font-mono:"JetBrains Mono","Geist Mono","SF Mono",ui-monospace,monospace;
+  --ease-out:cubic-bezier(0.22,1,0.36,1); --t-fast:150ms;
+}
+[data-theme="graphite"]{
+  --bg-content:#0E0E10; --surface:#1A1A1D; --surface-raised:#222226;
+  --ink:#F2F2F0; --ink-muted:rgba(255,255,255,.55); --ink-faint:rgba(255,255,255,.32);
+  --hairline:rgba(255,255,255,.06);
+  --accent:#4C8DFF; --positive:#33C481; --warning:#F0B429; --negative:#FF6259; --info:#8B93F8;
+  --info-soft:rgba(139,147,248,.20); --ghost:rgba(255,255,255,.07);
+  --shadow-float:0 12px 40px rgba(0,0,0,.5); --card-edge:0 0 0 .5px rgba(255,255,255,.08);
+}
+*{box-sizing:border-box;}
+html,body{height:100%;}
+body{
+  margin:0; font-family:var(--font-ui); font-size:13px; line-height:1.45; color:var(--ink);
+  -webkit-font-smoothing:antialiased;
+  background:radial-gradient(120% 90% at 50% -10%,#3a4a86 0%,#7a5f8f 32%,#c98a54 62%,#e9c06a 100%) fixed;
+  min-height:100vh; padding:28px 28px 96px;
+}
+.label-micro{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-muted);font-weight:500;}
+
+/* app window + chrome */
+.window{max-width:1360px;margin:0 auto;background:var(--bg-content);border-radius:var(--r-xl);
+  box-shadow:0 30px 80px rgba(0,0,0,.45),var(--card-edge);overflow:hidden;}
+.topbar{display:flex;align-items:center;gap:14px;height:56px;padding:0 20px;border-bottom:1px solid var(--hairline);}
+.topbar .logo{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:6px;
+  background:linear-gradient(135deg,#4C8DFF,#8B93F8);color:#fff;font-size:12px;}
+.topbar .brand{font-weight:600;letter-spacing:.04em;font-size:13px;}
+.topbar .live{color:var(--positive);font-family:var(--font-mono);font-weight:500;letter-spacing:.04em;font-size:12px;}
+.topbar .spacer{flex:1;}
+.topbar .seg{display:inline-flex;gap:2px;padding:2px;border-radius:var(--r-md);background:rgba(255,255,255,.05);}
+.topbar .seg button{padding:6px 13px;border:0;border-radius:8px;background:transparent;color:var(--ink-muted);font:500 12px var(--font-ui);cursor:pointer;}
+.topbar .seg button[aria-pressed="true"]{background:var(--surface-raised);color:var(--ink);box-shadow:var(--card-edge);}
+
+/* Relay pill in the topbar (NEW in C7). Green when connected, amber reconnecting. */
+.relaypill{display:flex;align-items:center;gap:8px;padding:5px 11px;border-radius:var(--r-pill);
+  background:var(--surface-raised);box-shadow:var(--card-edge);font:500 12px var(--font-mono);color:var(--ink-muted);}
+.relaypill .rl{color:var(--ink);}
+.relaypill.off{color:var(--ink-faint);}
+
+.stage{padding:22px;}
+
+/* shared bits */
+.meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;color:var(--ink-muted);font-family:var(--font-mono);font-size:12px;}
+.meta .k{color:var(--ink);}
+.tile{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:8px;
+  background:color-mix(in srgb,var(--tile) 20%,transparent);color:var(--tile);font-weight:700;font-size:13px;flex:none;}
+.tile.sm{width:22px;height:22px;border-radius:6px;font-size:11px;}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none;}
+.dot.active,.dot.doing{background:var(--info);}
+.dot.attention{background:var(--warning);}
+.dot.finished{background:var(--ink-faint);}
+.dot.live{background:var(--positive);}
+.dot.off{background:var(--negative);}
+.age{color:var(--ink-faint);font-family:var(--font-mono);font-size:11px;flex:none;}
+.diff{display:inline-flex;align-items:center;gap:5px;font-family:var(--font-mono);font-size:12px;white-space:nowrap;flex:none;}
+.diff .add{color:var(--positive);} .diff .del{color:var(--negative);}
+
+/* ===== THE MACHINE LABEL — the one new atom C7 puts on every card ===== */
+.machine{display:inline-flex;align-items:center;gap:5px;font-family:var(--font-mono);font-size:11px;
+  color:var(--ink-muted);background:rgba(255,255,255,.05);box-shadow:var(--card-edge);
+  padding:2px 8px;border-radius:var(--r-pill);white-space:nowrap;flex:none;}
+.machine .mdot{width:6px;height:6px;border-radius:50%;background:var(--positive);}
+.machine.mine{color:var(--ink);}
+.machine.mine .mdot{background:var(--accent);}
+.machine.mate .mdot{background:var(--info);}
+
+/* BOARD — attention-first stream (mirrors the real Board.tsx) */
+.stream{max-width:880px;margin:0 auto;}
+.band{display:flex;align-items:center;gap:10px;margin:18px 4px 10px;}
+.band:first-child{margin-top:4px;}
+.band .n{font-family:var(--font-mono);color:var(--ink-faint);font-size:12px;}
+.alert{display:flex;gap:14px;align-items:stretch;background:var(--surface);border-radius:var(--r-md);
+  padding:14px 16px;margin-bottom:10px;box-shadow:var(--card-edge);position:relative;overflow:hidden;}
+.alert::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--warning);}
+.alert.err::before{background:var(--negative);}
+.alert .body{flex:1;min-width:0;}
+.alert .r1{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.alert .name{font-weight:600;font-size:15px;}
+.alert .reason{font-weight:600;margin-top:8px;color:var(--warning);}
+.alert.err .reason{color:var(--negative);}
+.alert .reason .detail{font-weight:400;color:var(--ink-muted);}
+.alert .cta{align-self:center;font:500 12px var(--font-ui);padding:8px 14px;border-radius:var(--r-md);
+  background:var(--surface-raised);box-shadow:var(--card-edge);color:var(--ink);white-space:nowrap;cursor:pointer;border:0;}
+.alert .m2{margin-top:8px;}
+.row{display:grid;grid-template-columns:auto 150px 1fr auto;gap:14px;align-items:center;padding:11px 14px;
+  border-radius:var(--r-md);transition:background var(--t-fast);}
+.row:hover{background:var(--surface);}
+.row .name{font-weight:550;}
+.row .branch{font-family:var(--font-mono);font-size:12px;color:var(--ink-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.row .act{color:var(--ink-muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.row.done{opacity:.55;}
+.row .mini{display:flex;gap:12px;align-items:center;font-family:var(--font-mono);font-size:12px;color:var(--ink-muted);}
+.empty{text-align:center;color:var(--ink-muted);padding:60px 0;font-size:13px;}
+
+/* card enter / leave — the live "appear when a collector connects, vanish when it drops" moment */
+@keyframes cardIn{from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:none;}}
+.enter{animation:cardIn .32s var(--ease-out);}
+
+/* ===== Variant B — machine lanes ===== */
+.lanes{max-width:880px;margin:0 auto;display:flex;flex-direction:column;gap:20px;}
+.lane{background:var(--surface);border-radius:var(--r-lg);box-shadow:var(--card-edge);padding:6px 14px 14px;}
+.lane.offline{opacity:.5;}
+.lane-head{display:flex;align-items:center;gap:10px;padding:14px 4px 8px;border-bottom:1px solid var(--hairline);margin-bottom:6px;}
+.lane-head .host{font-weight:600;font-size:14px;font-family:var(--font-mono);}
+.lane-head .who{font-size:11px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.06em;}
+.lane-head .tally{margin-left:auto;font-family:var(--font-mono);font-size:12px;color:var(--ink-muted);display:flex;gap:12px;}
+.lane-head .tally .att{color:var(--warning);}
+.lane .subband{display:flex;align-items:center;gap:8px;margin:12px 4px 4px;}
+.lane .subband .n{font-family:var(--font-mono);color:var(--ink-faint);font-size:11px;}
+.lane .offline-note{color:var(--negative);font-size:12px;font-family:var(--font-mono);padding:10px 4px;}
+
+/* ===== Variant C — machine rail + filter ===== */
+.split{display:grid;grid-template-columns:210px 1fr;gap:22px;align-items:start;max-width:1120px;margin:0 auto;}
+.rail{background:var(--surface);border-radius:var(--r-lg);box-shadow:var(--card-edge);padding:12px;position:sticky;top:22px;}
+.rail h4{margin:2px 6px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-muted);font-weight:600;}
+.rail .relayrow{display:flex;align-items:center;gap:8px;padding:8px 8px 12px;margin-bottom:6px;border-bottom:1px solid var(--hairline);
+  font-family:var(--font-mono);font-size:12px;color:var(--ink-muted);}
+.mrow{display:flex;width:100%;align-items:center;gap:9px;padding:9px 10px;border:0;border-radius:8px;background:transparent;
+  color:var(--ink);font:500 13px var(--font-ui);cursor:pointer;text-align:left;}
+.mrow:hover{background:rgba(255,255,255,.06);}
+.mrow[aria-current="true"]{background:rgba(255,255,255,.07);box-shadow:var(--card-edge);}
+.mrow.offline{opacity:.5;}
+.mrow .host{font-family:var(--font-mono);font-size:12.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mrow .cnt{font-family:var(--font-mono);font-size:11px;color:var(--ink-faint);}
+.mrow .cnt.att{color:var(--warning);}
+
+/* ===== WORK ITEMS view (C4) — mostly untouched by C7; one touchpoint ===== */
+.work-head{display:flex;align-items:center;gap:16px;margin-bottom:18px;max-width:1120px;margin-left:auto;margin-right:auto;}
+.work-head .pill{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;border:0;border-radius:8px;
+  background:var(--surface-raised);box-shadow:var(--card-edge);font:500 13px var(--font-ui);color:var(--ink);}
+.work-head .pill .chev{color:var(--ink-muted);}
+.work-head .src{color:var(--ink-muted);font-family:var(--font-mono);font-size:12px;}
+.work-head .seg{display:inline-flex;gap:2px;padding:2px;border-radius:var(--r-md);background:rgba(255,255,255,.05);}
+.work-head .seg button{padding:5px 11px;border:0;border-radius:8px;background:transparent;color:var(--ink-muted);font:500 12px var(--font-ui);cursor:pointer;}
+.work-head .seg button[aria-pressed="true"]{background:var(--surface-raised);color:var(--ink);box-shadow:var(--card-edge);}
+.work-head .prog{margin-left:auto;display:flex;align-items:center;gap:10px;color:var(--ink-muted);font-size:12px;}
+.work-head .track{width:120px;height:6px;border-radius:var(--r-pill);background:var(--ghost);overflow:hidden;}
+.work-head .track>span{display:block;height:100%;background:var(--positive);border-radius:var(--r-pill);}
+.cols{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:1120px;margin:0 auto;}
+.col{background:var(--surface);border-radius:var(--r-lg);box-shadow:var(--card-edge);padding:14px;min-height:360px;}
+.col-head{display:flex;align-items:center;gap:9px;padding:4px 6px 14px;}
+.col-head b{font-size:12px;text-transform:uppercase;letter-spacing:.07em;font-weight:600;}
+.col-head .count{margin-left:auto;font-family:var(--font-mono);color:var(--ink-muted);font-size:12px;}
+.dot.todo{background:var(--ink-faint);} .dot.done{background:var(--positive);}
+.wcard{background:var(--surface-raised);border-radius:var(--r-md);box-shadow:var(--card-edge);padding:13px 14px;margin-bottom:12px;}
+.wcard.is-done{opacity:.6;}
+.wcard .top{display:flex;align-items:center;gap:10px;}
+.wcard .top .id{font-family:var(--font-mono);font-size:11px;color:var(--ink-muted);}
+.wcard .top .eff{margin-left:auto;font-family:var(--font-mono);font-size:11px;color:var(--ink-faint);}
+.wcard .title{font-weight:550;font-size:13.5px;margin-top:9px;line-height:1.35;}
+.done-line{display:flex;align-items:center;gap:7px;margin-top:9px;color:var(--ink-muted);font-size:12px;}
+.done-line.faint{color:var(--ink-faint);}
+.blocked{display:inline-flex;align-items:center;gap:6px;margin-top:10px;color:var(--warning);font-size:12px;}
+.blocked code{font-family:var(--font-mono);font-size:11px;color:var(--warning);}
+.link-sess{display:flex;width:100%;align-items:center;gap:8px;margin-top:11px;padding:8px 10px;border:0;border-radius:8px;
+  background:rgba(255,255,255,.03);box-shadow:var(--card-edge);cursor:pointer;text-align:left;}
+.link-sess:hover{background:rgba(255,255,255,.06);}
+.link-sess .who{display:flex;flex-direction:column;min-width:0;}
+.link-sess .repo{font-weight:600;font-size:12px;color:var(--ink);}
+.link-sess .sub{font-family:var(--font-mono);font-size:11px;color:var(--ink-muted);display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.link-sess .go{margin-left:auto;color:var(--ink-faint);font-size:12px;flex:none;}
+
+/* annotation banner (prototype-only narration) */
+.note{max-width:880px;margin:0 auto 16px;display:flex;gap:10px;align-items:flex-start;
+  background:rgba(76,141,255,.10);box-shadow:var(--card-edge);border-radius:var(--r-md);padding:11px 14px;
+  font-size:12.5px;color:var(--ink-muted);line-height:1.5;}
+.note b{color:var(--ink);}
+.note .tag{font:600 10px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--accent);
+  background:var(--info-soft);padding:2px 7px;border-radius:var(--r-pill);flex:none;margin-top:1px;}
+
+/* ---- prototype network control strip (NOT part of the design) ---- */
+.simbar{max-width:1360px;margin:0 auto 16px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;
+  padding:12px 16px;background:rgba(0,0,0,.55);border-radius:var(--r-lg);box-shadow:var(--card-edge);color:#fff;}
+.simbar .lbl{font:600 10px var(--font-mono);text-transform:uppercase;letter-spacing:.08em;color:rgba(255,255,255,.5);}
+.simbar .machip{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:var(--r-pill);border:0;cursor:pointer;
+  background:rgba(255,255,255,.08);color:#fff;font:500 12px var(--font-mono);}
+.simbar .machip .mdot{width:7px;height:7px;border-radius:50%;background:var(--positive);}
+.simbar .machip.off{opacity:.5;}
+.simbar .machip.off .mdot{background:var(--negative);}
+.simbar .machip.mine{cursor:default;}
+.simbar .sep{width:1px;height:22px;background:rgba(255,255,255,.14);}
+.simbar .relaybtn{padding:6px 12px;border-radius:var(--r-pill);border:0;cursor:pointer;font:600 12px var(--font-mono);
+  background:rgba(51,196,129,.2);color:#7ff0bf;}
+.simbar .relaybtn.off{background:rgba(240,180,41,.2);color:#f7d572;}
+
+/* ---- floating variant switcher (NOT part of the design) ---- */
+.switcher{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:50;display:flex;align-items:center;gap:4px;
+  background:#111318;border:1px solid rgba(255,255,255,.14);box-shadow:0 12px 40px rgba(0,0,0,.55);
+  border-radius:var(--r-pill);padding:6px 8px;}
+.switcher button{border:0;background:transparent;color:#fff;font:600 16px var(--font-mono);width:30px;height:30px;
+  border-radius:50%;cursor:pointer;}
+.switcher button:hover{background:rgba(255,255,255,.12);}
+.switcher .cur{min-width:250px;text-align:center;font:600 12px var(--font-ui);color:#fff;padding:0 6px;}
+.switcher .cur small{display:block;font:500 10px var(--font-mono);color:rgba(255,255,255,.5);text-transform:uppercase;letter-spacing:.06em;}
+</style>
+</head>
+<body>
+
+<!-- prototype network simulator -->
+<div class="simbar" id="simbar"></div>
+
+<div class="window">
+  <div class="topbar" id="topbar"></div>
+  <div class="stage" id="stage"></div>
+</div>
+
+<div class="switcher" id="switcher">
+  <button id="prev" title="Previous (←)">‹</button>
+  <div class="cur" id="cur"></div>
+  <button id="next" title="Next (→)">›</button>
+</div>
+
+<script>
+/* ============================ sample world ============================ */
+/* Three machines: your laptop (local sources), your desktop (a Collector you
+   run), and a teammate's mac (their Collector). "today" only ever shows the
+   local machine — that's the whole point of the before/after. */
+const HOST = { mine:"loki.local", desk:"forge-desktop", mate:"mara-mbp" };
+const MACHINES = [
+  { id:"mine", host:HOST.mine, kind:"mine", label:"this mac", online:true },
+  { id:"desk", host:HOST.desk, kind:"self", label:"your desktop", online:true },
+  { id:"mate", host:HOST.mate, kind:"mate", label:"teammate", online:true },
+];
+
+const TOOL = { claude:{label:"C",color:"#E8590C"}, codex:{label:"◆",color:"#10A37F"} };
+
+// status: active | attention | finished ; reason: waiting | error
+const SESSIONS = [
+  { id:"s1", machine:"desk", tool:"claude", project:"riku", model:"opus-4.8", branch:"c7-collector-relay",
+    status:"attention", reason:"waiting", activity:"awaiting approval to run migrations", diff:{a:214,d:33}, tin:184000, tout:22400, age:"2m" },
+  { id:"s2", machine:"mate", tool:"codex", project:"billing-api", model:"gpt-5", branch:"fix/webhook-retry",
+    status:"attention", reason:"error", activity:"exited: test suite failed", diff:{a:41,d:12}, tin:96000, tout:8100, age:"6m" },
+  { id:"s3", machine:"mine", tool:"claude", project:"montpellier", model:"opus-4.8", branch:"reset-main-worktree",
+    status:"active", reason:null, activity:"editing web/src/Board.tsx", diff:{a:88,d:19}, tin:120000, tout:14200, age:"18s" },
+  { id:"s4", machine:"desk", tool:"codex", project:"web-scraper", model:"gpt-5", branch:"feat/rate-limit",
+    status:"active", reason:null, activity:"running pytest -q", diff:{a:52,d:7}, tin:64000, tout:5300, age:"41s" },
+  { id:"s5", machine:"mate", tool:"claude", project:"billing-api", model:"sonnet-5", branch:"spike/ledger",
+    status:"active", reason:null, activity:"planning the ledger schema", diff:{a:9,d:2}, tin:38000, tout:4100, age:"3m" },
+  { id:"s6", machine:"mine", tool:"claude", project:"riku", model:"opus-4.8", branch:"c5-card-stats",
+    status:"finished", reason:null, activity:"done — merged #11", diff:{a:0,d:0}, tin:210000, tout:26000, age:"1h" },
+  { id:"s7", machine:"desk", tool:"claude", project:"riku", model:"sonnet-5", branch:"docs/adr-0006",
+    status:"finished", reason:null, activity:"done — pushed", diff:{a:120,d:4}, tin:70000, tout:9000, age:"52m" },
+];
+
+const REASON = { waiting:{icon:"💬",label:"Waiting for you"}, error:{icon:"⚠",label:"Exited with error"} };
+const abbr = n => n>=1000 ? (n/1000).toFixed(n>=100000?0:1)+"k" : ""+n;
+const mach = id => MACHINES.find(m=>m.id===id);
+
+/* live network state (mutated by the sim bar) */
+const net = { online:{ mine:true, desk:true, mate:true }, relay:true };
+
+/* which sessions the board can currently see, given the variant + network.
+   today = local machine only (no relay). C7 = every ONLINE machine. */
+function visibleSessions(variant){
+  if(variant==="today") return SESSIONS.filter(s=>s.machine==="mine");
+  return SESSIONS.filter(s=> net.relay ? net.online[s.machine] : s.machine==="mine");
+}
+
+/* ============================ render helpers ============================ */
+function machineChip(id){
+  const m = mach(id);
+  const cls = m.kind==="mine" ? "mine" : m.kind==="mate" ? "mate" : "";
+  return `<span class="machine ${cls}" title="${m.label}"><span class="mdot"></span>🖥 ${m.host}</span>`;
+}
+function tile(tool,small){
+  const t = TOOL[tool];
+  return `<span class="tile ${small?'sm':''}" style="--tile:${t.color}">${t.label}</span>`;
+}
+function metaLine(s, withMachine){
+  return `<span class="meta">
+    <span class="k">${s.model}</span><span>⑂ ${s.branch}</span>
+    <span>↑ ${abbr(s.tin)} / ${abbr(s.tout)}</span>
+    <span class="diff"><span class="add">+${s.diff.a}</span><span class="del">−${s.diff.d}</span></span>
+    ${withMachine?machineChip(s.machine):""}
+  </span>`;
+}
+function alertCard(s, withMachine){
+  const r = REASON[s.reason];
+  return `<div class="alert ${s.reason==='error'?'err':''} enter">
+    ${tile(s.tool)}
+    <div class="body">
+      <div class="r1"><span class="name">${s.project}</span>
+        ${withMachine?machineChip(s.machine):""}
+        <span class="planlink" style="color:var(--info);font:500 11px var(--font-mono)">▤ plan ↗</span>
+      </div>
+      <div class="reason">${r.icon} ${r.label}<span class="detail"> · ${s.activity}</span></div>
+      <div class="m2">${metaLine(s,false)}</div>
+    </div>
+    <button class="cta">Review →</button>
+  </div>`;
+}
+function compactRow(s, withMachine, done){
+  return `<div class="row ${done?'done':''} enter">
+    ${tile(s.tool,true)}
+    <div><div class="name">${s.project}</div><div class="branch">⑂ ${s.branch}</div></div>
+    <div class="act">${done?'✓ ':'▸ '}${s.activity}</div>
+    <div class="mini">
+      ${withMachine?machineChip(s.machine):""}
+      <span class="openlink" style="color:var(--positive);font:500 11px var(--font-mono)">open ↗</span>
+      <span class="diff"><span class="add">+${s.diff.a}</span><span class="del">−${s.diff.d}</span></span>
+      <span>↑${abbr(s.tin)}/${abbr(s.tout)}</span>
+      <span class="age">${s.age}</span>
+    </div>
+  </div>`;
+}
+function band(dot,label,count){
+  return `<div class="band"><span class="dot ${dot}"></span><b class="label-micro">${label}</b><span class="n">${count}</span></div>`;
+}
+function streamOf(list, withMachine){
+  const att = list.filter(s=>s.status==="attention");
+  const act = list.filter(s=>s.status==="active");
+  const fin = list.filter(s=>s.status==="finished");
+  if(list.length===0) return `<div class="empty">No agent sessions in the last 24h.</div>`;
+  return band("attention","Needs you",att.length) + att.map(s=>alertCard(s,withMachine)).join("")
+    + band("active","Running",act.length) + act.map(s=>compactRow(s,withMachine,false)).join("")
+    + band("finished","Finished",fin.length) + fin.map(s=>compactRow(s,withMachine,true)).join("");
+}
+
+/* ============================ variants ============================ */
+function noteBanner(tag, html){
+  return `<div class="note"><span class="tag">${tag}</span><div>${html}</div></div>`;
+}
+
+/* today — local only, no machine labels, no relay */
+function renderToday(){
+  const list = visibleSessions("today");
+  return noteBanner("today",
+      `<b>The board as it is now.</b> It reads transcript files on <b>this machine only</b>. Your desktop's and your
+       teammate's agents are invisible — there is no single view. No card carries a machine label because there is
+       only ever one machine.`)
+    + `<div class="stream">${streamOf(list,false)}</div>`;
+}
+
+/* A — inline machine chip, unified stream unchanged */
+function renderA(){
+  const list = visibleSessions("A");
+  return noteBanner("C7 · A",
+      `<b>Inline machine chip.</b> The attention-first stream is <b>structurally unchanged</b>; every card just gains a
+       <span class="machine mine"><span class="mdot"></span>🖥 host</span> chip. One global "Needs you" ranking across all
+       machines. Toggle a Collector off in the black bar above — its cards vanish in place.`)
+    + `<div class="stream">${streamOf(list,true)}</div>`;
+}
+
+/* B — one lane per machine, each its own mini mission-control */
+function renderB(){
+  let lanes = "";
+  for(const m of MACHINES){
+    const on = net.relay ? net.online[m.id] : m.id==="mine";
+    const list = SESSIONS.filter(s=>s.machine===m.id);
+    const att = list.filter(s=>s.status==="attention");
+    const act = list.filter(s=>s.status==="active");
+    const fin = list.filter(s=>s.status==="finished");
+    const body = !on
+      ? `<div class="offline-note">Collector offline — cards cleared. Re-pushes its state on reconnect.</div>`
+      : (list.length===0 ? `<div class="offline-note" style="color:var(--ink-faint)">No sessions.</div>` :
+          (att.length?`<div class="subband"><span class="dot attention"></span><b class="label-micro">Needs you</b><span class="n">${att.length}</span></div>`+att.map(s=>alertCard(s,false)).join(""):"")
+        + (act.length?`<div class="subband"><span class="dot active"></span><b class="label-micro">Running</b><span class="n">${act.length}</span></div>`+act.map(s=>compactRow(s,false,false)).join(""):"")
+        + (fin.length?`<div class="subband"><span class="dot finished"></span><b class="label-micro">Finished</b><span class="n">${fin.length}</span></div>`+fin.map(s=>compactRow(s,false,true)).join(""):""));
+    lanes += `<div class="lane ${on?'':'offline'}">
+      <div class="lane-head">
+        <span class="dot ${on?'live':'off'}"></span>
+        <span class="host">🖥 ${m.host}</span>
+        <span class="who">${m.kind==='mine'?'this mac':m.kind==='mate'?'teammate':'you'}</span>
+        <span class="tally">${on?`<span class="att">▲ ${att.length}</span><span>▸ ${act.length}</span><span>✓ ${fin.length}</span>`:'offline'}</span>
+      </div>
+      ${body}
+    </div>`;
+  }
+  return noteBanner("C7 · B",
+      `<b>Machine lanes.</b> The board splits into one box per machine, each a self-contained needs-you / running /
+       finished stream. Best "whose machine is whose" clarity — but the global "most urgent thing anywhere" ranking is
+       gone (an offline lane still shows, greyed, so you know it dropped).`)
+    + `<div class="lanes">${lanes}</div>`;
+}
+
+/* C — machine rail as filter; unified stream keeps global attention-first */
+let cFilter = "all";
+function renderC(){
+  const list = visibleSessions("C").filter(s=> cFilter==="all" ? true : s.machine===cFilter);
+  let rail = `<div class="relayrow"><span class="dot ${net.relay?'live':'off'}"></span>Relay ${net.relay?'connected':'reconnecting…'}</div>`;
+  rail += `<button class="mrow" data-mf="all" aria-current="${cFilter==='all'}"><span class="dot live"></span><span class="host">All machines</span><span class="cnt">${visibleSessions("C").length}</span></button>`;
+  for(const m of MACHINES){
+    const on = net.relay ? net.online[m.id] : m.id==="mine";
+    const c = SESSIONS.filter(s=>s.machine===m.id && (net.relay?on:m.id==="mine"));
+    const att = c.filter(s=>s.status==="attention").length;
+    rail += `<button class="mrow ${on?'':'offline'}" data-mf="${m.id}" aria-current="${cFilter===m.id}">
+      <span class="dot ${on?'live':'off'}"></span>
+      <span class="host">${m.host}</span>
+      <span class="cnt ${att?'att':''}">${on? (att?'▲'+att:c.length) : '—'}</span>
+    </button>`;
+  }
+  return noteBanner("C7 · C",
+      `<b>Machine rail + filter.</b> A left sidebar lists every machine (online dot + count) and doubles as a filter;
+       the main stream keeps the <b>global attention-first</b> ranking and tags each card with its machine. Click a
+       machine to focus it. Relay status lives at the top of the rail instead of the topbar.`)
+    + `<div class="split"><div class="rail"><h4>Machines</h4>${rail}</div>
+        <div class="stream" style="margin:0">${streamOf(list,true)}</div></div>`;
+}
+
+/* ---- Work Items (C4) — one project at a time. C7's ONLY touch here is that a
+   Work Link's live session can now be on a REMOTE machine, so its chip carries
+   the machine label. Everything else (WORK.md/GitHub read, kanban) is local &
+   unchanged — cross-machine Work Item behavior is explicitly out of scope. */
+const WORK_PROJECT = "riku";
+const WORK = [
+  { id:"C2", title:"Codex CLI Session Source", status:"done", eff:"M", sess:null },
+  { id:"C3", title:"Attention detection + column semantics", status:"done", eff:"L", sess:null },
+  { id:"C4", title:"Work Items (WORK.md + GitHub + Work Links)", status:"done", eff:"L", sess:null },
+  { id:"C5", title:"Card stats — diff +/- and cost estimates", status:"done", eff:"M", sess:"s6" },
+  { id:"C6", title:"Deep-link into the local session", status:"done", eff:"S", sess:null },
+  { id:"C7", title:"Collector + Relay (team / multi-machine)", status:"doing", eff:"L", sess:"s1" },
+];
+function workSessionChip(sid, withMachine){
+  const s = SESSIONS.find(x=>x.id===sid);
+  const dot = s.status==="attention"?"attention":s.status==="finished"?"finished":"live";
+  return `<button class="link-sess">
+    ${tile(s.tool,true)}
+    <span class="who"><span class="repo">${s.project}</span>
+      <span class="sub">${s.model} · ⑂ ${s.branch}${withMachine?machineChip(s.machine):""}</span></span>
+    <span class="dot ${dot}" style="margin-left:2px"></span><span class="go">→</span>
+  </button>`;
+}
+function workCard(w, withMachine){
+  let body = "";
+  if(w.sess) body = workSessionChip(w.sess, withMachine);
+  else if(w.status==="doing") body = `<div class="done-line faint">◔ In progress · no live session</div>`;
+  else if(w.status==="done") body = `<div class="done-line">✓ Done</div>`;
+  const color = w.status==="done"?"var(--positive)":w.status==="doing"?"var(--info)":"var(--ink-faint)";
+  const glyph = w.status==="done"?"✓":w.status==="doing"?"◐":"○";
+  return `<div class="wcard is-${w.status}">
+    <div class="top"><span class="tile sm" style="--tile:${color}">${glyph}</span>
+      <span class="id">${w.id}</span><span class="eff">${w.eff}</span></div>
+    <div class="title">${w.title}</div>${body}</div>`;
+}
+function renderWork(withMachine){
+  const done = WORK.filter(w=>w.status==="done").length, total = WORK.length, pct = Math.round(done/total*100);
+  const col = (key,label) => {
+    const inCol = WORK.filter(w=>w.status===key);
+    return `<div class="col"><div class="col-head"><span class="dot ${key}"></span><b>${label}</b>
+      <span class="count">${inCol.length}</span></div>${inCol.map(w=>workCard(w,withMachine)).join("")}</div>`;
+  };
+  const note = withMachine
+    ? noteBanner("C7 · Work Items",
+        `<b>Work Items is unchanged by C7 — with one touch.</b> The plan is still read <b>per-project, locally</b>
+         (WORK.md / GitHub), one project at a time. The only new thing: item <b>C7</b>'s live session is running on
+         <span class="machine"><span class="mdot"></span>🖥 forge-desktop</span> (a remote machine), so its
+         <b>Work Link chip carries the machine label</b>, consistent with variant A. Clicking it still cross-links to
+         that card on the Board. Cross-machine Work Item behavior beyond this is out of scope for the ticket.`)
+    : noteBanner("today · Work Items",
+        `<b>Work Items today.</b> Per-project plan, one project at a time, Work Link chips point at <b>local</b>
+         sessions only. No machine labels anywhere.`);
+  return note + `<div class="work-head">
+      <span class="pill">▤ ${WORK_PROJECT} <span class="chev">▾</span></span>
+      <span class="src">source: WORK.md · ${total} items</span>
+      <span class="seg"><button aria-pressed="true">Kanban</button><button>Graph</button></span>
+      <span class="prog">${done}/${total} done<span class="track"><span style="width:${pct}%"></span></span></span>
+    </div>
+    <div class="cols">${col("todo","To do")}${col("doing","In progress")}${col("done","Done")}</div>`;
+}
+
+const VARIANTS = [
+  { key:"today", name:"Today — local only", render:renderToday, relayInTopbar:false, tab:"board" },
+  { key:"A",     name:"A — Inline machine chip", render:renderA, relayInTopbar:true, tab:"board" },
+  { key:"B",     name:"B — Machine lanes", render:renderB, relayInTopbar:true, tab:"board" },
+  { key:"C",     name:"C — Machine rail + filter", render:renderC, relayInTopbar:false, tab:"board" },
+  { key:"work-today", name:"Work Items — today (local)", render:()=>renderWork(false), relayInTopbar:false, tab:"work" },
+  { key:"work-A",     name:"Work Items — with C7 (variant A)", render:()=>renderWork(true), relayInTopbar:true, tab:"work" },
+];
+
+/* ============================ chrome + wiring ============================ */
+function currentKey(){
+  const p = new URLSearchParams(location.search).get("variant");
+  return VARIANTS.some(v=>v.key===p) ? p : "today";
+}
+function topbar(v){
+  const live = visibleSessions(v.key).filter(s=>s.status!=="finished").length;
+  const onlineCount = MACHINES.filter(m=> v.key==="today" ? m.id==="mine" : (net.relay?net.online[m.id]:m.id==="mine")).length;
+  let right = "";
+  if(v.key==="today"){
+    right = `<span class="relaypill off" title="No Relay configured — solo/local mode"><span class="dot finished"></span>local only</span>`;
+  } else if(v.relayInTopbar){
+    right = `<span class="relaypill ${net.relay?'':'off'}" title="Subscribed to a Relay (C7)">
+      <span class="dot ${net.relay?'live':'off'}"></span>relay ${net.relay?'✓':'…'} · <span class="rl">${onlineCount}</span> machines</span>`;
+  } else {
+    right = `<span class="relaypill" title="Machine count (relay status is in the rail)"><span class="dot live"></span><span class="rl">${onlineCount}</span> machines</span>`;
+  }
+  const tabs = `<span class="seg" style="margin-left:8px">
+      <button ${v.tab==='board'?'aria-pressed="true"':''}>Board</button>
+      <button ${v.tab==='work'?'aria-pressed="true"':''}>Work Items</button></span>`;
+  return `<span class="logo">▦</span><span class="brand">AGENT BOARD</span>
+    <span class="live">${live} LIVE</span>${tabs}
+    <span class="spacer"></span>${right}`;
+}
+
+function simbar(v){
+  const disabled = v.key==="today";
+  let chips = `<span class="lbl">Network</span>`;
+  for(const m of MACHINES){
+    if(m.id==="mine"){
+      chips += `<span class="machip mine" title="Your local machine — always on"><span class="mdot"></span>${m.host} · local</span>`;
+    } else {
+      const on = net.online[m.id];
+      chips += `<button class="machip ${on?'':'off'}" data-toggle="${m.id}" ${disabled?'disabled style=\"opacity:.35;cursor:not-allowed\"':''}
+        title="Toggle this machine's Collector">
+        <span class="mdot"></span>${m.host} · collector ${on?'online':'offline'}</button>`;
+    }
+  }
+  chips += `<span class="sep"></span>
+    <button class="relaybtn ${net.relay?'':'off'}" id="relaytoggle" ${disabled?'disabled style=\"opacity:.35;cursor:not-allowed\"':''}>
+      Relay: ${net.relay?'connected':'reconnecting…'}</button>`;
+  const hint = disabled ? `<span class="lbl" style="margin-left:auto">↔ switch to a C7 variant to drive the network</span>` : "";
+  return chips + hint;
+}
+
+function render(){
+  const v = VARIANTS.find(x=>x.key===currentKey());
+  document.getElementById("simbar").innerHTML = simbar(v);
+  document.getElementById("topbar").innerHTML = topbar(v);
+  document.getElementById("stage").innerHTML = v.render();
+  const idx = VARIANTS.indexOf(v);
+  document.getElementById("cur").innerHTML = `${v.name}<small>${idx+1} / ${VARIANTS.length} · ?variant=${v.key}</small>`;
+  wireSim();
+}
+function wireSim(){
+  document.querySelectorAll("[data-toggle]").forEach(b=>b.onclick=()=>{
+    const id=b.dataset.toggle; net.online[id]=!net.online[id]; render();
+  });
+  const rb=document.getElementById("relaytoggle"); if(rb) rb.onclick=()=>{ net.relay=!net.relay; render(); };
+  document.querySelectorAll("[data-mf]").forEach(b=>b.onclick=()=>{ cFilter=b.dataset.mf; render(); });
+}
+function goTo(key){
+  const u=new URL(location); u.searchParams.set("variant",key); history.replaceState(null,"",u); render();
+}
+function cycle(dir){
+  const i=VARIANTS.findIndex(v=>v.key===currentKey());
+  goTo(VARIANTS[(i+dir+VARIANTS.length)%VARIANTS.length].key);
+}
+document.getElementById("prev").onclick=()=>cycle(-1);
+document.getElementById("next").onclick=()=>cycle(1);
+window.addEventListener("keydown",e=>{
+  const t=e.target; if(t&&/^(INPUT|TEXTAREA)$/.test(t.tagName)) return;
+  if(e.key==="ArrowLeft"){cycle(-1);} if(e.key==="ArrowRight"){cycle(1);}
+});
+render();
+</script>
+</body>
+</html>
