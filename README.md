@@ -1,9 +1,47 @@
-# Agent Board
+# Agent Board (riku)
 
 A local mission-control board for AI coding agent sessions. It watches your local
 Claude Code **and** Codex CLI transcripts and renders every session live on an
 attention-first board (issues #2, #5), with a per-project **Work Items** view that
 links each session to the plan it is carrying out (issue #1, C4).
+
+![The board: Needs You on top, Running below, Finished last](docs/images/board.png)
+
+## Why this exists
+
+Once you run more than two coding agents at a time, you acquire a problem that has
+nothing to do with software and everything to do with psychology. Ten agents are
+ten brilliant interns working in ten separate rooms with the doors closed. Nine of
+them are fine. One of them has been standing politely at the door for forty
+minutes, holding a question, and you are the bottleneck without knowing it.
+
+The instinctive fix is a dashboard. But most dashboards fail for a wonderfully
+human reason: they are designed to show you *everything*, and a screen that shows
+everything tells you nothing. Nobody ever missed a flight because the departures
+board was too small; they missed it because their flight looked exactly like all
+the others.
+
+So the board makes precisely one editorial decision, and makes it ruthlessly:
+**what needs you goes on top.** An agent waiting for approval or dead on an error
+is the headline. Agents happily burning tokens are the middle of the paper.
+Finished agents are the archive. You don't scan the board — the board scans you.
+
+Three small perceptual tricks do most of the work:
+
+- **Attention is a status, not a colour.** A card only moves to *Needs You* for a
+  hard signal — an unanswered question, an error exit. Staleness is a hint on the
+  card, never a promotion. Cry wolf once and every alert is wallpaper.
+- **One action, and it's the right one.** `Review →` doesn't show you a log — it
+  opens a terminal *inside the session*, resumed, in the right directory. The cost
+  of responding drops to one click, so you actually respond.
+- **Prices change behaviour.** Every card can show a `$ est.` figure. Not because
+  the number is precise (it says "est." for a reason) but because a visible cost is
+  the difference between "hm, that agent has been thinking for two hours" and doing
+  something about it. Subscription users can switch it off — a price you don't pay
+  is just noise.
+
+It's local-first, read-only by design, and never controls an agent remotely
+(ADR 0002). It is a mirror, not a remote control.
 
 ```
 Cargo.toml            workspace
@@ -187,6 +225,18 @@ the same item set — a **To do / In progress / Done** kanban and a **dependency
 graph** laid out by blocked-by depth. A project selector switches projects (drawn
 from the live sessions), and a source badge shows whether the items came from
 `WORK.md` or GitHub Issues.
+
+![Work Items kanban for one project, sourced from GitHub Issues](docs/images/work-items.png)
+
+The graph view (PR #24) is where dependencies earn their keep: the **critical
+path** — the longest chain of unfinished, blocking items — is highlighted, so the
+question "what should an agent pick up next?" answers itself. Hovering an item
+lights up its full **lineage** (everything it blocks and everything blocking it),
+items with a live Agent Session get a pulsing **agent ring**, an item that needs
+you gets an attention ring, and the canvas **pans** for plans bigger than a
+screen.
+
+![The dependency graph: critical path flagged, done items green](docs/images/work-graph.png)
 
 Each project has a single **Work Source**, resolved by `GET /api/work?cwd=<dir>`:
 if `<dir>/WORK.md` exists it wins, otherwise GitHub Issues via `gh` (degrading to
