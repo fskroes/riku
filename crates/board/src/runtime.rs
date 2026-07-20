@@ -94,7 +94,7 @@ pub struct Started {
 pub fn init(
     claude_root: PathBuf,
     codex_root: Option<PathBuf>,
-    web_dist: PathBuf,
+    web_dist: Option<PathBuf>,
     relay: Option<RelayConfig>,
 ) -> Started {
     // Canonicalize so the paths from filesystem events match the keys produced by

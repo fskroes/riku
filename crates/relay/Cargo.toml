@@ -3,19 +3,7 @@ name = "relay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-# Two headless binaries plus the shared wire library. The Relay fans Collector
-# updates out to boards; the Collector watches one machine's sessions and pushes
-# them up. Both share the `collector` crate (Session model, store, watcher) and
-# this crate's wire codec + token auth, so a remote card carries the same stats a
-# local one does (ADR 0001: shared code, not a second pipeline).
-[[bin]]
-name = "relay"
-path = "src/bin/relay.rs"
-
-[[bin]]
-name = "collector"
-path = "src/bin/collector.rs"
+autobins = false
 
 [dependencies]
 collector = { path = "../collector" }

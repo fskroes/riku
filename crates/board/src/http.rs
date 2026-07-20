@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode, Uri},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse,
@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
+use rust_embed::RustEmbed;
 
 use crate::open::{is_safe_session_id, Launcher};
 use crate::runtime::{RelayStatus, RemoteSessions};
@@ -33,7 +34,9 @@ use crate::runtime::{RelayStatus, RemoteSessions};
 pub struct AppState {
     pub store: Arc<Mutex<SessionStore>>,
     pub tx: broadcast::Sender<Event>,
-    pub web_dist: PathBuf,
+    /// A contributor-provided UI directory. When absent, the compiled-in UI is
+    /// served, so an installed binary never depends on its current directory.
+    pub web_dist: Option<PathBuf>,
     /// Live git `+/-` per repo, filled onto session cards at the output boundary.
     pub diff_cache: Arc<collector::DiffCache>,
     /// How the board opens a local session (a terminal launch); injectable so
@@ -53,6 +56,10 @@ pub struct AppState {
 const WEB_DIST_MISSING: &str =
     "web/dist not found — run: cd web && npm install && npm run build";
 
+#[derive(RustEmbed)]
+#[folder = "../../web/dist/"]
+struct WebAssets;
+
 /// Build the full application router.
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
@@ -63,15 +70,33 @@ pub fn router(state: AppState) -> Router {
         .route("/api/relay", get(relay_status))
         .with_state(state.clone());
 
-    let dist = state.web_dist;
-    if dist.is_dir() && dist.join("index.html").is_file() {
-        // Serve built assets; fall back to index.html for the SPA.
-        let index = tower_http::services::ServeFile::new(dist.join("index.html"));
-        let serve = tower_http::services::ServeDir::new(&dist).not_found_service(index);
-        api.fallback_service(serve)
-    } else {
-        api.fallback(missing_dist)
+    match state.web_dist {
+        Some(dist) if dist.is_dir() && dist.join("index.html").is_file() => {
+            // The explicit development override retains Vite's hot-reload loop.
+            let index = tower_http::services::ServeFile::new(dist.join("index.html"));
+            let serve = tower_http::services::ServeDir::new(&dist).not_found_service(index);
+            api.fallback_service(serve)
+        }
+        Some(_) => api.fallback(missing_dist),
+        None => api.fallback(embedded_ui),
     }
+}
+
+/// Serve a compile-time UI asset, with `index.html` as the SPA fallback. Only the
+/// explicitly requested `--web-dist` path can produce the old 503 developer hint.
+async fn embedded_ui(uri: Uri) -> axum::response::Response {
+    let requested = uri.path().trim_start_matches('/');
+    let requested = if requested.is_empty() { "index.html" } else { requested };
+    let (asset, content_path) = WebAssets::get(requested)
+        .map(|asset| (asset, requested))
+        .or_else(|| WebAssets::get("index.html").map(|asset| (asset, "index.html")))
+        .expect("build guard ensures the embedded index.html exists");
+    let mime = mime_guess::from_path(content_path).first_or_octet_stream();
+    (
+        [(header::CONTENT_TYPE, mime.as_ref())],
+        axum::body::Body::from(asset.data.into_owned()),
+    )
+        .into_response()
 }
 
 #[derive(Serialize)]
