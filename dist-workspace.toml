@@ -11,3 +11,6 @@ publish-jobs = ["homebrew"]
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 hosting = "github"
 install-updater = false
+# release.yml is a hand-maintained, security-hardened workflow (pinned action SHAs,
+# least-privilege permissions). Tell dist not to regenerate/consistency-check it.
+allow-dirty = ["ci"]
