@@ -28,6 +28,25 @@ fn assistant_line(id: &str, activity: &str, tin: u64, tout: u64) -> String {
     .to_string()
 }
 
+/// A Claude assistant line with an explicit `cwd` and `gitBranch` — used to point a
+/// session at a real project directory (so it can carry a `WORK.md`) and give it a
+/// branch a Work Item id can be inferred from.
+fn assistant_line_in(id: &str, cwd: &str, branch: &str) -> String {
+    serde_json::json!({
+        "type": "assistant",
+        "sessionId": id,
+        "timestamp": "2026-07-19T10:00:00Z",
+        "cwd": cwd,
+        "gitBranch": branch,
+        "message": {
+            "model": "claude-opus-4-8",
+            "usage": { "input_tokens": 10, "output_tokens": 1 },
+            "content": [{ "type": "text", "text": "working" }]
+        }
+    })
+    .to_string()
+}
+
 /// A Claude assistant turn that ended to call a tool (waiting on the human).
 fn claude_waiting_line(id: &str) -> String {
     serde_json::json!({
@@ -423,6 +442,77 @@ async fn answering_a_wait_drops_out_of_attention_over_sse() {
         buf.contains("\"attentionReason\":null"),
         "attention reason should clear: {buf:?}"
     );
+}
+
+#[tokio::test]
+async fn work_map_items_carry_their_work_link() {
+    // A real project dir with a WORK.md, plus a Claude session whose cwd points at
+    // it and whose branch names W-12.
+    let claude = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    let proj_cwd = proj.path().to_string_lossy().to_string();
+    fs::write(
+        proj.path().join("WORK.md"),
+        "# Work Map\n\n\
+         - [x] W-11 Onboarding polish\n\
+         - [~] W-12 Release download flow (~2d)\n\
+         - [ ] W-14 Auto-update banner (blocked by: W-12)\n",
+    )
+    .unwrap();
+    write_transcript(
+        claude.path(),
+        "-proj",
+        "aaaa.jsonl",
+        &[assistant_line_in("sess-dl", &proj_cwd, "fix/W-12-download-flow")],
+    );
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/work"))
+        .query(&[("cwd", proj_cwd.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(body["source"], "workMd");
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+
+    let w12 = items.iter().find(|i| i["id"] == "W-12").unwrap();
+    assert_eq!(w12["status"], "doing");
+    assert_eq!(w12["effort"], "~2d");
+    // The Work Link: W-12's branch names the item, so its session is attached.
+    assert_eq!(w12["session"]["id"], "sess-dl");
+    assert_eq!(w12["session"]["branch"], "fix/W-12-download-flow");
+
+    let w14 = items.iter().find(|i| i["id"] == "W-14").unwrap();
+    assert_eq!(w14["blockedBy"], serde_json::json!(["W-12"]));
+    assert!(w14["session"].is_null(), "W-14 has no matching branch: {w14:?}");
+}
+
+#[tokio::test]
+async fn work_endpoint_404s_for_an_unknown_project() {
+    let claude = tempfile::tempdir().unwrap();
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "hello", 10, 1)],
+    );
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+
+    let status = reqwest::Client::new()
+        .get(format!("http://{addr}/api/work"))
+        .query(&[("cwd", "/no/such/project")])
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

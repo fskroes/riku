@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -16,9 +16,9 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use collector::{Event, Session, SessionStore};
+use collector::{Event, Session, SessionStore, Status, Tool, WorkItem, WorkSourceKind};
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -40,6 +40,7 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/api/sessions", get(sessions))
         .route("/api/events", get(events))
+        .route("/api/work", get(work))
         .with_state(state.clone());
 
     let dist = state.web_dist;
@@ -65,6 +66,143 @@ async fn sessions(State(state): State<AppState>) -> Json<SessionsResponse> {
         store.snapshot(Utc::now())
     };
     Json(SessionsResponse { sessions })
+}
+
+#[derive(Deserialize)]
+struct WorkQuery {
+    /// The project directory (a session's `cwd`). Scoped to known sessions so the
+    /// endpoint cannot be pointed at an arbitrary path.
+    cwd: String,
+}
+
+/// The Work Items for one project, plus the source they came from. Each item may
+/// carry the Agent Session working it (the Work Link, inferred from the branch).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkResponse {
+    project: String,
+    source: WorkSourceKind,
+    items: Vec<WorkItemOut>,
+}
+
+/// A Work Item enriched with its Work Link — the [`LinkedSession`] whose branch
+/// this item's id was inferred from, if any.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkItemOut {
+    #[serde(flatten)]
+    item: WorkItem,
+    session: Option<LinkedSession>,
+}
+
+/// The compact session reference shown as an inset chip on an In-progress item.
+/// Carries `id` so the chip can cross-link to the same session's card on the Board.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkedSession {
+    id: String,
+    project: String,
+    tool: Tool,
+    model: Option<String>,
+    branch: Option<String>,
+    status: Status,
+}
+
+/// `GET /api/work?cwd=<dir>` — the Work Items for the project rooted at `cwd`.
+///
+/// `cwd` must match a known session's directory (404 otherwise), which both
+/// disambiguates same-named projects and keeps the file/`gh` read scoped to
+/// directories the board already watches. The `WORK.md`/`gh` read runs on a
+/// blocking thread; the session store lock is released before it starts.
+async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl IntoResponse {
+    // Snapshot the sessions in this project, releasing the lock before the
+    // (potentially slow) source read. Only same-cwd sessions are Work-Link
+    // candidates: a branch belongs to one repo.
+    let candidates: Vec<Session> = {
+        let store = state.store.lock().unwrap();
+        store
+            .snapshot(Utc::now())
+            .into_iter()
+            .filter(|s| s.cwd.as_deref() == Some(q.cwd.as_str()))
+            .collect()
+    };
+    let Some(project) = candidates.first().map(|s| s.project.clone()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let dir = PathBuf::from(&q.cwd);
+    let map = tokio::task::spawn_blocking(move || collector::read_work_map(&dir))
+        .await
+        .expect("read_work_map does not panic");
+
+    let items = map
+        .items
+        .into_iter()
+        .map(|item| {
+            let session = link_session(&item, &candidates);
+            WorkItemOut { item, session }
+        })
+        .collect();
+
+    Json(WorkResponse {
+        project,
+        source: map.source,
+        items,
+    })
+    .into_response()
+}
+
+/// The Work Link for `item`: the most-recently-active candidate session whose
+/// branch the item's id can be inferred from. `None` if nothing links.
+fn link_session(item: &WorkItem, candidates: &[Session]) -> Option<LinkedSession> {
+    candidates
+        .iter()
+        .filter(|s| s.branch.as_deref().is_some_and(|b| branch_links(b, &item.id)))
+        .max_by_key(|s| s.last_event_at)
+        .map(|s| LinkedSession {
+            id: s.id.clone(),
+            project: s.project.clone(),
+            tool: s.tool,
+            model: s.model.clone(),
+            branch: s.branch.clone(),
+            status: s.status,
+        })
+}
+
+/// Whether a git branch carries a Work Item's id — the branch-name half of Work
+/// Link inference. The id core (`w-14`, or `42` from `#42`) must appear as a token
+/// bounded by non-alphanumerics, so `w-14` matches `feature/w-14-x` but not
+/// `w-141`, and `#42` matches `fix/42-x` but not inside `142`/`420`. A `W-nn` id
+/// also matches its dashless form (`w14`) for branches that drop the dash.
+fn branch_links(branch: &str, id: &str) -> bool {
+    let branch = branch.to_ascii_lowercase();
+    let core = id.trim_start_matches('#').to_ascii_lowercase();
+    if core.is_empty() {
+        return false;
+    }
+    contains_token(&branch, &core)
+        || (core.contains('-') && contains_token(&branch, &core.replace('-', "")))
+}
+
+/// Whether `needle` occurs in `hay` bounded by non-alphanumeric characters (or
+/// string ends) on both sides — a whole-token match, not a loose substring.
+fn contains_token(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = hay.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = hay[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 /// `GET /api/events` — SSE. `session` events carry a full Session; `removed`
@@ -102,4 +240,27 @@ fn to_sse(event: Event) -> SseEvent {
 
 async fn missing_dist() -> impl IntoResponse {
     (StatusCode::SERVICE_UNAVAILABLE, WEB_DIST_MISSING)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::branch_links;
+
+    #[test]
+    fn work_map_id_links_by_dash_or_compact_form() {
+        assert!(branch_links("feature/W-12-download-flow", "W-12"));
+        assert!(branch_links("fix/w12", "W-12"));
+        assert!(branch_links("W-12", "W-12"));
+        assert!(!branch_links("feature/W-121", "W-12")); // compact wins, but dashless 121 ≠ w-12
+        assert!(!branch_links("main", "W-12"));
+    }
+
+    #[test]
+    fn github_number_links_only_when_digit_bounded() {
+        assert!(branch_links("fix/42-thing", "#42"));
+        assert!(branch_links("issue-42", "#42"));
+        assert!(!branch_links("fix/142-thing", "#42")); // inside a larger number
+        assert!(!branch_links("fix/420", "#42"));
+        assert!(!branch_links("main", "#42"));
+    }
 }

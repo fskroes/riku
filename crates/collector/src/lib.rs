@@ -15,6 +15,7 @@ mod session;
 mod source;
 mod store;
 mod watch;
+mod work;
 
 use std::path::PathBuf;
 
@@ -24,6 +25,7 @@ pub use session::{Accumulator, FileState};
 pub use source::{ClaudeSource, CodexSource, SessionSource};
 pub use store::{Event, SessionStore, DISCOVERY_WINDOW};
 pub use watch::{watch, Change, WatchGuard};
+pub use work::{read_work_map, WorkItem, WorkMap, WorkSourceKind, WorkStatus};
 
 /// The default Claude Code projects root: `~/.claude/projects`.
 pub fn default_root() -> Option<PathBuf> {

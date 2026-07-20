@@ -1,0 +1,63 @@
+import { useEffect, useState } from "react";
+import type { Session, Tool } from "./types";
+import { abbrevTokens, shortModel } from "./format";
+
+/** Per-tool tile glyph + accent. One Session Source per tool (issue #5). */
+export const TOOL: Record<Tool, { label: string; color: string }> = {
+  claude: { label: "C", color: "#E8590C" },
+  codex: { label: "◆", color: "#10A37F" },
+};
+
+/** A clock that ticks every `ms` so relative ages stay fresh. */
+export function useNow(ms: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(id);
+  }, [ms]);
+  return now;
+}
+
+/** The tool glyph tile shown on every session card and Work Link chip. */
+export function Tile({ tool, small }: { tool: Tool; small?: boolean }) {
+  const { label, color } = TOOL[tool];
+  return (
+    <span className={small ? "tile sm" : "tile"} style={{ ["--tile" as string]: color }}>
+      {label}
+    </span>
+  );
+}
+
+/** The mono model · branch · tokens line under a session's headline. */
+export function Meta({ session }: { session: Session }) {
+  const model = shortModel(session.model);
+  return (
+    <span className="meta">
+      {model && <span className="k">{model}</span>}
+      {session.branch && <span>⑂ {session.branch}</span>}
+      <span>
+        ↑ {abbrevTokens(session.tokensIn)} / {abbrevTokens(session.tokensOut)}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Scroll a freshly-focused element into view and flash it. Used for cross-linking
+ * between the Board and Work Items: the target element carries a stable DOM id and
+ * `focusId` is the one to reveal. Clears the flash after the animation.
+ */
+export function useFlash(focusId: string | null): void {
+  useEffect(() => {
+    if (!focusId) return;
+    // Defer to the next frame so the target view has rendered.
+    const raf = requestAnimationFrame(() => {
+      const el = document.getElementById(focusId);
+      if (!el) return;
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      el.classList.add("flash");
+      window.setTimeout(() => el.classList.remove("flash"), 2000);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [focusId]);
+}
