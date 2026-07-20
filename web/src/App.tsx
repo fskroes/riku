@@ -73,7 +73,10 @@ export default function App() {
 
   const machines = useMemo(() => machineCount(sessions), [sessions]);
 
-  const [view, setView] = useState<View>("board");
+  // PROTOTYPE — "?variant=" lands straight on the Work Items view (where the
+  // throwaway work-graph variants mount). Remove with WorkGraphPrototype.
+  const protoView: View = new URLSearchParams(window.location.search).has("variant") ? "work" : "board";
+  const [view, setView] = useState<View>(protoView);
   // Cross-link focus: a session id to reveal on the Board, and a project +
   // session id to reveal in Work Items. Set when jumping between the two views.
   const [boardFocus, setBoardFocus] = useState<string | null>(null);

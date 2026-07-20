@@ -197,3 +197,116 @@ body {
   0% { box-shadow: 0 0 0 2px var(--accent); }
   100% { box-shadow: var(--card-edge); }
 }
+
+/* PROTOTYPE — work-graph variants (throwaway). Delete with WorkGraphPrototype.tsx. */
+.wgp-head { display: flex; align-items: baseline; gap: 12px; padding: 4px 2px 14px; }
+.wgp-head .wgp-title { font-size: 15px; font-weight: 600; letter-spacing: .01em; }
+.wgp-head .wgp-sub { font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }
+.wgp-head .wgp-legend { margin-left: auto; display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--ink-faint); white-space: nowrap; }
+.wgp-head .wgp-legend .lg { font-style: normal; font-size: 12px; margin-left: 6px; }
+.wgp-head .wgp-legend .lg-pulse { width: 9px; height: 9px; border-radius: 50%; margin-left: 10px; flex: none; }
+.wgp-head .wgp-legend .lg-pulse.active { background: var(--positive); box-shadow: 0 0 0 2px rgba(51, 196, 129, .25); }
+.wgp-head .wgp-legend .lg-pulse.attention { background: var(--warning); box-shadow: 0 0 0 2px rgba(240, 180, 41, .25); }
+.wgp-scroll { overflow: auto; padding: 8px 4px 40px; cursor: grab; overscroll-behavior-x: contain; }
+.wgp-scroll.panning { cursor: grabbing; user-select: none; }
+
+.wgp-edges { position: absolute; left: 0; top: 0; pointer-events: none; }
+.wgp-edge { stroke: var(--ink-faint); stroke-width: 1.5; transition: stroke .15s var(--ease-out), opacity .15s var(--ease-out); }
+.wgp-edge.dim { opacity: .12; }
+.wgp-edge.lit { stroke: var(--info); stroke-width: 2; }
+.wgp-edge.crit { stroke: var(--warning); stroke-width: 2.5; }
+
+/* Variant A — Critical-Path Flow */
+.wgp-flow { position: relative; }
+.wgp-node { position: absolute; text-align: left; background: var(--surface-raised); border: 0;
+  border-left: 3px solid var(--ink-faint); border-radius: var(--r-md); box-shadow: var(--card-edge);
+  padding: 9px 12px; color: var(--ink); cursor: default; overflow: hidden;
+  transition: transform .15s var(--ease-out), opacity .15s var(--ease-out), box-shadow .15s var(--ease-out); }
+.wgp-node.is-doing, .wgp-node.is-done { cursor: pointer; }
+.wgp-node:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,0,0,.4), var(--card-edge); }
+.wgp-node.dim { opacity: .28; }
+.wgp-node.crit { box-shadow: 0 0 0 1px var(--warning), var(--card-edge); }
+.wgp-node.is-done { opacity: .78; background: rgba(51, 196, 129, .08); }
+.wgp-node.is-done.dim { opacity: .2; }
+/* Live-agent highlight: a persistent status-coloured ring + an expanding glow
+   pulse. Outline + box-shadow are used (not ::after) so overflow:hidden on the
+   node doesn't clip them. */
+.wgp-node.agent-active { outline: 1.5px solid var(--positive); animation: wgp-glow-active 1.9s var(--ease-out) infinite; }
+.wgp-node.agent-attention { outline: 1.5px solid var(--warning); animation: wgp-glow-attention 1.6s var(--ease-out) infinite; }
+.wgp-node.dim.has-agent { animation: none; }
+@keyframes wgp-glow-active {
+  0% { box-shadow: 0 0 0 0 rgba(51, 196, 129, .5), var(--card-edge); }
+  100% { box-shadow: 0 0 0 8px rgba(51, 196, 129, 0), var(--card-edge); }
+}
+@keyframes wgp-glow-attention {
+  0% { box-shadow: 0 0 0 0 rgba(240, 180, 41, .6), var(--card-edge); }
+  100% { box-shadow: 0 0 0 8px rgba(240, 180, 41, 0), var(--card-edge); }
+}
+.wgp-node-top { display: flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+.wgp-node-top .glyph { font-size: 12px; line-height: 1; flex: none; }
+.wgp-node-top .eff { color: var(--ink-faint); }
+.wgp-node-top .right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.wgp-node-top .agent-pill { display: inline-flex; align-items: center; font-size: 9px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: var(--r-pill); white-space: nowrap; }
+.wgp-node-top .agent-pill.active { color: var(--positive); background: rgba(51, 196, 129, .16); }
+.wgp-node-top .agent-pill.attention { color: var(--warning); background: rgba(240, 180, 41, .18); }
+.wgp-node-top .agent-pill.finished { color: var(--ink-faint); background: rgba(255, 255, 255, .06); }
+.wgp-node-top .crit-tag { font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: var(--warning); }
+.wgp-node-title { font-weight: 550; font-size: 12.5px; margin-top: 6px; line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* Variant B — Blast-Radius Orbit */
+.wgp-orbit { position: relative; margin: 0 auto; }
+.wgp-ring { stroke: rgba(255,255,255,.05); stroke-width: 1; }
+.wgp-hub { position: absolute; transform: translate(-50%, -50%); width: 62px; height: 62px; border-radius: 50%;
+  background: var(--surface-raised); box-shadow: var(--card-edge); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; color: var(--ink-muted); z-index: 2; }
+.wgp-hub span { font-size: 18px; }
+.wgp-hub small { font-size: 8px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-faint); }
+.wgp-orb { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 8px;
+  background: var(--surface-raised); border: 0; border-radius: var(--r-pill); box-shadow: var(--card-edge);
+  padding: 6px 12px 6px 8px; max-width: 168px; color: var(--ink); cursor: default; z-index: 3;
+  transition: opacity .15s var(--ease-out), transform .12s var(--ease-out); }
+.wgp-orb:hover { z-index: 5; }
+.wgp-orb.is-doing, .wgp-orb.is-done { cursor: pointer; }
+.wgp-orb.dim { opacity: .22; }
+.wgp-orb .orb-dot { position: relative; width: 12px; height: 12px; border-radius: 50%; flex: none; }
+.wgp-orb .orb-live { position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--positive);
+  animation: wgp-pulse 1.8s var(--ease-out) infinite; }
+.wgp-orb .orb-body { display: flex; flex-direction: column; min-width: 0; }
+.wgp-orb .orb-body .id { font-family: var(--font-mono); font-size: 10px; color: var(--ink-muted); }
+.wgp-orb .orb-title { font-size: 11.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@keyframes wgp-pulse { 0% { opacity: .8; transform: scale(1); } 100% { opacity: 0; transform: scale(1.7); } }
+
+/* Variant C — Dependency Timeline */
+.wgp-timeline { position: relative; }
+.wgp-stage { position: absolute; top: 0; bottom: 0; border-left: 1px dashed rgba(255,255,255,.06); }
+.wgp-stage:nth-child(odd) { background: rgba(255,255,255,.012); }
+.wgp-stage-lbl { position: absolute; top: 6px; left: 10px; font-family: var(--font-mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--ink-faint); }
+.wgp-bar { position: absolute; text-align: left; background: var(--surface-raised); border: 0;
+  border-radius: var(--r-md); box-shadow: var(--card-edge); padding: 0; color: var(--ink); overflow: hidden;
+  cursor: default; transition: opacity .15s var(--ease-out), transform .12s var(--ease-out); }
+.wgp-bar.is-doing, .wgp-bar.is-done { cursor: pointer; }
+.wgp-bar:hover { transform: translateY(-1px); }
+.wgp-bar.dim { opacity: .26; }
+.wgp-bar .bar-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
+.wgp-bar.is-done .bar-fill { width: 100%; opacity: .14; }
+.wgp-bar .bar-body { position: relative; padding: 8px 12px; }
+.wgp-bar .bar-top { display: flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+.wgp-bar .bar-top .eff { color: var(--ink-faint); }
+.wgp-bar .bar-top .dot { margin-left: 2px; }
+.wgp-bar .bar-title { display: block; margin-top: 4px; font-size: 12px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Floating switcher */
+.wgp-switch { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 100;
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--r-pill);
+  background: #000; box-shadow: 0 12px 32px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.12); }
+.wgp-switch .wgp-switch-tag { font-family: var(--font-mono); font-size: 9px; letter-spacing: .1em;
+  color: #000; background: var(--warning); padding: 2px 6px; border-radius: var(--r-pill); font-weight: 700; }
+.wgp-switch button { width: 30px; height: 30px; border: 0; border-radius: 50%; background: rgba(255,255,255,.08);
+  color: var(--ink); font-size: 15px; cursor: pointer; transition: background .12s; }
+.wgp-switch button:hover { background: rgba(255,255,255,.18); }
+.wgp-switch .wgp-switch-label { font: 500 13px var(--font-ui); color: var(--ink); min-width: 200px; text-align: center; }
+.wgp-switch .wgp-switch-label b { font-family: var(--font-mono); color: var(--warning); }

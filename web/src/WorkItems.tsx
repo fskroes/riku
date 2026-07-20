@@ -3,6 +3,7 @@ import type { LinkedSession, ProjectRef, WorkItem, WorkStatus } from "./types";
 import { domId, shortModel, sourceLabel } from "./format";
 import { Machine, Tile, useFlash } from "./ui";
 import { useWork } from "./useWork";
+import { WorkGraphPrototype, prototypeActive } from "./WorkGraphPrototype"; // PROTOTYPE gate — remove with the file
 
 const COLUMNS: { key: WorkStatus; label: string }[] = [
   { key: "todo", label: "To do" },
@@ -281,6 +282,12 @@ export function WorkItems({
   // The item to reveal when arriving from a Board session's "plan" link.
   const focusItem = focusSessionId ? items.find((i) => i.session?.id === focusSessionId) : undefined;
   useFlash(focusItem ? domId("item", focusItem.id) : null);
+
+  // PROTOTYPE — "?variant=A|B|C" replaces the graph body with the throwaway
+  // work-graph variants. Works even with no project (falls back to a demo DAG).
+  if (prototypeActive()) {
+    return <WorkGraphPrototype liveItems={items} onOpenSession={onOpenSession} />;
+  }
 
   if (!project) {
     return <div className="empty">No projects yet — a project appears once it has a session.</div>;
