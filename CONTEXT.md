@@ -25,7 +25,7 @@ A unit of project work to be done (a GitHub Issue or an entry in a Work Map file
 _Avoid_: task, ticket, todo, issue (except when specifically a GitHub Issue)
 
 **Work Link**:
-A stored association between a git branch and a Work Item. Proposed by inference (branch name, commit messages), pinnable/correctable by the user; every Agent Session on the branch inherits it.
+An ephemeral association between a Work Item and the most recently active local Agent Session whose git branch contains that item's id. It is inferred from the current branch name only; it is neither stored nor manually editable.
 _Avoid_: assignment, mapping
 
 **Work Map**:
