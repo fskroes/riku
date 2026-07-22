@@ -17,25 +17,25 @@ function machineCount(sessions: Session[]): number {
   return hosts.size;
 }
 
-/** The topbar Relay pill (variant A). Grey `local only` with no Relay (zero-setup
- *  solo mode); green `relay ✓ · N machines` when subscribed and live; amber
- *  `relay … · N machines` while the board is reconnecting to the Relay. */
-function RelayPill({ relay, machines }: { relay: RelayStatus; machines: number }) {
-  const label = `${machines} machine${machines === 1 ? "" : "s"}`;
+/** The rail's Relay stat (C7). Grey dot with no Relay (zero-setup solo mode);
+ *  green dot + machine count when subscribed and live; amber while reconnecting.
+ *  The words live in the tooltip — the rail only has room for the count. */
+function RelayStat({ relay, machines }: { relay: RelayStatus; machines: number }) {
   if (!relay.configured) {
     return (
-      <span className="relaypill off" title="No Relay configured — solo / local mode">
-        <span className="dot finished" /> local only
+      <span className="stat" title="No Relay configured — solo / local mode">
+        <span className="dot finished" /> ·
       </span>
     );
   }
+  const label = `${machines} machine${machines === 1 ? "" : "s"}`;
   return (
     <span
-      className="relaypill"
-      title={relay.connected ? "Subscribed to a Relay (C7)" : "Reconnecting to the Relay…"}
+      className="stat"
+      title={relay.connected ? `Subscribed to a Relay (C7) · ${label}` : "Reconnecting to the Relay…"}
     >
       <span className={`dot ${relay.connected ? "live" : "attention"}`} />
-      relay {relay.connected ? "✓" : "…"} · <span className="rl">{label}</span>
+      {machines}
     </span>
   );
 }
@@ -117,41 +117,44 @@ export default function App() {
   };
 
   return (
-    <div className="window">
-      <div className="topbar">
-        <span className="logo">▦</span>
-        <span className="brand">AGENT BOARD</span>
-        <span className="live">{live} LIVE</span>
-        <span className="seg" role="tablist" style={{ marginLeft: 8 }}>
+    <div className="app">
+      <aside className="rail">
+        <span className="brand" title="Agent Board">
+          ▦
+        </span>
+        <nav role="tablist">
           <button type="button" role="tab" aria-pressed={view === "board"} onClick={() => go("board")}>
             Board
           </button>
           <button type="button" role="tab" aria-pressed={view === "work"} onClick={() => go("work")}>
             Work Items
           </button>
-        </span>
-        <span className="spacer" />
-        <button
-          type="button"
-          className="costtoggle"
-          aria-pressed={showCost}
-          onClick={toggleCost}
-          title={
-            showCost
-              ? "Hide estimated costs (for subscription plans, which pay no marginal cost)"
-              : "Show estimated costs"
-          }
-        >
-          $ est. {showCost ? "on" : "off"}
-        </button>
-        <RelayPill relay={relay} machines={machines} />
-        <span className="remote" title={connected ? "Live stream connected" : "Reconnecting…"}>
-          <span className={`dot ${connected ? "live" : "finished"}`} />
-          {connected ? "connected" : "offline"}
-        </span>
-      </div>
+        </nav>
+        <div className="foot">
+          <span className="stat" title={`${live} live session${live === 1 ? "" : "s"}`}>
+            <span className="dot live" /> {live}
+          </span>
+          <RelayStat relay={relay} machines={machines} />
+          <span className="stat" title={connected ? "Live stream connected" : "Reconnecting…"}>
+            <span className={`dot ${connected ? "live" : "finished"}`} />
+          </span>
+          <button
+            type="button"
+            className="costtoggle"
+            aria-pressed={showCost}
+            onClick={toggleCost}
+            title={
+              showCost
+                ? "Hide estimated costs (for subscription plans, which pay no marginal cost)"
+                : "Show estimated costs"
+            }
+          >
+            $
+          </button>
+        </div>
+      </aside>
 
-      <div className={`stage ${view === "work" ? "view-work" : "view-board"}`}>
+      <main className={`stage ${view === "work" ? "view-work" : "view-board"}`}>
         {view === "board" ? (
           <Board
             sessions={sessions}
@@ -173,7 +176,7 @@ export default function App() {
             onOpenSession={openSession}
           />
         )}
-      </div>
+      </main>
     </div>
   );
 }

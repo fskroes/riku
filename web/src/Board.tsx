@@ -71,7 +71,6 @@ function AlertRow({
   const failed = open.error?.id === session.id ? open.error.message : null;
   return (
     <div className="alert" id={domId("board", session.id)}>
-      <Tile tool={session.tool} />
       <div className="body">
         <div className="r1">
           <span className="name">{session.project}</span>
