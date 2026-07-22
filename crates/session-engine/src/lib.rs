@@ -189,7 +189,23 @@ fn spawn_refresh(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            let mut refreshed = store.lock().unwrap().refresh(Utc::now());
+            // Probe process liveness off the runtime (it shells out to ps/lsof
+            // with a 2s budget) and before taking the store lock. `None` means the
+            // probe failed — skip the liveness pass entirely so a bad tick can
+            // never mass-finish sessions; the mtime refresh still runs.
+            let alive_cwds = tokio::task::spawn_blocking(sessions::probe_alive_cwds)
+                .await
+                .ok()
+                .flatten();
+            let mut refreshed = {
+                let mut store = store.lock().unwrap();
+                let now = Utc::now();
+                let mut events = store.refresh(now);
+                if let Some(alive) = &alive_cwds {
+                    events.extend(store.apply_liveness(alive, now));
+                }
+                events
+            };
             let cache = diff_cache.clone();
             let machine = machine.clone();
             let events_to_send = tokio::task::spawn_blocking(move || {
