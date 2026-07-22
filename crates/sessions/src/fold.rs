@@ -10,6 +10,7 @@
 use chrono::{DateTime, Duration, Utc};
 
 use crate::attention::PendingAttention;
+use crate::liveness::ProcessLiveness;
 use crate::model::{Status, Tool};
 
 /// A session is Active/Attention while its file was touched within this window,
@@ -62,17 +63,35 @@ pub struct Projection {
     pub attention: Option<PendingAttention>,
 }
 
-/// The shared status rule. Attention outranks staleness: a present attention
-/// reason wins regardless of the quiet window (so an old, still-unanswered wait
-/// never ages into Finished); otherwise a quiet file is Finished; otherwise
-/// Active. Staleness alone never produces Attention. Identical for every source.
-pub fn status_for(has_attention: bool, mtime: DateTime<Utc>, now: DateTime<Utc>) -> Status {
+/// The shared status rule. Attention outranks everything: a present attention
+/// reason wins regardless of the quiet window *and* of process death (an
+/// unanswered wait must reach a human even after its process is gone — the card
+/// says the process exited rather than silently filing under Finished).
+/// Otherwise process liveness is ground truth where we have it: an alive agent
+/// is Active no matter how quiet its transcript, a (debounced) dead one is
+/// Finished no matter how fresh. Only without liveness data does the mtime
+/// window decide. Staleness alone never produces Attention. Identical for every
+/// source.
+pub fn status_for(
+    has_attention: bool,
+    mtime: DateTime<Utc>,
+    now: DateTime<Utc>,
+    liveness: ProcessLiveness,
+) -> Status {
     if has_attention {
         Status::Attention
-    } else if now.signed_duration_since(mtime) >= ACTIVITY_WINDOW {
-        Status::Finished
     } else {
-        Status::Active
+        match liveness {
+            ProcessLiveness::Alive => Status::Active,
+            ProcessLiveness::Dead => Status::Finished,
+            ProcessLiveness::Unknown => {
+                if now.signed_duration_since(mtime) >= ACTIVITY_WINDOW {
+                    Status::Finished
+                } else {
+                    Status::Active
+                }
+            }
+        }
     }
 }
 

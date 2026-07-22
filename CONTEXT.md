@@ -52,6 +52,14 @@ _Avoid_: assignment, mapping
 A Markdown checklist (`WORK.md`) listing a project's Work Items, each with a short stable id (`W-14`). A project's single source of Work Items: if `WORK.md` exists it wins; otherwise GitHub Issues is used. Never both.
 _Avoid_: task list, backlog file, plan
 
+**Process Liveness**:
+The observed state of an Agent Session's actual agent process — Alive, Dead (after a two-miss debounce), or Unknown — matched by working directory once per refresh tick. Where a verdict exists it is ground truth for Running vs Finished in both directions; Staleness applies only when the verdict is Unknown, and Attention outranks even a dead process (ADR 0011).
+_Avoid_: heuristic, health check, activity
+
+**Staleness**:
+The fallback mtime rule: a transcript quiet past the 15-minute activity window counts as Finished. A heuristic, not ground truth — it decides status only for Agent Sessions without a Process Liveness verdict.
+_Avoid_: finished (as a synonym), timeout, expiry
+
 **Session Source**:
 An adapter that discovers and reads Agent Sessions for one agent tool (Claude Code, Codex CLI). Each supported tool has exactly one Session Source.
 _Avoid_: provider, integration, connector

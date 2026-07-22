@@ -11,6 +11,7 @@ use tracing::warn;
 
 use crate::attention::{AttentionReducer, NeedEvidence, Observation};
 use crate::fold::{project_from_cwd, status_for, Fold, Projection};
+use crate::liveness::ProcessLiveness;
 use crate::model::{Attention, AttentionCause, Session, Status, Tool};
 use crate::parse::{parse_entry, Entry};
 
@@ -212,11 +213,25 @@ impl FileState {
         self.offset = 0;
     }
 
-    /// Build the UI [`Session`], given the file's mtime (which drives status).
-    /// Returns `None` if the fold has no projection yet.
+    /// Build the UI [`Session`] without process-liveness data — the mtime rule
+    /// alone drives status. Equivalent to
+    /// [`build_with_liveness`](Self::build_with_liveness) with
+    /// [`ProcessLiveness::Unknown`].
     pub fn build(&self, mtime: DateTime<Utc>, now: DateTime<Utc>) -> Option<Session> {
+        self.build_with_liveness(mtime, now, ProcessLiveness::Unknown)
+    }
+
+    /// Build the UI [`Session`], given the file's mtime and the session's process
+    /// verdict (together they drive status — see [`status_for`]). Returns `None`
+    /// if the fold has no projection yet.
+    pub fn build_with_liveness(
+        &self,
+        mtime: DateTime<Utc>,
+        now: DateTime<Utc>,
+        liveness: ProcessLiveness,
+    ) -> Option<Session> {
         let p = self.fold.projection()?;
-        let status = status_for(p.attention.is_some(), mtime, now);
+        let status = status_for(p.attention.is_some(), mtime, now, liveness);
         // Resolve the current need into the atomic `attention` value only when the
         // status is actually Attention, so the two can never disagree on the wire.
         // Attention Since falls back to the file mtime when the source recorded no
@@ -226,8 +241,15 @@ impl FileState {
             .flatten()
             .map(|a| Attention {
                 cause: a.cause,
+                // Attention survives process death (the wait still needs a human),
+                // but the card must not pretend the session is resumable in place:
+                // a local, factual note rides after the source-faithful evidence.
+                evidence: match (a.evidence, liveness == ProcessLiveness::Dead) {
+                    (Some(e), true) => Some(format!("{e} · process exited")),
+                    (None, true) => Some("process exited".to_string()),
+                    (e, false) => e,
+                },
                 since: a.since.unwrap_or(mtime),
-                evidence: a.evidence,
                 details_on_source: false,
                 remote_evidence: a.remote_evidence,
             });
@@ -591,6 +613,61 @@ mod tests {
             .unwrap();
         assert_eq!(a.since, ts("2026-07-19T10:03:00Z"));
         assert_eq!(a.evidence.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn alive_process_overrides_a_stale_mtime() {
+        // The board's Running band is ground truth: a live agent whose transcript
+        // has been quiet past the window is still Active.
+        let mut fs = claude();
+        let mut data = assistant("s1", "thinking", 1, 1);
+        data.push('\n');
+        fs.feed(data.as_bytes());
+        let s = fs
+            .build_with_liveness(
+                ts("2026-07-19T10:00:00Z"),
+                ts("2026-07-19T10:25:00Z"),
+                crate::liveness::ProcessLiveness::Alive,
+            )
+            .unwrap();
+        assert_eq!(s.status, Status::Active);
+    }
+
+    #[test]
+    fn dead_process_overrides_a_fresh_mtime() {
+        // The Ctrl-C false positive: file fresh, process gone → Finished.
+        let mut fs = claude();
+        let mut data = assistant("s1", "was working", 1, 1);
+        data.push('\n');
+        fs.feed(data.as_bytes());
+        let s = fs
+            .build_with_liveness(
+                ts("2026-07-19T10:04:00Z"),
+                ts("2026-07-19T10:05:00Z"),
+                crate::liveness::ProcessLiveness::Dead,
+            )
+            .unwrap();
+        assert_eq!(s.status, Status::Finished);
+    }
+
+    #[test]
+    fn attention_survives_process_death_with_annotated_evidence() {
+        // An unanswered wait still needs a human even after Ctrl-C; the card says
+        // the process exited instead of silently filing under Finished.
+        let mut fs = claude();
+        let mut data = assistant_tool_use("s1");
+        data.push('\n');
+        fs.feed(data.as_bytes());
+        let s = fs
+            .build_with_liveness(
+                ts("2026-07-19T10:04:00Z"),
+                ts("2026-07-19T10:05:00Z"),
+                crate::liveness::ProcessLiveness::Dead,
+            )
+            .unwrap();
+        assert_eq!(s.status, Status::Attention);
+        let evidence = s.attention.unwrap().evidence.unwrap();
+        assert!(evidence.ends_with("· process exited"), "{evidence}");
     }
 
     #[test]
