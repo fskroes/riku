@@ -228,7 +228,7 @@ mod tests {
             activity: None,
             last_event_at: Utc::now(),
             status: Status::Active,
-            attention_reason: None,
+            attention: None,
             cost_usd: None,
             diff: None,
             machine: None,

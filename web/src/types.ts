@@ -3,8 +3,24 @@
 
 export type Status = "active" | "attention" | "finished";
 
-// Why a card is in Attention. Present only when status === "attention".
-export type AttentionReason = "waiting" | "error";
+// The typed kind of human response a session needs (ADR 0010). A closed set; the
+// text carries the meaning, so all causes share one visual priority on the board.
+export type AttentionCause = "approval" | "answer" | "review" | "error" | "input";
+
+// One current, structured Attention on a session. Present only when
+// status === "attention".
+export interface Attention {
+  cause: AttentionCause;
+  // When the current need began (Attention Since) — drives waiting duration and
+  // the oldest-waiting-first order.
+  since: string; // ISO 8601
+  // A bounded, source-faithful evidence excerpt, or null when none is safe. For a
+  // relayed card this is the privacy-safe remote rendering baked in at the source.
+  evidence: string | null;
+  // A relayed card whose allowlisted fields could not explain the need: the UI
+  // points at the source machine rather than showing a guess.
+  detailsOnSource: boolean;
+}
 
 export type Tool = "claude" | "codex";
 
@@ -27,7 +43,8 @@ export interface Session {
   activity: string | null;
   lastEventAt: string; // ISO 8601
   status: Status;
-  attentionReason: AttentionReason | null;
+  // The current structured need, when status === "attention"; null otherwise.
+  attention: Attention | null;
   // Estimated USD cost (tokens × the model's public list price); `null` for an
   // unpriced model. A labelled estimate — hidden when the cost toggle is off.
   costUsd: number | null;

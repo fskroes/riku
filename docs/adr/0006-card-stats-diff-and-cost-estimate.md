@@ -1,5 +1,9 @@
 # Card stats: live git `+/-` and a labelled cost estimate
 
+**Refined by ADR 0010:** these stats remain part of Session state and ordinary
+session rows, but the default Attention row omits diff, cost, tokens, and model so
+the current human need and its evidence dominate the triage surface.
+
 C5 adds two stats to every session card: a git diff `+/-` and an estimated cost.
 
 **Diff is live repo state, filled by the board, not the collector.** A session's

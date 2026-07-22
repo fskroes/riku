@@ -2,6 +2,11 @@
 
 **Status: accepted**
 
+**Partially superseded by ADR 0010:** accounts, token rotation, and mTLS remain out
+of scope, but the Collector–Relay contract now carries a versioned privacy-safe
+Attention projection with explicit capability negotiation. The encrypted transport
+and release-hardening decisions below remain in effect.
+
 Before riku becomes a public project, the two multi-machine security defaults are
 made required contracts rather than deployment advice. A security audit found two
 high-severity paths: the Collector-to-Relay and Relay-to-Board hops sent the shared

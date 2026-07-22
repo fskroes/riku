@@ -7,6 +7,7 @@
 //! watcher expose plain callbacks so the board crate can wire them to whatever
 //! async runtime it uses.
 
+mod attention;
 mod codex;
 mod deeplink;
 mod diff;
@@ -23,11 +24,12 @@ mod work;
 
 use std::path::PathBuf;
 
+pub use attention::{AttentionReducer, NeedEvidence, Observation, PendingAttention};
 pub use deeplink::DeepLink;
 pub use diff::DiffCache;
 pub use fold::{Fold, Projection, ACTIVITY_WINDOW};
 pub use git::diff_stat;
-pub use model::{DiffStat, Session, Status, Tool};
+pub use model::{Attention, AttentionCause, DiffStat, Session, Status, Tool};
 pub use session::{Accumulator, FileState};
 pub use source::{ClaudeSource, CodexSource, SessionSource};
 pub use store::{Event, SessionStore, DISCOVERY_WINDOW};

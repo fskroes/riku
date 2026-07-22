@@ -1,5 +1,27 @@
 // Small display helpers shared by the Board.
 
+import type { AttentionCause } from "./types";
+
+/** The label for each Attention cause. Text carries the triage meaning; all causes
+ *  share one visual priority (ADR 0010), so there is no per-cause colour or icon. */
+const CAUSE_LABEL: Record<AttentionCause, string> = {
+  approval: "Approval required",
+  answer: "Answer required",
+  review: "Review required",
+  error: "Session error",
+  input: "Input required",
+};
+
+/** The human label for an Attention cause. */
+export function causeLabel(cause: AttentionCause): string {
+  return CAUSE_LABEL[cause];
+}
+
+/** How long the current need has waited, phrased for a card: `waiting 3m`. */
+export function waitingFor(sinceIso: string, nowMs: number): string {
+  return `waiting ${relativeAge(sinceIso, nowMs)}`;
+}
+
 /** Relative age like `5s`, `3m`, `2h`, `1d` from an ISO timestamp. */
 export function relativeAge(iso: string, nowMs: number): string {
   const seconds = Math.max(0, Math.floor((nowMs - Date.parse(iso)) / 1000));

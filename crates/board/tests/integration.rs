@@ -459,10 +459,10 @@ async fn codex_subagent_rollout_is_not_a_card() {
 }
 
 #[tokio::test]
-async fn attention_reason_surfaces_for_both_tools() {
+async fn attention_cause_surfaces_for_both_tools() {
     let claude = tempfile::tempdir().unwrap();
     let codex = tempfile::tempdir().unwrap();
-    // Claude: an unanswered tool_use → waiting.
+    // Claude: an unanswered tool_use → the generic Input fallback.
     write_transcript(
         claude.path(),
         "-Users-x-repos-foo",
@@ -501,11 +501,11 @@ async fn attention_reason_surfaces_for_both_tools() {
 
     let waiting = sessions.iter().find(|s| s["id"] == "claude-wait").unwrap();
     assert_eq!(waiting["status"], "attention");
-    assert_eq!(waiting["attentionReason"], "waiting");
+    assert_eq!(waiting["attention"]["cause"], "input");
 
     let errored = sessions.iter().find(|s| s["id"] == "codex-err").unwrap();
     assert_eq!(errored["status"], "attention");
-    assert_eq!(errored["attentionReason"], "error");
+    assert_eq!(errored["attention"]["cause"], "error");
 }
 
 #[tokio::test]
@@ -539,8 +539,8 @@ async fn answering_a_wait_drops_out_of_attention_over_sse() {
         "expected active after answer: {buf:?}"
     );
     assert!(
-        buf.contains("\"attentionReason\":null"),
-        "attention reason should clear: {buf:?}"
+        buf.contains("\"attention\":null"),
+        "attention should clear: {buf:?}"
     );
 }
 

@@ -6,6 +6,12 @@ token or Session data leaves the machine. Plain `http://` is accepted only for a
 loopback host (`localhost`, `127.0.0.1`, or `[::1]`) — the same-machine development
 topology.
 
+Per ADR 0010, the Collector sends a distinct privacy-safe wire projection: rich
+local Attention evidence never leaves the source machine, and only allowlisted
+structured fields cross the wire. Session metadata (project, branch, activity,
+stats, machine) still travels through the stream, so TLS and Relay access control
+remain the protection for everything the protocol carries.
+
 `riku relay` is intentionally a **loopback-only development server**: it binds
 `127.0.0.1:4343` by default and refuses a non-loopback `--addr`. A production Relay is
 therefore a loopback riku process placed behind a TLS-terminating reverse proxy. This

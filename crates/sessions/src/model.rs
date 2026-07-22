@@ -14,32 +14,79 @@ pub enum Tool {
 }
 
 /// Board status for an Agent Session. The flat three-value shape keeps the client
-/// simple; `Attention` carries its cause in [`Session::attention_reason`]. See
-/// CONTEXT.md, issue #2 (mtime-based Active↔Finished) and issue #7 (principled,
-/// source-agnostic Attention).
+/// simple; `Attention` carries its structured cause and evidence in
+/// [`Session::attention`]. See CONTEXT.md, issue #2 (mtime-based Active↔Finished)
+/// and ADR 0010 (typed, source-agnostic Attention lifecycle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     /// Touched within the activity window and not needing a human.
     Active,
-    /// The session needs a human: it is waiting on input or ended in an error.
-    /// The cause is in [`Session::attention_reason`]. Outranks staleness, so an
-    /// old-but-unanswered wait stays here rather than aging into `Finished`.
+    /// The session needs a human: it is waiting on input (approval, question,
+    /// review) or ended in an error. The typed cause is in [`Session::attention`].
+    /// Outranks staleness, so an old-but-unanswered wait stays here rather than
+    /// aging into `Finished`.
     Attention,
     /// Untouched for at least the activity window and not needing a human.
     Finished,
 }
 
-/// Why a Session is in [`Status::Attention`] — the two, and only two, causes the
-/// glossary allows. Serialized alongside `status` and populated only when the
-/// status is `Attention`. Staleness is never a cause (it is a card hint only).
+/// The typed kind of human response an Agent Session requires (ADR 0010,
+/// CONTEXT.md "Attention Cause"). A closed enum: a specific cause comes only from
+/// structured source evidence, never inference from prose. When a source's records
+/// support nothing more specific, the nonspecific fallback [`Input`](Self::Input)
+/// is used — an honest generic cause rather than an invented one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AttentionReason {
-    /// Waiting on a human — a pending approval or question.
-    Waiting,
+pub enum AttentionCause {
+    /// A pending approval the human must grant or deny (e.g. Codex exec /
+    /// apply-patch approval).
+    Approval,
+    /// The agent asked a question and is waiting for the human's answer.
+    Answer,
+    /// The agent is waiting on the human to review proposed work.
+    Review,
     /// The session ended in an error (an abnormal / aborted ending).
     Error,
+    /// Nonspecific fallback: the session needs the human, but the source's records
+    /// do not identify a more specific cause.
+    Input,
+}
+
+/// One current, structured Attention on a Session (ADR 0010). At most one is
+/// carried at a time; a newer structured need replaces it and resets [`since`](Self::since).
+///
+/// `evidence` is the **local display evidence**: a bounded, source-faithful,
+/// sanitized excerpt (CONTEXT.md "Attention Evidence"), or `None` when no safe
+/// excerpt is available. It is the only evidence serialized to a board — a board
+/// receives, per session, either its own machine's local evidence (a local card)
+/// or the privacy-safe remote rendering baked in upstream (a relayed card).
+///
+/// `remote_evidence` is the stricter allowlisted rendering (CONTEXT.md "Remote
+/// Attention Evidence") the Collector projects onto the wire; it is held in-process
+/// only and never serialized to a board (`#[serde(skip)]`), so rich local evidence
+/// cannot leak through the browser JSON. `details_on_source` marks a relayed card
+/// whose allowlisted fields could not explain the need: the UI then says details
+/// are available only on the source machine rather than showing a guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attention {
+    /// The typed kind of response required.
+    pub cause: AttentionCause,
+    /// When the current need began (CONTEXT.md "Attention Since"). Drives the
+    /// oldest-waiting-first order; reset only when a newer need replaces this one.
+    pub since: DateTime<Utc>,
+    /// Bounded, sanitized, source-faithful local display evidence, or `None`.
+    #[serde(default)]
+    pub evidence: Option<String>,
+    /// A relayed card whose allowlisted fields could not explain the need — the UI
+    /// points at the source machine instead of inventing an explanation.
+    #[serde(default)]
+    pub details_on_source: bool,
+    /// The allowlisted-structured-fields rendering for the wire (CONTEXT.md "Remote
+    /// Attention Evidence"). In-process only: never serialized to a board.
+    #[serde(skip)]
+    pub remote_evidence: Option<String>,
 }
 
 /// Lines added / removed in a session's repo — the card's `+/-` stat (C5). Live
@@ -87,9 +134,12 @@ pub struct Session {
     /// Latest entry timestamp (what the UI sorts a column by).
     pub last_event_at: DateTime<Utc>,
     pub status: Status,
-    /// Why the session needs a human, when `status == Attention`; `None` otherwise.
-    /// Explicit and typed so the UI never re-derives blocked-ness from raw fields.
-    pub attention_reason: Option<AttentionReason>,
+    /// The current, structured Attention, when `status == Attention`; `None`
+    /// otherwise. One atomic value (cause + since + evidence) so board status stays
+    /// the existing attention-plus-staleness rule and the UI never re-derives
+    /// blocked-ness from raw fields. Omitted-on-wire tolerant (`default` → `None`).
+    #[serde(default)]
+    pub attention: Option<Attention>,
     /// Estimated USD cost from tokens × the model's public list price (C5). `None`
     /// for an unpriced/unknown model. A labelled *estimate*: the UI can hide it for
     /// subscription sessions, which pay no marginal per-token cost.

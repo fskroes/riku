@@ -9,43 +9,17 @@
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
+use crate::attention::{AttentionReducer, NeedEvidence, Observation};
 use crate::fold::{project_from_cwd, status_for, Fold, Projection};
-use crate::model::{AttentionReason, Session, Status, Tool};
+use crate::model::{Attention, AttentionCause, Session, Status, Tool};
 use crate::parse::{parse_entry, Entry};
-
-/// The Attention-relevant classification of the newest relevant Claude entry seen
-/// so far. Because entries fold in file order, the last one to set this wins, so
-/// a `tool_result` or a fresh turn after an error/approval naturally clears it
-/// (recovery needs no extra bookkeeping).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LastKind {
-    /// No relevant entry yet.
-    None,
-    /// Newest entry is an assistant turn that ended to call a tool
-    /// (`stop_reason: tool_use`, or a `tool_use` block when `stop_reason` is
-    /// absent) — i.e. Claude is waiting on the human, and nothing answers it later.
-    AwaitingTool,
-    /// Newest relevant entry is an API-error record (`isApiErrorMessage: true`).
-    ApiError,
-    /// Newest entry is anything else (a user turn, an assistant turn that ended
-    /// cleanly, ...) — the session needs nothing from the human.
-    Other,
-}
-
-impl LastKind {
-    fn attention(self) -> Option<AttentionReason> {
-        match self {
-            LastKind::AwaitingTool => Some(AttentionReason::Waiting),
-            LastKind::ApiError => Some(AttentionReason::Error),
-            LastKind::None | LastKind::Other => None,
-        }
-    }
-}
 
 /// The Claude Code fold: a running projection of a single transcript. Fold entries
 /// in file order via [`Accumulator::apply`]; token counts and "latest" fields
-/// update in place.
-#[derive(Debug)]
+/// update in place. Attention lifecycle is delegated entirely to the shared
+/// [`AttentionReducer`] — this fold only *translates* each entry into normalized
+/// need/resolution [`Observation`]s.
+#[derive(Debug, Default)]
 pub struct Accumulator {
     id: Option<String>,
     project: Option<String>,
@@ -57,24 +31,7 @@ pub struct Accumulator {
     activity: Option<String>,
     tokens_in: u64,
     tokens_out: u64,
-    last_kind: LastKind,
-}
-
-impl Default for Accumulator {
-    fn default() -> Self {
-        Accumulator {
-            id: None,
-            project: None,
-            cwd: None,
-            branch: None,
-            latest_timestamp: None,
-            model: None,
-            activity: None,
-            tokens_in: 0,
-            tokens_out: 0,
-            last_kind: LastKind::None,
-        }
-    }
+    attention: AttentionReducer,
 }
 
 impl Accumulator {
@@ -100,10 +57,21 @@ impl Accumulator {
             }
         }
 
+        // Attention Since prefers the entry's own timestamp, falling back to the
+        // latest one seen so far (set just above) when a record carries none.
+        let at = entry.timestamp.or(self.latest_timestamp);
+
         if entry.is_api_error {
             // A synthetic API-error record (model `<synthetic>`, no real content):
-            // record the error but never let it overwrite the card's model/activity.
-            self.last_kind = LastKind::ApiError;
+            // raise a Session error but never overwrite the card's model/activity.
+            self.attention.apply(Observation::Need {
+                key: "error".into(),
+                cause: AttentionCause::Error,
+                evidence: NeedEvidence::Error {
+                    text: entry.activity,
+                },
+                at,
+            });
         } else if entry.is_assistant {
             if entry.model.is_some() {
                 self.model = entry.model;
@@ -118,17 +86,36 @@ impl Accumulator {
             let awaiting = match entry.stop_reason.as_deref() {
                 Some("tool_use") => true,
                 Some(_) => false,
-                None => entry.has_tool_use,
+                None => !entry.tool_uses.is_empty(),
             };
-            self.last_kind = if awaiting {
-                LastKind::AwaitingTool
+            if awaiting {
+                // The trailing tool_use is the one the turn is blocked on. Claude
+                // transcripts do not mark *why* a call sits unanswered (approval vs
+                // mid-run), so the cause is the honest generic fallback rather than
+                // an inferred Approval (ADR 0010: keep the card honest and generic).
+                let tool = entry.tool_uses.into_iter().next_back().unwrap_or_default();
+                self.attention.apply(Observation::Need {
+                    key: tool.id.unwrap_or_else(|| "tool".into()),
+                    cause: AttentionCause::Input,
+                    evidence: NeedEvidence::Tool {
+                        name: tool.name.unwrap_or_default(),
+                        detail: tool.detail,
+                    },
+                    at,
+                });
             } else {
-                LastKind::Other
-            };
+                // A cleanly-ended turn is forward progress: it supersedes any
+                // pending error/approval (recovery needs no extra bookkeeping).
+                self.attention.apply(Observation::Superseded);
+            }
+        } else if entry.tool_result_ids.is_empty() {
+            // A plain user turn resuming after an error/approval is forward progress.
+            self.attention.apply(Observation::Superseded);
         } else {
-            // A user turn (e.g. a tool_result answering the previous tool_use, or
-            // any activity resuming after an error) clears the attention state.
-            self.last_kind = LastKind::Other;
+            // A tool_result answers its tool_use by id — a correlated resolution.
+            for id in entry.tool_result_ids {
+                self.attention.apply(Observation::Resolved { key: id });
+            }
         }
     }
 }
@@ -168,7 +155,7 @@ impl Fold for Accumulator {
             tokens_out: self.tokens_out,
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
-            attention: self.last_kind.attention(),
+            attention: self.attention.current(),
         })
     }
 }
@@ -229,12 +216,21 @@ impl FileState {
     /// Returns `None` if the fold has no projection yet.
     pub fn build(&self, mtime: DateTime<Utc>, now: DateTime<Utc>) -> Option<Session> {
         let p = self.fold.projection()?;
-        let status = status_for(p.attention, mtime, now);
-        // Carry the reason only when the status is actually Attention, so the two
-        // can never disagree on the wire.
-        let attention_reason = (status == Status::Attention)
+        let status = status_for(p.attention.is_some(), mtime, now);
+        // Resolve the current need into the atomic `attention` value only when the
+        // status is actually Attention, so the two can never disagree on the wire.
+        // Attention Since falls back to the file mtime when the source recorded no
+        // timestamp for the need.
+        let attention = (status == Status::Attention)
             .then_some(p.attention)
-            .flatten();
+            .flatten()
+            .map(|a| Attention {
+                cause: a.cause,
+                since: a.since.unwrap_or(mtime),
+                evidence: a.evidence,
+                details_on_source: false,
+                remote_evidence: a.remote_evidence,
+            });
         // Cost is pure (tokens × the model's list price); computed before `p.model`
         // is moved into the session below. The live git `diff` is out-of-transcript,
         // so the board fills it and the sessions projection leaves it None.
@@ -252,7 +248,7 @@ impl FileState {
             activity: p.activity,
             last_event_at: p.last_event_at.unwrap_or(mtime),
             status,
-            attention_reason,
+            attention,
             cost_usd,
             diff: None,
             // Stamped by the board's runtime (or a Collector) at the source, not by
@@ -270,7 +266,12 @@ fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Status;
+    use crate::model::{AttentionCause, Status};
+
+    /// The cause of a session's current Attention, or `None`.
+    fn cause(s: &Session) -> Option<AttentionCause> {
+        s.attention.as_ref().map(|a| a.cause)
+    }
 
     fn claude() -> FileState {
         FileState::new(Box::new(Accumulator::default()))
@@ -374,7 +375,7 @@ mod tests {
             .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
             .unwrap();
         assert_eq!(s.status, Status::Attention);
-        assert_eq!(s.attention_reason, Some(AttentionReason::Waiting));
+        assert_eq!(cause(&s), Some(AttentionCause::Input));
     }
 
     #[test]
@@ -391,7 +392,7 @@ mod tests {
             .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
             .unwrap();
         assert_eq!(s.status, Status::Active);
-        assert_eq!(s.attention_reason, None);
+        assert_eq!(cause(&s), None);
     }
 
     #[test]
@@ -408,7 +409,7 @@ mod tests {
             .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
             .unwrap();
         assert_eq!(s.status, Status::Attention);
-        assert_eq!(s.attention_reason, Some(AttentionReason::Error));
+        assert_eq!(cause(&s), Some(AttentionCause::Error));
         // The synthetic record must not clobber the card's real model/activity.
         assert_eq!(s.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(s.activity.as_deref(), Some("hello"));
@@ -427,7 +428,7 @@ mod tests {
             .build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z"))
             .unwrap();
         assert_eq!(s.status, Status::Attention);
-        assert_eq!(s.attention_reason, Some(AttentionReason::Waiting));
+        assert_eq!(cause(&s), Some(AttentionCause::Input));
     }
 
     #[test]
@@ -446,7 +447,7 @@ mod tests {
             .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
             .unwrap();
         assert_eq!(s.status, Status::Active);
-        assert_eq!(s.attention_reason, None);
+        assert_eq!(cause(&s), None);
     }
 
     #[test]
@@ -544,6 +545,52 @@ mod tests {
         assert!(fs
             .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
             .is_none());
+    }
+
+    #[test]
+    fn pending_tool_use_carries_input_cause_and_local_evidence() {
+        // A tool the agent is blocked on: honest generic cause, source-faithful
+        // local evidence (tool name + a recognized input field), Since = the call's
+        // own timestamp.
+        let mut fs = claude();
+        let line = r#"{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{"model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_9","name":"Bash","input":{"command":"cargo test --workspace"}}]}}"#;
+        let mut data = line.to_string();
+        data.push('\n');
+        fs.feed(data.as_bytes());
+
+        let s = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap();
+        let a = s.attention.unwrap();
+        assert_eq!(a.cause, AttentionCause::Input);
+        assert_eq!(a.since, ts("2026-07-19T10:00:00Z"));
+        assert_eq!(a.evidence.as_deref(), Some("Bash: cargo test --workspace"));
+        // The wire rendering keeps the tool name but never its arguments.
+        assert_eq!(a.remote_evidence.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn a_newer_need_replaces_the_current_one_and_resets_since() {
+        // Two different pending tool calls in sequence: the card describes the
+        // current need, and Attention Since jumps to the newer call (Story 8).
+        let mut fs = claude();
+        let first = r#"{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{"model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"Read"}]}}"#;
+        let result = r#"{"type":"user","sessionId":"s1","cwd":"/a/foo","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
+        let second = r#"{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:03:00Z","message":{"model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_2","name":"Bash"}]}}"#;
+        let mut data = String::new();
+        for l in [first, result, second] {
+            data.push_str(l);
+            data.push('\n');
+        }
+        fs.feed(data.as_bytes());
+
+        let a = fs
+            .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
+            .unwrap()
+            .attention
+            .unwrap();
+        assert_eq!(a.since, ts("2026-07-19T10:03:00Z"));
+        assert_eq!(a.evidence.as_deref(), Some("Bash"));
     }
 
     #[test]
