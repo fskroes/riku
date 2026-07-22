@@ -131,4 +131,5 @@ merges those local and remote updates into one attention-first stream.
 The board exposes a snapshot at `GET /api/sessions` and live updates through
 Server-Sent Events at `GET /api/events`. See [CONTEXT.md](CONTEXT.md) for the project's
 domain language and [the architecture decisions](docs/adr/) for the rationale
-behind local-first operation, the read-only Relay, card stats, and distribution.
+behind local-first operation, the read-only Relay, Explainable Attention, card
+stats, and distribution.
