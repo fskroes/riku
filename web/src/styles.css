@@ -89,8 +89,15 @@ body {
 .view-board .alert .body { flex: 1; min-width: 0; }
 .view-board .alert .r1 { display: flex; align-items: center; gap: 10px; }
 .view-board .alert .name { font-weight: 600; font-size: 15px; text-wrap: balance; }
-.view-board .alert .reason { font-weight: 600; margin-top: 8px; }
-.view-board .alert .reason .detail { font-weight: 400; color: var(--ink-muted); text-wrap: pretty; }
+.view-board .alert .rbranch { font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Waiting duration — pushed to the right edge of the header row. */
+.view-board .alert .waiting { margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); white-space: nowrap; }
+/* The typed cause. One visual priority across all causes — the words triage. */
+.view-board .alert .cause { font-weight: 600; margin-top: 8px; color: var(--warning); }
+/* Bounded source-faithful evidence, clamped to three lines (presentation only). */
+.view-board .alert .evidence { margin-top: 6px; color: var(--ink-muted); font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; }
+.view-board .alert .evidence.onsource { font-style: italic; opacity: .85; }
+.view-board .alert .routing { margin-top: 8px; display: flex; align-items: center; gap: 12px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-faint); }
 .view-board .alert .cta { align-self: center; font: 500 12px var(--font-ui); padding: 8px 14px; border-radius: var(--r-md); background: var(--surface-raised); box-shadow: var(--card-edge); color: var(--ink); white-space: nowrap; cursor: pointer; border: 0; }
 .view-board .row { display: grid; grid-template-columns: auto minmax(150px, 240px) 1fr auto; gap: 14px; align-items: center; padding: 11px 14px; border-radius: var(--r-md); transition: background var(--t-fast); }
 .view-board .row:hover { background: var(--surface); }

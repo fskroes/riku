@@ -28,8 +28,9 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+use crate::attention::{AttentionReducer, NeedEvidence, Observation};
 use crate::fold::{first_line, project_from_cwd, Fold, Projection};
-use crate::model::{AttentionReason, Tool};
+use crate::model::{AttentionCause, Tool};
 
 /// A raw Codex rollout line, deserialized leniently. Every field is optional so
 /// partial / drifting records still parse; unmodeled fields are dropped.
@@ -61,6 +62,9 @@ struct Payload {
     // response_item: message
     role: Option<String>,
     content: Option<Vec<ContentBlock>>,
+    // approval request: the call's correlation id and (local-only) command.
+    call_id: Option<String>,
+    command: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,10 +109,11 @@ pub struct CodexFold {
     tokens_in: u64,
     tokens_out: u64,
     latest_timestamp: Option<DateTime<Utc>>,
-    /// Attention per the newest lifecycle event: `turn_aborted` → Error, a pending
-    /// approval → Waiting, cleared by any forward progress. `None` when the session
-    /// needs nothing from the human.
-    attention: Option<AttentionReason>,
+    /// The shared Attention lifecycle. This fold only translates Codex lifecycle
+    /// records into normalized observations: `turn_aborted` → a Session error need,
+    /// an `*_approval_request` → an Approval need, and `task_started` /
+    /// `task_complete` / an assistant message → forward progress (Superseded).
+    attention: AttentionReducer,
 }
 
 impl CodexFold {
@@ -119,6 +124,10 @@ impl CodexFold {
             }
         }
 
+        // Attention Since prefers the record's own timestamp, falling back to the
+        // latest one seen so far (set just above) when a record carries none.
+        let at = raw.timestamp.or(self.latest_timestamp);
+
         let payload = match raw.payload {
             Some(p) => p,
             None => return,
@@ -126,11 +135,21 @@ impl CodexFold {
 
         // A pending approval can surface either as its own line `type` or as an
         // `event_msg` `payload.type`; accept both. Unverified against a live run
-        // (see `is_approval_request`), so an unrecognised name simply never fires.
-        if is_approval_request(raw.line_type.as_deref())
-            || is_approval_request(payload.payload_type.as_deref())
+        // (see `approval_kind`), so an unrecognised name simply never fires. The
+        // command is local-only evidence; only the structured kind label crosses
+        // the wire (ADR 0010 allowlist).
+        if let Some(kind) =
+            approval_kind(raw.line_type.as_deref()).or_else(|| approval_kind(payload.payload_type.as_deref()))
         {
-            self.attention = Some(AttentionReason::Waiting);
+            self.attention.apply(Observation::Need {
+                key: payload.call_id.clone().unwrap_or_else(|| "approval".into()),
+                cause: AttentionCause::Approval,
+                evidence: NeedEvidence::Approval {
+                    kind: kind.to_string(),
+                    detail: command_detail(&payload.command),
+                },
+                at,
+            });
             return;
         }
 
@@ -168,20 +187,28 @@ impl CodexFold {
                         self.tokens_out = usage.output_tokens;
                     }
                 }
-                // An interrupted / killed turn is an abnormal ending.
-                Some("turn_aborted") => self.attention = Some(AttentionReason::Error),
-                // A turn starting or completing cleanly needs nothing from the
-                // human and clears any prior error/approval (recovery).
-                Some("task_started") | Some("task_complete") => self.attention = None,
+                // An interrupted / killed turn is an abnormal ending. Codex records
+                // no error text on the abort, so evidence is absent.
+                Some("turn_aborted") => self.attention.apply(Observation::Need {
+                    key: "error".into(),
+                    cause: AttentionCause::Error,
+                    evidence: NeedEvidence::Error { text: None },
+                    at,
+                }),
+                // A turn starting or completing cleanly is forward progress and
+                // supersedes any prior error/approval (recovery).
+                Some("task_started") | Some("task_complete") => {
+                    self.attention.apply(Observation::Superseded)
+                }
                 _ => {}
             },
             Some("response_item")
                 if payload.payload_type.as_deref() == Some("message")
                     && payload.role.as_deref() == Some("assistant") =>
             {
-                // Forward progress: an assistant message clears any prior error /
-                // answered approval.
-                self.attention = None;
+                // Forward progress: an assistant message supersedes any prior
+                // error / answered approval.
+                self.attention.apply(Observation::Superseded);
                 if let Some(activity) = activity_from_content(&payload.content) {
                     self.activity = Some(activity);
                 }
@@ -226,12 +253,13 @@ impl Fold for CodexFold {
             tokens_out: self.tokens_out,
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
-            attention: self.attention,
+            attention: self.attention.current(),
         })
     }
 }
 
-/// Whether a Codex event name denotes a pending approval request.
+/// The structured approval-kind label for a Codex event name, or `None` when the
+/// event is not an approval request.
 ///
 /// The expected markers per issue #7 are `exec_approval_request` /
 /// `apply_patch_approval_request`. **Unverified against a live run**: every local
@@ -242,12 +270,33 @@ impl Fold for CodexFold {
 /// stays out of Attention (a safe degradation, never a crash or false alert). The
 /// secondary "unanswered `function_call` at the tail" proxy from the issue is
 /// deliberately *not* used: a tool call is momentarily unanswered on every normal
-/// turn, which would resurrect exactly the false-Attention noise C3 removes.
-fn is_approval_request(name: Option<&str>) -> bool {
-    matches!(
-        name,
-        Some("exec_approval_request") | Some("apply_patch_approval_request")
-    )
+/// turn, which would resurrect exactly the false-Attention noise C3 removes. The
+/// returned label is a structured, allowlisted field — safe to cross the wire,
+/// unlike the command it gates.
+fn approval_kind(name: Option<&str>) -> Option<&'static str> {
+    match name {
+        Some("exec_approval_request") => Some("exec"),
+        Some("apply_patch_approval_request") => Some("apply patch"),
+        _ => None,
+    }
+}
+
+/// A short, source-faithful command detail for local approval evidence: an argv
+/// array joined with spaces, or a bare string command. `None` when absent. This is
+/// local-only — it never crosses the wire (only the [`approval_kind`] does).
+fn command_detail(command: &Option<serde_json::Value>) -> Option<String> {
+    match command {
+        Some(serde_json::Value::Array(parts)) => {
+            let joined = parts
+                .iter()
+                .filter_map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            first_line(&joined)
+        }
+        Some(serde_json::Value::String(s)) => first_line(s),
+        _ => None,
+    }
 }
 
 /// First non-empty text line across a message's content blocks, truncated to 80.
@@ -262,10 +311,16 @@ fn activity_from_content(content: &Option<Vec<ContentBlock>>) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Session;
     use crate::session::FileState;
 
     fn codex() -> FileState {
         FileState::new(Box::new(CodexFold::default()))
+    }
+
+    /// The cause of a session's current Attention, or `None`.
+    fn cause(s: &Session) -> Option<AttentionCause> {
+        s.attention.as_ref().map(|a| a.cause)
     }
 
     fn ts(s: &str) -> DateTime<Utc> {
@@ -388,7 +443,7 @@ mod tests {
             .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
             .unwrap();
         assert_eq!(s.status, crate::model::Status::Attention);
-        assert_eq!(s.attention_reason, Some(AttentionReason::Error));
+        assert_eq!(cause(&s), Some(AttentionCause::Error));
     }
 
     #[test]
@@ -407,7 +462,7 @@ mod tests {
             .build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z"))
             .unwrap();
         assert_eq!(s.status, crate::model::Status::Finished);
-        assert_eq!(s.attention_reason, None);
+        assert_eq!(cause(&s), None);
     }
 
     #[test]
@@ -418,7 +473,7 @@ mod tests {
             .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
             .unwrap();
         assert_eq!(s.status, crate::model::Status::Active);
-        assert_eq!(s.attention_reason, None);
+        assert_eq!(cause(&s), None);
     }
 
     #[test]
@@ -436,7 +491,7 @@ mod tests {
             .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
             .unwrap();
         assert_eq!(s.status, crate::model::Status::Attention);
-        assert_eq!(s.attention_reason, Some(AttentionReason::Waiting));
+        assert_eq!(cause(&s), Some(AttentionCause::Approval));
 
         // Answering it (forward progress) drops the card out of Attention.
         feed(&mut fs, &[assistant_message("running the command")]);
@@ -444,7 +499,7 @@ mod tests {
             .build(ts("2026-07-19T10:04:30Z"), ts("2026-07-19T10:05:00Z"))
             .unwrap();
         assert_eq!(s.status, crate::model::Status::Active);
-        assert_eq!(s.attention_reason, None);
+        assert_eq!(cause(&s), None);
     }
 
     #[test]
@@ -463,7 +518,7 @@ mod tests {
             .build(ts("2026-07-19T10:04:00Z"), ts("2026-07-19T10:05:00Z"))
             .unwrap();
         assert_eq!(s.status, crate::model::Status::Active);
-        assert_eq!(s.attention_reason, None);
+        assert_eq!(cause(&s), None);
     }
 
     #[test]

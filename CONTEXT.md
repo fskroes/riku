@@ -9,8 +9,28 @@ One run of a coding agent (e.g. a Claude Code or Codex CLI conversation) working
 _Avoid_: task, job, run, workspace
 
 **Attention**:
-The board status for an Agent Session that reliably needs a human: waiting on input (approval, question) or ended in error. Soft signals like staleness are card hints, never an Attention move.
+The board status for an Agent Session that reliably has one current human need: waiting on input (approval, question, or review) or ended in error. Attention belongs to the Agent Session, not necessarily to the person viewing a shared board; a newer structured need replaces the current one, and soft signals like staleness are card hints, never an Attention move.
 _Avoid_: blocked, stuck, warning
+
+**Attention Cause**:
+The structured kind of human response an Agent Session requires: Approval required, Answer required, Review required, Session error, or the nonspecific fallback Input required. A specific cause comes only from structured source evidence, never inference from prose.
+_Avoid_: reason, status message, guess
+
+**Attention Evidence**:
+A bounded, source-faithful excerpt from the observation that caused a local Agent Session to enter Attention, sanitized to remove recognized sensitive values. It supports the Attention cause without summarising or interpreting what the agent wants; when no safe excerpt can be extracted, it is absent.
+_Avoid_: summary, explanation, rationale
+
+**Remote Attention Evidence**:
+A bounded rendering of allowlisted structured fields from the observation that caused a remote Agent Session to enter Attention. It excludes arbitrary commands, arguments, prose, and error output; when the allowlisted fields cannot explain the need, full details remain available only on the source machine.
+_Avoid_: redacted transcript, remote excerpt, summary
+
+**Attention Since**:
+The time the current human need began. It determines the oldest-waiting-first order; it changes when a newer structured need replaces the current one, but not for observations that leave the need unchanged.
+_Avoid_: last activity, session age, priority
+
+**Attention Resolution**:
+Structured source evidence that the current human need was answered, cancelled, withdrawn, or superseded by resumed or completed work. Generic activity and elapsed time are not Attention Resolution.
+_Avoid_: forward progress, activity, acknowledgement
 
 **Collector**:
 A small process running on a machine that watches that machine's Agent Sessions (via Session Sources) and pushes updates to the Relay.

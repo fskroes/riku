@@ -1,17 +1,19 @@
 import type { Session } from "./types";
 import type { OpenController } from "./useOpen";
-import { abbrevTokens, domId, relativeAge } from "./format";
-import { Cost, Diff, Machine, Meta, Tile, useFlash } from "./ui";
-
-/** The glyph + headline for each Attention cause (issue #7). Falls back to
- *  waiting when a card is in Attention without an explicit reason. */
-const REASON: Record<NonNullable<Session["attentionReason"]>, { icon: string; label: string }> = {
-  waiting: { icon: "💬", label: "Waiting for you" },
-  error: { icon: "⚠", label: "Exited with error" },
-};
+import { abbrevTokens, causeLabel, domId, relativeAge, waitingFor } from "./format";
+import { Cost, Diff, Machine, Tile, useFlash } from "./ui";
 
 const byMostRecent = (a: Session, b: Session): number =>
   Date.parse(b.lastEventAt) - Date.parse(a.lastEventAt);
+
+/** Oldest-waiting-first (ADR 0010): the session whose current need began longest
+ *  ago sorts to the top, so the most-neglected need is always first. Falls back to
+ *  last-event order if a card somehow lacks a since. */
+const byOldestWaiting = (a: Session, b: Session): number => {
+  const at = a.attention ? Date.parse(a.attention.since) : Date.parse(a.lastEventAt);
+  const bt = b.attention ? Date.parse(b.attention.since) : Date.parse(b.lastEventAt);
+  return at - bt;
+};
 
 /** A "view in plan" button, shown when the session's project has Work Items to
  *  cross-link to. Jumps to the Work Items view and highlights the linked item. */
@@ -47,19 +49,24 @@ function OpenLink({ session, open }: { session: Session; open: OpenController })
   );
 }
 
-/** An Attention session: a loud full-width alert pinned to the top. */
+/** An Attention card (ADR 0010): a triage surface, not a telemetry summary. It
+ *  names the typed cause, how long the need has waited, and a bounded source-faithful
+ *  evidence preview (or an honest "details on the source machine" when none is safe),
+ *  plus the routing context — project, source tool, source machine, linked Work Item,
+ *  optional branch. The single action is **Open session**; there is no dismiss. All
+ *  causes share one visual priority — the words do the triage work. */
 function AlertRow({
   session,
+  now,
   open,
-  showCost,
   onOpenPlan,
 }: {
   session: Session;
+  now: number;
   open: OpenController;
-  showCost: boolean;
   onOpenPlan: OpenPlan;
 }) {
-  const { icon, label } = REASON[session.attentionReason ?? "waiting"];
+  const attention = session.attention;
   const pending = open.pendingId === session.id;
   const failed = open.error?.id === session.id ? open.error.message : null;
   return (
@@ -68,25 +75,35 @@ function AlertRow({
       <div className="body">
         <div className="r1">
           <span className="name">{session.project}</span>
+          {session.branch && <span className="rbranch">⑂ {session.branch}</span>}
           <PlanLink session={session} onOpenPlan={onOpenPlan} />
+          {attention && (
+            <span className="waiting" title={`Waiting since ${attention.since}`}>
+              {waitingFor(attention.since, now)}
+            </span>
+          )}
         </div>
-        <div className="reason pillstat">
-          {icon} {label}
-          {session.activity && <span className="detail"> · {session.activity}</span>}
-        </div>
-        <div className="meta" style={{ marginTop: 8 }}>
-          <Meta session={session} showCost={showCost} />
+        <div className="cause">{attention ? causeLabel(attention.cause) : "Needs attention"}</div>
+        {attention?.evidence ? (
+          <div className="evidence">{attention.evidence}</div>
+        ) : attention?.detailsOnSource ? (
+          <div className="evidence onsource">
+            Details available only on {session.machine ?? "the source machine"}
+          </div>
+        ) : null}
+        <div className="routing">
+          <Machine host={session.machine} />
         </div>
         {failed && <div className="openerr">{failed}</div>}
       </div>
       <button
         className="cta"
         type="button"
-        title="Open this session in a local terminal to respond"
+        title="Open this session in a local terminal"
         disabled={pending || !session.cwd}
         onClick={() => open.onOpen(session)}
       >
-        {pending ? "Opening…" : "Review →"}
+        {pending ? "Opening…" : "Open session →"}
       </button>
     </div>
   );
@@ -168,7 +185,7 @@ export function Board({
 }) {
   useFlash(focusId ? domId("board", focusId) : null);
 
-  const attention = sessions.filter((s) => s.status === "attention").sort(byMostRecent);
+  const attention = sessions.filter((s) => s.status === "attention").sort(byOldestWaiting);
   const active = sessions.filter((s) => s.status === "active").sort(byMostRecent);
   const finished = sessions.filter((s) => s.status === "finished").sort(byMostRecent);
 
@@ -182,9 +199,9 @@ export function Board({
 
   return (
     <div className="stream">
-      <Band dot="attention" label="Needs you" count={attention.length} />
+      <Band dot="attention" label="Needs attention" count={attention.length} />
       {attention.map((s) => (
-        <AlertRow key={s.id} session={s} open={open} showCost={showCost} onOpenPlan={onOpenPlan} />
+        <AlertRow key={s.id} session={s} now={now} open={open} onOpenPlan={onOpenPlan} />
       ))}
 
       <Band dot="active" label="Running" count={active.length} />

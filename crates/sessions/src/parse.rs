@@ -62,10 +62,10 @@ impl Default for Content {
     }
 }
 
-/// A content block. We only distinguish text (for the activity line) from a
-/// `tool_use` (for the Attention heuristic); every other block type — including
-/// `tool_result` — collapses to `Other` rather than failing. Extra fields on the
-/// blocks we do model are ignored.
+/// A content block. We distinguish text (for the activity line), `tool_use` (a
+/// pending human need, correlated by its `id`), and `tool_result` (which answers a
+/// `tool_use` by `tool_use_id`); every other block type collapses to `Other` rather
+/// than failing. Extra fields on the blocks we do model are ignored.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Block {
@@ -75,9 +75,28 @@ enum Block {
         text: String,
     },
     #[serde(rename = "tool_use")]
-    ToolUse,
+    ToolUse {
+        id: Option<String>,
+        name: Option<String>,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: Option<String>,
+    },
     #[serde(other)]
     Other,
+}
+
+/// A `tool_use` block the agent is waiting on: its correlation `id`, tool `name`,
+/// and a short, source-faithful `detail` extracted from the call's input (a command,
+/// path, or the like) for Attention Evidence.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolUseInfo {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub detail: Option<String>,
 }
 
 /// What the accumulator cares about after decoding one relevant entry.
@@ -93,8 +112,12 @@ pub struct Entry {
     pub output_tokens: u64,
     /// First line of the first non-empty text block, truncated to 80 chars.
     pub activity: Option<String>,
-    /// `true` if this entry contains at least one `tool_use` block.
-    pub has_tool_use: bool,
+    /// The `tool_use` blocks in this entry (assistant turns), in order. The last is
+    /// the one an ended-to-call-a-tool turn is waiting on.
+    pub tool_uses: Vec<ToolUseInfo>,
+    /// The `tool_use_id`s answered by `tool_result` blocks in this entry (user
+    /// turns) — the correlated resolutions of earlier tool-call needs.
+    pub tool_result_ids: Vec<String>,
     /// `message.stop_reason`, when present (assistant turns only).
     pub stop_reason: Option<String>,
     /// `true` for a synthetic `isApiErrorMessage` record.
@@ -121,24 +144,25 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
         _ => return Ok(None),
     };
 
-    let (model, input_tokens, output_tokens, activity, has_tool_use, stop_reason) =
+    let (model, input_tokens, output_tokens, activity, tool_uses, tool_result_ids, stop_reason) =
         match raw.message {
             Some(msg) => {
                 let (usage_in, usage_out) = msg
                     .usage
                     .map(|u| (u.input_tokens, u.output_tokens))
                     .unwrap_or((0, 0));
-                let (activity, has_tool_use) = summarize_content(&msg.content, is_assistant);
+                let summary = summarize_content(&msg.content, is_assistant);
                 (
                     msg.model,
                     usage_in,
                     usage_out,
-                    activity,
-                    has_tool_use,
+                    summary.activity,
+                    summary.tool_uses,
+                    summary.tool_result_ids,
                     msg.stop_reason,
                 )
             }
-            None => (None, 0, 0, None, false, None),
+            None => (None, 0, 0, None, Vec::new(), Vec::new(), None),
         };
 
     Ok(Some(Entry {
@@ -151,33 +175,70 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
         input_tokens,
         output_tokens,
         activity,
-        has_tool_use,
+        tool_uses,
+        tool_result_ids,
         stop_reason,
         is_api_error: raw.is_api_error_message,
     }))
 }
 
-/// Extract the activity line (assistant text only) and whether a `tool_use` block
-/// is present.
-fn summarize_content(content: &Content, is_assistant: bool) -> (Option<String>, bool) {
+/// What one message's content contributes to the fold.
+#[derive(Default)]
+struct ContentSummary {
+    activity: Option<String>,
+    tool_uses: Vec<ToolUseInfo>,
+    tool_result_ids: Vec<String>,
+}
+
+/// Extract the activity line (assistant text only), the pending `tool_use` calls,
+/// and the `tool_result` correlations from a message's content.
+fn summarize_content(content: &Content, is_assistant: bool) -> ContentSummary {
     match content {
-        Content::Text(s) => {
-            let activity = if is_assistant { first_line(s) } else { None };
-            (activity, false)
-        }
+        Content::Text(s) => ContentSummary {
+            activity: is_assistant.then(|| first_line(s)).flatten(),
+            ..Default::default()
+        },
         Content::Blocks(blocks) => {
-            let mut activity = None;
-            let mut has_tool_use = false;
+            let mut summary = ContentSummary::default();
             for block in blocks {
                 match block {
-                    Block::Text { text } if is_assistant && activity.is_none() => {
-                        activity = first_line(text);
+                    Block::Text { text } if is_assistant && summary.activity.is_none() => {
+                        summary.activity = first_line(text);
                     }
-                    Block::ToolUse => has_tool_use = true,
+                    Block::ToolUse { id, name, input } => summary.tool_uses.push(ToolUseInfo {
+                        id: id.clone(),
+                        name: name.clone(),
+                        detail: tool_input_detail(input),
+                    }),
+                    Block::ToolResult {
+                        tool_use_id: Some(id),
+                    } => summary.tool_result_ids.push(id.clone()),
                     _ => {}
                 }
             }
-            (activity, has_tool_use)
+            summary
         }
     }
+}
+
+/// A short, source-faithful detail from a `tool_use` call's input for evidence: the
+/// first present of a handful of human-legible fields (a command, path, pattern, …),
+/// or `None` when the input carries none. The whole argument object is never dumped
+/// — only one recognized field — and sanitization/bounding still apply downstream.
+fn tool_input_detail(input: &serde_json::Value) -> Option<String> {
+    const FIELDS: [&str; 8] = [
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "description",
+        "prompt",
+    ];
+    let obj = input.as_object()?;
+    FIELDS
+        .iter()
+        .find_map(|f| obj.get(*f).and_then(|v| v.as_str()))
+        .and_then(first_line)
 }

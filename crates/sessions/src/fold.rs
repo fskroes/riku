@@ -9,7 +9,8 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::model::{AttentionReason, Status, Tool};
+use crate::attention::PendingAttention;
+use crate::model::{Status, Tool};
 
 /// A session is Active/Attention while its file was touched within this window,
 /// and Finished once it goes quiet. Locked for C1 (mtime only); shared by every
@@ -52,23 +53,21 @@ pub struct Projection {
     /// Latest entry timestamp; falls back to the file mtime when a source records
     /// no timestamps.
     pub last_event_at: Option<DateTime<Utc>>,
-    /// Why the session needs a human, per the newest relevant signal each source
-    /// decodes (Claude: an unanswered `tool_use` or an API error; Codex: an
-    /// aborted turn or a pending approval), or `None` if nothing does. This is the
-    /// only Attention input the shared rule reads.
-    pub attention: Option<AttentionReason>,
+    /// The current structured need the source's [`AttentionReducer`] holds, or
+    /// `None` if nothing does. Attention Since is still `Option` here — the shared
+    /// builder resolves it against the file mtime. This is the only Attention input
+    /// the shared status rule reads (via `is_some`).
+    ///
+    /// [`AttentionReducer`]: crate::attention::AttentionReducer
+    pub attention: Option<PendingAttention>,
 }
 
 /// The shared status rule. Attention outranks staleness: a present attention
 /// reason wins regardless of the quiet window (so an old, still-unanswered wait
 /// never ages into Finished); otherwise a quiet file is Finished; otherwise
 /// Active. Staleness alone never produces Attention. Identical for every source.
-pub fn status_for(
-    attention: Option<AttentionReason>,
-    mtime: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> Status {
-    if attention.is_some() {
+pub fn status_for(has_attention: bool, mtime: DateTime<Utc>, now: DateTime<Utc>) -> Status {
+    if has_attention {
         Status::Attention
     } else if now.signed_duration_since(mtime) >= ACTIVITY_WINDOW {
         Status::Finished

@@ -17,7 +17,7 @@ use sessions::{Event, Session};
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{info, warn};
 
-use crate::wire::{bearer, to_ndjson_line};
+use crate::wire::{bearer, to_ndjson_line, WireEvent, CAPABILITY_HEADER, CAPABILITY_V2};
 
 /// How long to wait before re-dialing the Relay after a dropped or refused push.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
@@ -65,14 +65,14 @@ async fn push_once(
 ) -> reqwest::Result<()> {
     let rx = engine.subscribe();
     let snapshot: Vec<Session> = engine.snapshot();
-    let snapshot = futures::stream::iter(
-        snapshot
-            .into_iter()
-            .map(|s| Ok::<_, std::io::Error>(to_ndjson_line(&Event::Upsert(s)))),
-    );
+    // Project each local Session onto the privacy-safe wire type before it leaves
+    // this machine (ADR 0010): local display evidence physically cannot cross.
+    let snapshot = futures::stream::iter(snapshot.into_iter().map(|s| {
+        Ok::<_, std::io::Error>(to_ndjson_line(&WireEvent::from(Event::Upsert(s))))
+    }));
     let live = BroadcastStream::new(rx).filter_map(|res| async move {
         match res {
-            Ok(event) => Some(Ok::<_, std::io::Error>(to_ndjson_line(&event))),
+            Ok(event) => Some(Ok::<_, std::io::Error>(to_ndjson_line(&WireEvent::from(event)))),
             // Lagged while we were momentarily behind: drop it. The next refresh (or
             // the reconnect snapshot) re-syncs, since every upsert is a full snapshot.
             Err(_) => None,
@@ -83,9 +83,11 @@ async fn push_once(
     // `send().await` stays pending for the life of the connection: it drives the
     // chunked upload of the (endless) body and only resolves when the Relay closes
     // the connection or it drops — at which point we reconnect and re-snapshot.
+    // The capability header advertises the ADR 0010 Attention protocol.
     client
         .post(endpoint)
         .header(AUTHORIZATION, bearer(token))
+        .header(CAPABILITY_HEADER, CAPABILITY_V2)
         .body(body)
         .send()
         .await?

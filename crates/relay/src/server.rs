@@ -25,20 +25,20 @@ use axum::{
     Router,
 };
 use futures::StreamExt;
-use sessions::{Event, Session};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{info, warn};
 
-use crate::wire::{authorized, to_sse, NdjsonDecoder};
+use crate::wire::{authorized, speaks_v2, to_sse, NdjsonDecoder, WireEvent, WireSession};
 
-/// One entry in the merged map: the Session plus the id of the Collector connection
-/// that last wrote it. The owner guards the disconnect race — a dropped connection
-/// only reaps sessions it still owns, so a Collector that reconnects on a fresh
-/// connection before the old one's cleanup runs is not clobbered.
+/// One entry in the merged map: the wire session plus the id of the Collector
+/// connection that last wrote it. The owner guards the disconnect race — a dropped
+/// connection only reaps sessions it still owns, so a Collector that reconnects on a
+/// fresh connection before the old one's cleanup runs is not clobbered. The Relay
+/// stores the wire type verbatim and never interprets Attention (ADR 0001/0004/0010).
 struct Owned {
     conn: u64,
-    session: Session,
+    session: WireSession,
 }
 
 /// Shared Relay state: the token gate, the merged live map, and the board fan-out.
@@ -47,7 +47,7 @@ pub struct RelayState {
     token: Arc<str>,
     sessions: Arc<Mutex<HashMap<String, Owned>>>,
     conns: Arc<AtomicU64>,
-    tx: broadcast::Sender<Event>,
+    tx: broadcast::Sender<WireEvent>,
 }
 
 impl RelayState {
@@ -66,8 +66,8 @@ impl RelayState {
         self.conns.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Record a Session as owned by `conn` (last writer wins).
-    fn upsert(&self, conn: u64, session: Session) {
+    /// Record a wire session as owned by `conn` (last writer wins).
+    fn upsert(&self, conn: u64, session: WireSession) {
         self.sessions
             .lock()
             .unwrap()
@@ -88,12 +88,12 @@ impl RelayState {
     }
 
     /// The current merged state as `Upsert` events — a subscriber's snapshot.
-    fn snapshot(&self) -> Vec<Event> {
+    fn snapshot(&self) -> Vec<WireEvent> {
         self.sessions
             .lock()
             .unwrap()
             .values()
-            .map(|o| Event::Upsert(o.session.clone()))
+            .map(|o| WireEvent::Upsert(o.session.clone()))
             .collect()
     }
 }
@@ -123,6 +123,11 @@ async fn collect(
     }
 
     let conn = state.next_conn();
+    // Negotiate the Attention protocol: a Collector that does not advertise the
+    // capability is legacy, and its Attention degrades downstream (ADR 0010). The
+    // Relay itself never interprets Attention — it forwards the wire verbatim.
+    let legacy = !speaks_v2(&headers);
+    info!(conn, legacy, "collector connected");
     let mut stream = body.into_data_stream();
     let mut decoder = NdjsonDecoder::default();
     // The session ids this connection has upserted and not yet removed — the set to
@@ -139,15 +144,15 @@ async fn collect(
         };
         for event in decoder.push(&bytes) {
             match event {
-                Event::Upsert(session) => {
+                WireEvent::Upsert(session) => {
                     owned.insert(session.id.clone());
                     state.upsert(conn, session.clone());
-                    let _ = state.tx.send(Event::Upsert(session));
+                    let _ = state.tx.send(WireEvent::Upsert(session));
                 }
-                Event::Removed { id } => {
+                WireEvent::Removed { id } => {
                     owned.remove(&id);
                     if state.remove_if_owner(conn, &id) {
-                        let _ = state.tx.send(Event::Removed { id });
+                        let _ = state.tx.send(WireEvent::Removed { id });
                     }
                 }
             }
@@ -156,7 +161,7 @@ async fn collect(
 
     for id in owned {
         if state.remove_if_owner(conn, &id) {
-            let _ = state.tx.send(Event::Removed { id });
+            let _ = state.tx.send(WireEvent::Removed { id });
         }
     }
     StatusCode::OK
@@ -171,6 +176,11 @@ async fn subscribe(State(state): State<RelayState>, headers: HeaderMap) -> impl 
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    // A board that does not advertise the capability is a legacy subscriber; it
+    // simply ignores the additive `attention` field. Negotiation is recorded so the
+    // contract is explicit (ADR 0010), while the Relay stays an uninterpreting
+    // transport — it forwards the wire session verbatim.
+    info!(v2 = speaks_v2(&headers), "board subscribed");
     let rx = state.tx.subscribe();
     let snapshot = state.snapshot();
     let snapshot = futures::stream::iter(

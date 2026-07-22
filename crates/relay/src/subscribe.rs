@@ -14,7 +14,7 @@ use reqwest::header::AUTHORIZATION;
 use sessions::Event;
 use tracing::{info, warn};
 
-use crate::wire::{bearer, SseDecoder};
+use crate::wire::{bearer, SseDecoder, CAPABILITY_HEADER, CAPABILITY_V2};
 
 /// How long to wait before re-dialing the Relay after a dropped subscription.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
@@ -62,6 +62,7 @@ async fn connect(
     let resp = client
         .get(endpoint)
         .header(AUTHORIZATION, bearer(token))
+        .header(CAPABILITY_HEADER, CAPABILITY_V2)
         .send()
         .await?
         .error_for_status()?;
@@ -72,8 +73,10 @@ async fn connect(
     let mut decoder = SseDecoder::default();
     while let Some(chunk) = stream.next().await {
         let bytes = chunk?;
+        // Convert each wire event back into the board's local-domain Event; a legacy
+        // or evidence-less Attention degrades honestly (see `WireSession → Session`).
         for event in decoder.push(&bytes) {
-            on_update(Update::Event(event));
+            on_update(Update::Event(event.into()));
         }
     }
     Ok(())

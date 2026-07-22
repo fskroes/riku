@@ -1,5 +1,13 @@
 # Collector + Relay: the team / multi-machine board
 
+**Partially superseded by ADR 0010:** the target architecture no longer reuses the
+browser-domain `Session` as the Collector–Relay wire model, and the shared Attention
+band is labelled **Needs attention**, not “needs you.” The topology, streaming
+framing, machine identity, ephemeral Relay, merge behavior, authentication, and
+read-only boundary below remain in effect. ADR 0010 is now implemented, so passages
+below describing the browser-domain `Session` as the shared wire shape are historical
+implementation context — the wire now carries a distinct privacy-safe projection.
+
 C7 turns the single-machine board into a fleet view: sessions running on other
 machines appear as ordinary cards, each labelled with its machine. It adds the two
 remaining pieces from the settled architecture — a **Collector** (headless, runs on
