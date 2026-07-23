@@ -12,8 +12,12 @@ use tracing::warn;
 use crate::attention::{AttentionReducer, NeedEvidence, Observation};
 use crate::fold::{project_from_cwd, status_for, Fold, Projection};
 use crate::liveness::ProcessLiveness;
-use crate::model::{Attention, AttentionCause, Session, Status, Tool};
-use crate::parse::{parse_entry, Entry};
+use crate::model::{Attention, AttentionCause, Session, Status, SubAgents, Tool};
+use crate::parse::{parse_entry, Entry, ToolUseInfo};
+
+/// The Claude Code `Task` tool spawns a Sub-agent; its tool-use `id` correlates the
+/// matching `tool_result` that ends it, and its input `description` names the work.
+const TASK_TOOL: &str = "Task";
 
 /// The Claude Code fold: a running projection of a single transcript. Fold entries
 /// in file order via [`Accumulator::apply`]; token counts and "latest" fields
@@ -32,12 +36,53 @@ pub struct Accumulator {
     activity: Option<String>,
     tokens_in: u64,
     tokens_out: u64,
+    /// Sub-agent (sidechain) assistant usage, summed apart from the main counts so
+    /// its cost can be priced per the Sub-agent's own (possibly cheaper) model.
+    sub_tokens_in: u64,
+    sub_tokens_out: u64,
+    /// Running cost of Sub-agent usage, priced per each sidechain assistant entry's
+    /// own model as it is folded in (not deferred to a single session-model price).
+    sub_agent_cost_usd: f64,
+    /// Sub-agents currently running, in spawn order: each a `Task` tool-use `id` and
+    /// the short description from its input. An entry is pushed when the `Task` spawns
+    /// and removed when its matching `tool_result` arrives, so this is always the
+    /// *active* set.
+    active_sub_agents: Vec<(String, Option<String>)>,
     attention: AttentionReducer,
 }
 
 impl Accumulator {
     /// Fold one already-parsed relevant entry into the projection.
     pub fn apply(&mut self, entry: Entry) {
+        if let Some(ts) = entry.timestamp {
+            // Entries arrive in file (chronological) order, but guard anyway. Every
+            // entry — including Sub-agent (sidechain) traffic — bumps recency, so a
+            // parent whose own loop is quiet while Sub-agents grind still looks alive.
+            if self.latest_timestamp.is_none_or(|cur| ts >= cur) {
+                self.latest_timestamp = Some(ts);
+            }
+        }
+
+        // Sub-agent (sidechain) traffic folds into the parent, never a card of its
+        // own: its assistant usage adds to the parent's tokens and to cost — priced
+        // per *this* entry's model, since a Sub-agent may run a cheaper one. Its
+        // model, activity, id, and attention lifecycle never touch the parent (the
+        // activity line stays the orchestrator's own words).
+        if entry.is_sidechain {
+            if entry.is_assistant {
+                self.sub_tokens_in += entry.input_tokens;
+                self.sub_tokens_out += entry.output_tokens;
+                if let Some(cost) = crate::pricing::estimate_cost_usd(
+                    entry.model.as_deref(),
+                    entry.input_tokens,
+                    entry.output_tokens,
+                ) {
+                    self.sub_agent_cost_usd += cost;
+                }
+            }
+            return;
+        }
+
         self.tokens_in += entry.input_tokens;
         self.tokens_out += entry.output_tokens;
 
@@ -50,12 +95,6 @@ impl Accumulator {
         }
         if entry.git_branch.is_some() {
             self.branch = entry.git_branch;
-        }
-        if let Some(ts) = entry.timestamp {
-            // Entries arrive in file (chronological) order, but guard anyway.
-            if self.latest_timestamp.is_none_or(|cur| ts >= cur) {
-                self.latest_timestamp = Some(ts);
-            }
         }
 
         // Attention Since prefers the entry's own timestamp, falling back to the
@@ -80,21 +119,37 @@ impl Accumulator {
             if entry.activity.is_some() {
                 self.activity = entry.activity;
             }
-            // Waiting-on-human = the turn ended to call a tool. Prefer the explicit
-            // `stop_reason`; fall back to the presence of a `tool_use` block only
-            // when `stop_reason` is absent. This stops a mid-run tool_use or a
+            // A `Task` tool-use spawns a Sub-agent: register it as active fan-out. It
+            // is *not* a human-input wait (the Sub-agent runs on its own), so it is
+            // kept out of the awaiting decision below — otherwise a fanning-out turn
+            // would masquerade as needing attention, the exact false pull we remove.
+            let mut human_waits: Vec<ToolUseInfo> = Vec::new();
+            for tool in entry.tool_uses {
+                if tool.name.as_deref() == Some(TASK_TOOL) {
+                    if let Some(id) = tool.id {
+                        if !self.active_sub_agents.iter().any(|(sid, _)| *sid == id) {
+                            self.active_sub_agents.push((id, tool.detail));
+                        }
+                    }
+                } else {
+                    human_waits.push(tool);
+                }
+            }
+            // Waiting-on-human = the turn ended to call a (non-`Task`) tool. Prefer the
+            // explicit `stop_reason`; fall back to the presence of a `tool_use` block
+            // only when `stop_reason` is absent. This stops a mid-run tool_use or a
             // cleanly-ended (`end_turn`) turn from masquerading as a wait.
             let awaiting = match entry.stop_reason.as_deref() {
-                Some("tool_use") => true,
+                Some("tool_use") => !human_waits.is_empty(),
                 Some(_) => false,
-                None => !entry.tool_uses.is_empty(),
+                None => !human_waits.is_empty(),
             };
             if awaiting {
                 // The trailing tool_use is the one the turn is blocked on. Claude
                 // transcripts do not mark *why* a call sits unanswered (approval vs
                 // mid-run), so the cause is the honest generic fallback rather than
                 // an inferred Approval (ADR 0010: keep the card honest and generic).
-                let tool = entry.tool_uses.into_iter().next_back().unwrap_or_default();
+                let tool = human_waits.into_iter().next_back().unwrap_or_default();
                 self.attention.apply(Observation::Need {
                     key: tool.id.unwrap_or_else(|| "tool".into()),
                     cause: AttentionCause::Input,
@@ -113,8 +168,11 @@ impl Accumulator {
             // A plain user turn resuming after an error/approval is forward progress.
             self.attention.apply(Observation::Superseded);
         } else {
-            // A tool_result answers its tool_use by id — a correlated resolution.
+            // A tool_result answers its tool_use by id — a correlated resolution. If
+            // that id spawned a Sub-agent (a `Task`), the Sub-agent is now done, so it
+            // leaves the active set and the parent's badge count drops.
             for id in entry.tool_result_ids {
+                self.active_sub_agents.retain(|(sid, _)| *sid != id);
                 self.attention.apply(Observation::Resolved { key: id });
             }
         }
@@ -154,6 +212,17 @@ impl Fold for Accumulator {
             cwd: self.cwd.clone(),
             tokens_in: self.tokens_in,
             tokens_out: self.tokens_out,
+            sub_tokens_in: self.sub_tokens_in,
+            sub_tokens_out: self.sub_tokens_out,
+            sub_agent_cost_usd: self.sub_agent_cost_usd,
+            sub_agents: SubAgents {
+                active: self.active_sub_agents.len(),
+                descriptions: self
+                    .active_sub_agents
+                    .iter()
+                    .filter_map(|(_, desc)| desc.clone())
+                    .collect(),
+            },
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
             attention: self.attention.current(),
@@ -231,7 +300,13 @@ impl FileState {
         liveness: ProcessLiveness,
     ) -> Option<Session> {
         let p = self.fold.projection()?;
-        let status = status_for(p.attention.is_some(), mtime, now, liveness);
+        let status = status_for(
+            p.attention.is_some(),
+            p.sub_agents.active > 0,
+            mtime,
+            now,
+            liveness,
+        );
         // Resolve the current need into the atomic `attention` value only when the
         // status is actually Attention, so the two can never disagree on the wire.
         // Attention Since falls back to the file mtime when the source recorded no
@@ -253,11 +328,24 @@ impl FileState {
                 details_on_source: false,
                 remote_evidence: a.remote_evidence,
             });
-        // Cost is pure (tokens × the model's list price); computed before `p.model`
-        // is moved into the session below. The live git `diff` is out-of-transcript,
-        // so the board fills it and the sessions projection leaves it None.
-        let cost_usd =
+        // Cost is pure (tokens × the model's list price). The main-conversation usage
+        // is priced at the session model; the Sub-agent usage was already priced per
+        // each Sub-agent's own model as it was folded (they may run cheaper models),
+        // so the two are summed here. When the main model is unpriced but Sub-agents
+        // ran priced models, the card still shows their cost rather than nothing. The
+        // live git `diff` is out-of-transcript, so the board fills it and the sessions
+        // projection leaves it None.
+        let main_cost =
             crate::pricing::estimate_cost_usd(p.model.as_deref(), p.tokens_in, p.tokens_out);
+        let cost_usd = match main_cost {
+            Some(main) => Some(main + p.sub_agent_cost_usd),
+            None if p.sub_agent_cost_usd > 0.0 => Some(p.sub_agent_cost_usd),
+            None => None,
+        };
+        // The card's token counts include Sub-agent usage — fan-out spend is real and
+        // counted (the split above exists only so cost could be priced per model).
+        let tokens_in = p.tokens_in + p.sub_tokens_in;
+        let tokens_out = p.tokens_out + p.sub_tokens_out;
         Some(Session {
             id: p.id,
             tool: p.tool,
@@ -265,14 +353,15 @@ impl FileState {
             model: p.model,
             branch: p.branch,
             cwd: p.cwd,
-            tokens_in: p.tokens_in,
-            tokens_out: p.tokens_out,
+            tokens_in,
+            tokens_out,
             activity: p.activity,
             last_event_at: p.last_event_at.unwrap_or(mtime),
             status,
             attention,
             cost_usd,
             diff: None,
+            sub_agents: p.sub_agents,
             // Stamped by the board's runtime (or a Collector) at the source, not by
             // the transcript projection — see `Session::machine`.
             machine: None,
@@ -331,22 +420,141 @@ mod tests {
         assert_eq!(s.status, Status::Active);
     }
 
+    /// A main-chain assistant turn that spawns a Sub-agent via a `Task` tool-use,
+    /// carrying its correlation id and a short description.
+    fn task_spawn(tuid: &str, description: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{{"model":"claude-opus-4-8","stop_reason":"tool_use","content":[{{"type":"tool_use","id":"{tuid}","name":"Task","input":{{"description":"{description}","subagent_type":"Explore"}}}}]}}}}"#
+        )
+    }
+
+    /// A `tool_result` (main chain) answering the `Task` with id `tuid` — the
+    /// Sub-agent has finished.
+    fn task_result(tuid: &str) -> String {
+        format!(
+            r#"{{"type":"user","sessionId":"s1","cwd":"/a/foo","message":{{"content":[{{"type":"tool_result","tool_use_id":"{tuid}","content":"done"}}]}}}}"#
+        )
+    }
+
+    /// One Sub-agent's own (sidechain) assistant turn, on an arbitrary model.
+    fn sidechain(model: &str, text: &str, tin: u64, tout: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":true,"sessionId":"sub","cwd":"/a/b","timestamp":"2026-07-19T10:00:10Z","message":{{"model":"{model}","usage":{{"input_tokens":{tin},"output_tokens":{tout}}},"content":[{{"type":"text","text":"{text}"}}]}}}}"#
+        )
+    }
+
     #[test]
-    fn sidechain_entries_are_ignored() {
+    fn active_sub_agent_count_rises_on_task_and_falls_on_result() {
         let mut fs = claude();
-        let line = r#"{"type":"assistant","isSidechain":true,"sessionId":"sub","cwd":"/a/b","message":{"model":"m","usage":{"input_tokens":999,"output_tokens":999},"content":[{"type":"text","text":"noise"}]}}"#;
-        let mut data = line.to_string();
+        // Two Task spawns → two active Sub-agents, each with its description.
+        let mut data = task_spawn("toolu_a", "map the parser");
         data.push('\n');
-        data.push_str(&assistant("main", "real", 5, 1));
+        data.push_str(&task_spawn("toolu_b", "audit the tests"));
+        data.push('\n');
+        fs.feed(data.as_bytes());
+        let s = fs
+            .build(ts("2026-07-19T10:00:20Z"), ts("2026-07-19T10:00:30Z"))
+            .unwrap();
+        assert_eq!(s.sub_agents.active, 2);
+        assert_eq!(
+            s.sub_agents.descriptions,
+            vec!["map the parser".to_string(), "audit the tests".to_string()]
+        );
+
+        // The first Sub-agent's tool_result arrives → count drops to one.
+        fs.feed(format!("{}\n", task_result("toolu_a")).as_bytes());
+        let s = fs
+            .build(ts("2026-07-19T10:00:40Z"), ts("2026-07-19T10:00:50Z"))
+            .unwrap();
+        assert_eq!(s.sub_agents.active, 1);
+        assert_eq!(s.sub_agents.descriptions, vec!["audit the tests".to_string()]);
+
+        // The second completes → no badge.
+        fs.feed(format!("{}\n", task_result("toolu_b")).as_bytes());
+        let s = fs
+            .build(ts("2026-07-19T10:00:55Z"), ts("2026-07-19T10:01:00Z"))
+            .unwrap();
+        assert_eq!(s.sub_agents.active, 0);
+        assert!(s.sub_agents.descriptions.is_empty());
+    }
+
+    #[test]
+    fn spawning_a_sub_agent_is_working_not_attention_or_stale() {
+        // A `Task` spawn ends the turn with stop_reason tool_use, but it is the agent
+        // fanning out — not a human-input wait — so the card must not enter Attention.
+        // And with a Sub-agent still active the parent stays Active even when its own
+        // transcript has been quiet well past the staleness window.
+        let mut fs = claude();
+        fs.feed(format!("{}\n", task_spawn("toolu_a", "grind on it")).as_bytes());
+        let s = fs
+            .build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z"))
+            .unwrap();
+        assert_eq!(s.status, Status::Active);
+        assert!(s.attention.is_none());
+        assert_eq!(s.sub_agents.active, 1);
+    }
+
+    #[test]
+    fn sidechain_usage_folds_into_tokens_and_cost_priced_per_entry_model() {
+        // Orchestrator on Opus; its Sub-agent runs the cheaper Haiku. Both usages
+        // count toward the card, but the Sub-agent's cost is priced at Haiku's rate,
+        // not the parent's Opus rate.
+        let mut fs = claude();
+        let mut data = assistant("s1", "orchestrating", 1_000_000, 1_000_000);
+        data.push('\n');
+        data.push_str(&sidechain("claude-haiku-4-5", "sub work", 1_000_000, 0));
         data.push('\n');
         fs.feed(data.as_bytes());
 
         let s = fs
             .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
             .unwrap();
-        assert_eq!(s.id, "main");
-        assert_eq!(s.tokens_in, 5); // sidechain 999 not counted
-        assert_eq!(s.tokens_out, 1);
+        // Tokens include the Sub-agent's usage (story 5).
+        assert_eq!(s.tokens_in, 2_000_000);
+        assert_eq!(s.tokens_out, 1_000_000);
+        // Cost = Opus main (15 + 75 = 90) + Haiku sub (0.80), NOT Opus-priced sub (15).
+        let cost = s.cost_usd.unwrap();
+        assert!((cost - 90.80).abs() < 1e-9, "cost was {cost}");
+        // Model stays the orchestrator's, never the Sub-agent's.
+        assert_eq!(s.model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn sidechain_text_and_timestamp_bump_recency_but_not_activity() {
+        // The activity line stays the orchestrator's own words (story 7), while the
+        // later sidechain timestamp still bumps the parent's recency (story 4/9).
+        let mut fs = claude();
+        let mut data = assistant("s1", "orchestrating", 10, 1);
+        data.push('\n');
+        data.push_str(&sidechain("claude-haiku-4-5", "noisy sub chatter", 5, 1));
+        data.push('\n');
+        fs.feed(data.as_bytes());
+
+        let s = fs
+            .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
+            .unwrap();
+        assert_eq!(s.activity.as_deref(), Some("orchestrating"));
+        // last_event_at is the sidechain entry's timestamp, the latest seen.
+        assert_eq!(s.last_event_at, ts("2026-07-19T10:00:10Z"));
+    }
+
+    #[test]
+    fn sub_agent_cost_shows_even_when_the_main_model_is_unpriced() {
+        // An unknown orchestrator model has no main cost, but a priced Sub-agent's
+        // spend still surfaces rather than vanishing.
+        let mut fs = claude();
+        let unknown = r#"{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{"model":"some-future-model","usage":{"input_tokens":10,"output_tokens":1},"content":[{"type":"text","text":"go"}]}}"#;
+        let mut data = unknown.to_string();
+        data.push('\n');
+        data.push_str(&sidechain("claude-haiku-4-5", "sub", 1_000_000, 0));
+        data.push('\n');
+        fs.feed(data.as_bytes());
+
+        let s = fs
+            .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
+            .unwrap();
+        let cost = s.cost_usd.expect("Sub-agent cost surfaces");
+        assert!((cost - 0.80).abs() < 1e-9, "cost was {cost}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import type { Session } from "./types";
 import type { OpenController } from "./useOpen";
 import { causeLabel, domId, relativeAge, waitingFor } from "./format";
-import { Branch, Cost, Diff, Machine, Tile, Tokens, useFlash } from "./ui";
+import { Branch, Cost, Diff, Machine, SubAgentBadge, Tile, Tokens, useFlash } from "./ui";
 
 const byMostRecent = (a: Session, b: Session): number =>
   Date.parse(b.lastEventAt) - Date.parse(a.lastEventAt);
@@ -102,6 +102,10 @@ function AlertRow({
         ) : null}
         <div className="routing">
           <Machine host={session.machine} />
+          {/* A session can need attention *and* still be fanning work out (a
+              non-Task wait alongside live Sub-agents) — keep the badge visible so
+              its fan-out does not vanish when it routes to an attention card. */}
+          <SubAgentBadge subAgents={session.subAgents} />
         </div>
         {failed && <div className="openerr">{failed}</div>}
       </div>
@@ -167,6 +171,7 @@ function CompactRow({
         )}
         <OpenLink session={session} open={open} />
         <PlanLink session={session} onOpenPlan={onOpenPlan} />
+        <SubAgentBadge subAgents={session.subAgents} />
         <Diff diff={session.diff} />
         <Tokens tokensIn={session.tokensIn} tokensOut={session.tokensOut} />
         <Cost usd={session.costUsd} show={showCost} />

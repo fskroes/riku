@@ -251,6 +251,11 @@ impl Fold for CodexFold {
             cwd: self.cwd.clone(),
             tokens_in: self.tokens_in,
             tokens_out: self.tokens_out,
+            // Codex CLI has no Sub-agent concept: no fan-out badge, no folded usage.
+            sub_tokens_in: 0,
+            sub_tokens_out: 0,
+            sub_agent_cost_usd: 0.0,
+            sub_agents: crate::model::SubAgents::default(),
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
             attention: self.attention.current(),

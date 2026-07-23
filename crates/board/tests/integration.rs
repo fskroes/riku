@@ -63,6 +63,27 @@ fn assistant_line_in(id: &str, cwd: &str, branch: &str) -> String {
     .to_string()
 }
 
+/// A Claude assistant turn that spawns a Sub-agent via a `Task` tool-use (still
+/// active — no matching `tool_result` follows).
+fn claude_task_spawn(id: &str) -> String {
+    serde_json::json!({
+        "type": "assistant",
+        "sessionId": id,
+        "timestamp": "2026-07-19T10:00:00Z",
+        "cwd": "/Users/x/repos/foo",
+        "gitBranch": "main",
+        "message": {
+            "model": "claude-opus-4-8",
+            "stop_reason": "tool_use",
+            "content": [{
+                "type": "tool_use", "id": "toolu_sub", "name": "Task",
+                "input": { "description": "map the parser", "subagent_type": "Explore" }
+            }]
+        }
+    })
+    .to_string()
+}
+
 /// A Claude assistant turn that ended to call a tool (waiting on the human).
 fn claude_waiting_line(id: &str) -> String {
     serde_json::json!({
@@ -455,6 +476,55 @@ async fn codex_subagent_rollout_is_not_a_card() {
     assert!(
         sessions.is_empty(),
         "subagent rollout must not render: {sessions:?}"
+    );
+}
+
+#[tokio::test]
+async fn sub_agent_badge_fields_serialize_through_the_sessions_api() {
+    // A session fanning work out to one Sub-agent surfaces the badge fields on its
+    // card; a Codex session (no Sub-agent concept) carries an empty, badge-less set.
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[claude_task_spawn("sess-fanout")],
+    );
+    write_codex_rollout(
+        codex.path(),
+        "rollout-2026-07-19T10-00-00-codex-plain.jsonl",
+        &codex_rollout("codex-plain", "no fan-out here", 100, 10),
+    );
+
+    let (addr, _started) = spawn_server_with(
+        claude.path().to_path_buf(),
+        Some(codex.path().to_path_buf()),
+    )
+    .await;
+
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let sessions = body["sessions"].as_array().unwrap();
+
+    let fanout = sessions.iter().find(|s| s["id"] == "sess-fanout").unwrap();
+    assert_eq!(fanout["subAgents"]["active"], 1);
+    assert_eq!(
+        fanout["subAgents"]["descriptions"],
+        serde_json::json!(["map the parser"])
+    );
+    // A live Sub-agent keeps the parent working (never stale), not in Attention.
+    assert_eq!(fanout["status"], "active");
+
+    let codex_card = sessions.iter().find(|s| s["id"] == "codex-plain").unwrap();
+    assert_eq!(codex_card["subAgents"]["active"], 0);
+    assert_eq!(
+        codex_card["subAgents"]["descriptions"],
+        serde_json::json!([])
     );
 }
 

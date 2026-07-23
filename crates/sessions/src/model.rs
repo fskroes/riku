@@ -99,6 +99,23 @@ pub struct DiffStat {
     pub removed: u64,
 }
 
+/// The Sub-agents a parent Agent Session is currently fanning work out to
+/// (CONTEXT.md "Sub-agent"). A Sub-agent never becomes its own card; it surfaces as
+/// a badge on the parent. Only *active* Sub-agents are carried: an entry is added
+/// when a `Task` tool-use spawns one and removed when its matching `tool_result`
+/// arrives, so `active` counts exactly what is running right now. Empty for a source
+/// with no Sub-agent concept (Codex), whose card then simply omits the badge.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubAgents {
+    /// How many Sub-agents are running right now — the badge count.
+    pub active: usize,
+    /// Each active Sub-agent's short description, taken from the spawning `Task`
+    /// tool-use, for the badge's tooltip/expanded view. A Sub-agent whose spawn
+    /// carried no description still counts toward `active` but adds nothing here.
+    pub descriptions: Vec<String>,
+}
+
 /// One Agent Session — a single Claude Code transcript, projected for the UI.
 ///
 /// `PartialEq` only (not `Eq`): `cost_usd` is an `f64`. The store compares
@@ -150,6 +167,12 @@ pub struct Session {
     /// serving/streaming. Omitted-on-wire tolerant (`default` → `None`).
     #[serde(default)]
     pub diff: Option<DiffStat>,
+    /// The Sub-agents this Session is currently fanning work out to — the card's
+    /// Sub-agent badge. Empty for a session that is not fanning out and for a source
+    /// with no Sub-agent concept (Codex). Rides the wire like any other field
+    /// (`default` → empty), so a legacy sender that omits it degrades to no badge.
+    #[serde(default)]
+    pub sub_agents: SubAgents,
     /// The machine this Session runs on — the host's name (C7). Stamped at the
     /// source: the board's own local runtime (and, later, a Collector on a remote
     /// machine) sets it to the local hostname before the Session leaves the watcher,

@@ -273,6 +273,7 @@ mod tests {
             attention: None,
             cost_usd: None,
             diff: None,
+            sub_agents: Default::default(),
             machine: None,
         }
     }

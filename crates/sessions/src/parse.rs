@@ -1,7 +1,9 @@
 //! Transcript parsing. Each transcript line is one JSON object; we tolerate
 //! unknown fields, unknown `type` values, and schema drift between Claude Code
 //! versions (unknown => ignore, never error). Only `user` / `assistant` entries
-//! that are not sidechain traffic feed the session model.
+//! feed the session model. Sidechain (Sub-agent) `user` / `assistant` entries are
+//! parsed too, flagged with [`Entry::is_sidechain`]: the fold folds their token
+//! usage and liveness into the parent rather than surfacing them as their own card.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -103,6 +105,9 @@ pub struct ToolUseInfo {
 #[derive(Debug)]
 pub struct Entry {
     pub is_assistant: bool,
+    /// `isSidechain: true` — Sub-agent traffic. The fold folds such an entry's token
+    /// usage and recency into the parent instead of treating it as a card of its own.
+    pub is_sidechain: bool,
     pub session_id: Option<String>,
     pub timestamp: Option<DateTime<Utc>>,
     pub cwd: Option<String>,
@@ -126,16 +131,12 @@ pub struct Entry {
 
 /// Parse one transcript line.
 ///
-/// * `Ok(Some(entry))` — a relevant, non-sidechain `user` / `assistant` entry.
-/// * `Ok(None)` — valid JSON we intentionally ignore (sidechain, other `type`).
+/// * `Ok(Some(entry))` — a relevant `user` / `assistant` entry (possibly sidechain,
+///   flagged with [`Entry::is_sidechain`] for the fold to fold into the parent).
+/// * `Ok(None)` — valid JSON we intentionally ignore (other `type`).
 /// * `Err(_)` — the line is not valid JSON (malformed or a mid-write fragment).
 pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
     let raw: RawEntry = serde_json::from_str(line)?;
-
-    // Subagent traffic never surfaces as its own card.
-    if raw.is_sidechain {
-        return Ok(None);
-    }
 
     let is_assistant = match raw.entry_type.as_deref() {
         Some("assistant") => true,
@@ -167,6 +168,7 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
 
     Ok(Some(Entry {
         is_assistant,
+        is_sidechain: raw.is_sidechain,
         session_id: raw.session_id,
         timestamp: raw.timestamp,
         cwd: raw.cwd,

@@ -63,3 +63,7 @@ _Avoid_: finished (as a synonym), timeout, expiry
 **Session Source**:
 An adapter that discovers and reads Agent Sessions for one agent tool (Claude Code, Codex CLI). Each supported tool has exactly one Session Source.
 _Avoid_: provider, integration, connector
+
+**Sub-agent**:
+Work an Agent Session fans out to a child agent (a Claude Code `Task` — transcript-marked `isSidechain`). A Sub-agent is never its own card: it surfaces as a badge on the parent's card counting the currently-active ones, with each active one's short description in the badge tooltip. Its token usage and cost fold into the parent (cost priced per the Sub-agent's own model, since it may run a cheaper one); a Sub-agent event keeps the parent looking alive. Codex CLI has no comparable concept, so its cards carry none.
+_Avoid_: sidechain (transcript jargon only), subtask, child session

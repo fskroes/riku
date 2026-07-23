@@ -31,7 +31,7 @@ pub use diff::DiffCache;
 pub use fold::{Fold, Projection, ACTIVITY_WINDOW};
 pub use git::diff_stat;
 pub use liveness::{probe_alive_cwds, ProcessLiveness};
-pub use model::{Attention, AttentionCause, DiffStat, Session, Status, Tool};
+pub use model::{Attention, AttentionCause, DiffStat, Session, Status, SubAgents, Tool};
 pub use session::{Accumulator, FileState};
 pub use source::{ClaudeSource, CodexSource, SessionSource};
 pub use store::{Event, SessionStore, DISCOVERY_WINDOW};
