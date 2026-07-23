@@ -1,5 +1,10 @@
 # Riku — Agent Board
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/fskroes/riku?sort=semver)](https://github.com/fskroes/riku/releases)
+[![Release build](https://github.com/fskroes/riku/actions/workflows/release.yml/badge.svg)](https://github.com/fskroes/riku/actions/workflows/release.yml)
+[![Source-install smoke test](https://github.com/fskroes/riku/actions/workflows/homebrew-smoke.yml/badge.svg)](https://github.com/fskroes/riku/actions/workflows/homebrew-smoke.yml)
+
 Riku is a local, read-only mission-control board for Claude Code and Codex CLI
 sessions. It puts the sessions that need your attention first, so you can see what
 to respond to instead of searching through terminal windows.
@@ -133,3 +138,14 @@ Server-Sent Events at `GET /api/events`. See [CONTEXT.md](CONTEXT.md) for the pr
 domain language and [the architecture decisions](docs/adr/) for the rationale
 behind local-first operation, the read-only Relay, Explainable Attention, card
 stats, and distribution.
+
+## Contributing
+
+Issues, PRDs, and triage labels live in [GitHub Issues](https://github.com/fskroes/riku/issues).
+Before opening a pull request, read [CONTEXT.md](CONTEXT.md) for the domain language
+and [AGENTS.md](AGENTS.md) for the repository conventions, then verify your checkout
+with `cargo test` and `cd web && npm run build`.
+
+## License
+
+Riku is released under the [MIT License](LICENSE).
