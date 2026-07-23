@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Prototype — Sub-agent badge states</title>
+<!--
+  Throwaway /prototype exploration for issue #23 — how a session card surfaces the
+  Sub-agents it is fanning work out to. UI-only, fake data. Answers the visual
+  question (which badge treatment reads best) BEFORE the real board UI is built.
+
+  Two structurally-different treatments of the SAME badge contract (active count +
+  per-agent descriptions in a tooltip/expander), across every state:
+    none · 1 active · many active · tooltip/expander open · just-finished.
+
+    A — Count pill   : tight `⑃ N` chip in the card's stat cluster; hover/focus
+                       reveals the descriptions in a floating tooltip. (winner)
+    B — Labelled row : `⑃ N sub-agents` with the first description inline and a
+                       `+N more` disclosure that expands the full list in place.
+
+  Not wired to any data or backend. Kept as a primary-source record; variant A's
+  look is grafted into web/src (ui.tsx / Board.tsx / styles.css).
+-->
+<style>
+  :root {
+    --r-sm: 6px; --r-md: 10px; --r-pill: 999px;
+    --font-ui: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+    --bg-content: #FAF6EF; --surface: #FFFFFF;
+    --ink: #2B241A; --ink-muted: rgba(43, 36, 26, 0.72); --ink-faint: rgba(43, 36, 26, 0.64);
+    --hairline: rgba(43, 36, 26, 0.12);
+    --accent: #B4552D; --accent-soft: rgba(180, 85, 45, 0.12);
+    --positive: #2E7D51; --info: #4A5FB5; --info-soft: rgba(74, 95, 181, 0.14);
+    --shadow-float: 0 12px 32px rgba(43, 36, 26, 0.16);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 40px 32px 80px; background: var(--bg-content); color: var(--ink);
+    font-family: var(--font-ui); font-size: 13px; line-height: 1.45;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .lede { color: var(--ink-muted); max-width: 640px; margin: 0 0 28px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted);
+       margin: 34px 0 12px; font-weight: 600; }
+  .state { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-faint);
+           margin: 0 0 6px 12px; font-weight: 500; }
+
+  /* a compact session row, cribbed from the real board's .row */
+  .row {
+    display: grid; grid-template-columns: auto minmax(150px, 220px) 1fr auto; gap: 14px;
+    align-items: center; padding: 8px 12px; border-radius: 8px; background: var(--surface);
+    border: 1px solid var(--hairline); margin-bottom: 8px; max-width: 900px;
+  }
+  .row.done { opacity: .65; }
+  .tile { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 6px;
+          background: color-mix(in srgb, #E8590C 18%, transparent); color: #E8590C; font-weight: 700; font-size: 11px; }
+  .name { font-weight: 550; }
+  .branch { display: block; font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }
+  .act { color: var(--ink-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mini { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center;
+          font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }
+  .tok { white-space: nowrap; }
+  .age { color: var(--ink-faint); font-family: var(--font-mono); font-size: 11px; }
+
+  /* ---- Variant A: count pill + floating tooltip ---- */
+  .subA { position: relative; display: inline-flex; }
+  .subA .pill {
+    display: inline-flex; align-items: center; gap: 5px; cursor: default;
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid transparent; padding: 2px 9px; border-radius: var(--r-pill); white-space: nowrap;
+  }
+  .subA .pill .fan { font-size: 11px; }
+  .subA .pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+                       animation: pulse 1.6s var(--ease-out, ease) infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  .subA .tip {
+    position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 5;
+    min-width: 220px; max-width: 300px; padding: 8px 10px; border-radius: var(--r-md);
+    background: var(--surface); border: 1px solid var(--hairline); box-shadow: var(--shadow-float);
+    opacity: 0; transform: translateY(4px); pointer-events: none; transition: opacity .12s, transform .12s;
+  }
+  .subA:hover .tip, .subA.open .tip { opacity: 1; transform: translateY(0); }
+  .subA .tip h3 { margin: 0 0 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+                  color: var(--ink-faint); font-weight: 600; }
+  .subA .tip ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
+  .subA .tip li { display: flex; gap: 7px; align-items: baseline; font-family: var(--font-ui); color: var(--ink); }
+  .subA .tip li .d { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; transform: translateY(-1px); }
+
+  /* ---- Variant B: labelled row + inline disclosure ---- */
+  .subB { display: inline-flex; flex-direction: column; gap: 4px; }
+  .subB .head { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 12px; }
+  .subB .head .lbl { color: var(--accent); font-weight: 600; }
+  .subB .head .first { color: var(--ink-muted); font-family: var(--font-ui); max-width: 200px;
+                       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .subB .more { border: 0; background: transparent; color: var(--info); cursor: pointer;
+                font: 500 11px var(--font-mono); padding: 0; text-decoration: underline; }
+  .subB .list { margin: 2px 0 0; padding: 6px 10px; list-style: none; display: flex; flex-direction: column; gap: 5px;
+                background: var(--info-soft); border-radius: var(--r-sm); font-family: var(--font-ui); }
+  .subB .list[hidden] { display: none; }
+
+  .note { max-width: 720px; margin: 40px 0 0; padding: 16px 18px; background: var(--surface);
+          border: 1px solid var(--hairline); border-left: 3px solid var(--accent); border-radius: var(--r-md); }
+  .note b { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>Sub-agent badge — state &amp; variant board</h1>
+  <p class="lede">Issue #23. A Sub-agent is never its own card; it surfaces as a badge on the parent
+  showing how many are running now, with each one's short description on hover/expand. Fake data.</p>
+
+  <!-- ========================= VARIANT A ========================= -->
+  <h2>Variant A — count pill (hover tooltip)</h2>
+
+  <p class="state">none active → no badge, quiet card</p>
+  <div class="row">
+    <span class="tile">C</span>
+    <div><div class="name">riku</div><span class="branch">⑂ main</span></div>
+    <div class="act">▸ wiring the collector loop</div>
+    <div class="mini"><span class="tok">↑ 128k / 12k</span><span class="age">30s</span></div>
+  </div>
+
+  <p class="state">1 active</p>
+  <div class="row">
+    <span class="tile">C</span>
+    <div><div class="name">riku</div><span class="branch">⑂ feat/sub-agents</span></div>
+    <div class="act">▸ orchestrating the review</div>
+    <div class="mini">
+      <span class="subA"><span class="pill"><span class="pulse"></span><span class="fan">⑃</span> 1</span>
+        <span class="tip"><h3>1 sub-agent running</h3><ul><li><span class="d"></span>audit the fold seam for regressions</li></ul></span></span>
+      <span class="tok">↑ 264k / 40k</span><span class="age">4s</span>
+    </div>
+  </div>
+
+  <p class="state">many active (hover for descriptions)</p>
+  <div class="row">
+    <span class="tile">C</span>
+    <div><div class="name">riku</div><span class="branch">⑂ feat/sub-agents</span></div>
+    <div class="act">▸ orchestrating the review</div>
+    <div class="mini">
+      <span class="subA"><span class="pill"><span class="pulse"></span><span class="fan">⑃</span> 3</span>
+        <span class="tip"><h3>3 sub-agents running</h3><ul>
+          <li><span class="d"></span>map the parser module</li>
+          <li><span class="d"></span>audit the fold seam for regressions</li>
+          <li><span class="d"></span>draft the badge prototype</li>
+        </ul></span></span>
+      <span class="tok">↑ 512k / 88k</span><span class="age">2s</span>
+    </div>
+  </div>
+
+  <p class="state">tooltip pinned open (keyboard-focus / tap)</p>
+  <div class="row">
+    <span class="tile">C</span>
+    <div><div class="name">riku</div><span class="branch">⑂ feat/sub-agents</span></div>
+    <div class="act">▸ orchestrating the review</div>
+    <div class="mini">
+      <span class="subA open"><span class="pill"><span class="pulse"></span><span class="fan">⑃</span> 3</span>
+        <span class="tip"><h3>3 sub-agents running</h3><ul>
+          <li><span class="d"></span>map the parser module</li>
+          <li><span class="d"></span>audit the fold seam for regressions</li>
+          <li><span class="d"></span>draft the badge prototype</li>
+        </ul></span></span>
+      <span class="tok">↑ 512k / 88k</span><span class="age">2s</span>
+    </div>
+  </div>
+
+  <p class="state">just-finished → all done, badge gone</p>
+  <div class="row done">
+    <span class="tile">C</span>
+    <div><div class="name">riku</div><span class="branch">⑂ feat/sub-agents</span></div>
+    <div class="act">✓ review complete</div>
+    <div class="mini"><span class="tok">↑ 640k / 120k</span><span class="age">3m</span></div>
+  </div>
+
+  <!-- ========================= VARIANT B ========================= -->
+  <h2>Variant B — labelled row (inline disclosure)</h2>
+
+  <p class="state">1 active</p>
+  <div class="row">
+    <span class="tile">C</span>
+    <div><div class="name">riku</div><span class="branch">⑂ feat/sub-agents</span></div>
+    <div class="act">▸ orchestrating the review</div>
+    <div class="mini">
+      <span class="subB"><span class="head"><span class="lbl">⑃ 1 sub-agent</span>
+        <span class="first">audit the fold seam</span></span></span>
+      <span class="tok">↑ 264k / 40k</span><span class="age">4s</span>
+    </div>
+  </div>
+
+  <p class="state">many active (click “+2 more” to expand)</p>
+  <div class="row">
+    <span class="tile">C</span>
+    <div><div class="name">riku</div><span class="branch">⑂ feat/sub-agents</span></div>
+    <div class="act">▸ orchestrating the review</div>
+    <div class="mini">
+      <span class="subB">
+        <span class="head"><span class="lbl">⑃ 3 sub-agents</span>
+          <span class="first">map the parser module</span>
+          <button class="more" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden">+2 more</button></span>
+        <ul class="list" hidden>
+          <li>map the parser module</li>
+          <li>audit the fold seam for regressions</li>
+          <li>draft the badge prototype</li>
+        </ul>
+      </span>
+      <span class="tok">↑ 512k / 88k</span><span class="age">2s</span>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Decision — variant A (count pill) wins.</b> It stays inside the card's existing
+    stat cluster (one more mono chip beside tokens/cost), so a fanning-out row reads at a
+    glance without changing the row's height or rhythm. The pulse dot signals “working”.
+    Variant B's inline description is informative but pushes the row taller and competes
+    with the activity line for the same horizontal space. Descriptions belong in a
+    reveal-on-demand tooltip, exactly where B forces a disclosure control. Variant A is
+    grafted into the real board (ui.tsx <code>SubAgentBadge</code> + <code>.subagents</code>).
+  </div>
+</body>
+</html>
