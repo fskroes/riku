@@ -164,9 +164,10 @@ function Band({ dot, label, count }: { dot: string; label: string; count: number
 
 export type OpenPlan = (session: Session) => void;
 
-/** The attention-first stream (ADR 0005): alerts pinned up top, running sessions
- *  compact, finished dimmed below. `focusId` scrolls to and flashes one card when
- *  arriving from a Work Item's session chip. */
+/** The attention-first focus board (ADR 0005): the oldest need is the primary
+ *  decision, later needs queue beside it, running sessions stay compact, and
+ *  finished sessions dim below the queue. `focusId` scrolls to and flashes one
+ *  card when arriving from a Work Item's session chip. */
 export function Board({
   sessions,
   now,
@@ -196,22 +197,67 @@ export function Board({
     );
   }
 
+  const [next, ...later] = attention;
+
   return (
-    <div className="stream">
-      <Band dot="attention" label="Needs attention" count={attention.length} />
-      {attention.map((s) => (
-        <AlertRow key={s.id} session={s} now={now} open={open} onOpenPlan={onOpenPlan} />
-      ))}
+    <div className="focus-board">
+      <main>
+        <header className="board-heading">
+          <div>
+            <span className="label-micro">Next decision</span>
+            <h1>{next ? "One thing at a time." : "The desk is clear."}</h1>
+          </div>
+          <p>{later.length ? `${later.length} more waiting behind this` : "No other needs queued"}</p>
+        </header>
 
-      <Band dot="active" label="Running" count={active.length} />
-      {active.map((s) => (
-        <CompactRow key={s.id} session={s} now={now} open={open} showCost={showCost} onOpenPlan={onOpenPlan} />
-      ))}
+        {next ? (
+          <div className="focus-card">
+            <AlertRow session={next} now={now} open={open} onOpenPlan={onOpenPlan} />
+          </div>
+        ) : (
+          <div className="empty">No Agent Session needs attention.</div>
+        )}
 
-      <Band dot="finished" label="Finished" count={finished.length} />
-      {finished.map((s) => (
-        <CompactRow key={s.id} session={s} now={now} open={open} showCost={showCost} done onOpenPlan={onOpenPlan} />
-      ))}
+        <section className="focus-running">
+          <Band dot="active" label="Running in the background" count={active.length} />
+          {active.map((session) => (
+            <CompactRow
+              key={session.id}
+              session={session}
+              now={now}
+              open={open}
+              showCost={showCost}
+              onOpenPlan={onOpenPlan}
+            />
+          ))}
+        </section>
+      </main>
+
+      <aside>
+        <Band dot="attention" label="Up next" count={later.length} />
+        {later.map((session) => (
+          <AlertRow
+            key={session.id}
+            session={session}
+            now={now}
+            open={open}
+            onOpenPlan={onOpenPlan}
+          />
+        ))}
+
+        <Band dot="finished" label="Finished" count={finished.length} />
+        {finished.map((session) => (
+          <CompactRow
+            key={session.id}
+            session={session}
+            now={now}
+            open={open}
+            showCost={showCost}
+            done
+            onOpenPlan={onOpenPlan}
+          />
+        ))}
+      </aside>
     </div>
   );
 }

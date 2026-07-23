@@ -79,9 +79,8 @@ body {
 .machine { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); background: rgba(43, 36, 26, 0.05); border: 1px solid var(--hairline); padding: 2px 8px; border-radius: var(--r-pill); white-space: nowrap; flex: none; }
 .machine .mdot { width: 6px; height: 6px; border-radius: 50%; background: var(--positive); flex: none; }
 
-/* BOARD — attention-first stream on a space-first grid: alert cards tile across
-   the width (three waiting sessions fit one screen-row on a wide monitor),
-   bands and compact rows span it. */
+/* BOARD — shared Agent Session card primitives. The focus-board composition
+   below assigns them to the primary decision, queue, and background work. */
 .view-board .stream { display: grid; grid-template-columns: repeat(auto-fill, minmax(370px, 1fr)); gap: 8px 10px; }
 .view-board .band { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; margin: 10px 2px 0; }
 .view-board .band:first-child { margin-top: 0; }
@@ -247,4 +246,49 @@ body {
 @keyframes flash {
   0% { box-shadow: 0 0 0 2px var(--accent); }
   100% { box-shadow: 0 1px 6px rgba(43, 36, 26, 0.06); }
+}
+
+.board-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 8px 2px 18px; border-bottom: 1px solid var(--hairline); }
+.board-heading h1 { margin: 4px 0 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(25px, 3vw, 38px); line-height: 1.05; font-weight: 500; text-wrap: balance; }
+.board-heading p { margin: 0; color: var(--ink-muted); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; text-wrap: pretty; }
+
+.focus-board { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: clamp(20px, 4vw, 56px); max-width: 1480px; margin: 0 auto; }
+.focus-board > aside { min-width: 0; padding-left: 18px; border-left: 1px solid var(--hairline); }
+.focus-board .focus-card { margin: 18px 0 28px; }
+.focus-board .focus-card .alert { min-height: 230px; padding: clamp(18px, 3vw, 32px); }
+.focus-board .focus-card .alert .name { font-family: Georgia, "Times New Roman", serif; font-size: 24px; font-weight: 500; }
+.focus-board .focus-card .alert .cause { font-size: 17px; }
+.focus-board .focus-card .alert .evidence { font-size: 13px; -webkit-line-clamp: 5; line-clamp: 5; }
+.focus-board .focus-running .band, .focus-board > aside .band { margin: 14px 2px 8px; }
+.focus-board .focus-running .row {
+  grid-template-columns: auto minmax(120px, 190px) minmax(100px, 1fr);
+  gap: 10px;
+  margin-bottom: 7px;
+}
+.focus-board .focus-running .row .mini {
+  grid-column: 2 / -1;
+  justify-content: flex-end;
+  border-top: 1px solid var(--hairline);
+  padding-top: 6px;
+}
+.focus-board > aside .alert { margin-bottom: 8px; }
+.focus-board > aside .alert .evidence {
+  display: -webkit-box;
+  margin-top: 5px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-muted);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+.focus-board > aside .alert .routing { display: none; }
+.focus-board > aside .row { display: grid; grid-template-columns: auto 1fr; gap: 8px; margin-bottom: 6px; }
+.focus-board > aside .row .act, .focus-board > aside .row .mini { grid-column: 2; }
+.focus-board > aside .row .mini { flex-wrap: wrap; gap: 6px; }
+
+@media (max-width: 960px) {
+  .focus-board { grid-template-columns: 1fr; }
+  .focus-board > aside { padding-left: 0; border-left: 0; border-top: 1px solid var(--hairline); }
 }
