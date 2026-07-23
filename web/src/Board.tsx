@@ -1,7 +1,7 @@
 import type { Session } from "./types";
 import type { OpenController } from "./useOpen";
-import { abbrevTokens, causeLabel, domId, relativeAge, waitingFor } from "./format";
-import { Cost, Diff, Machine, Tile, useFlash } from "./ui";
+import { causeLabel, domId, relativeAge, waitingFor } from "./format";
+import { Branch, Cost, Diff, Machine, Tile, Tokens, useFlash } from "./ui";
 
 const byMostRecent = (a: Session, b: Session): number =>
   Date.parse(b.lastEventAt) - Date.parse(a.lastEventAt);
@@ -23,10 +23,11 @@ function PlanLink({ session, onOpenPlan }: { session: Session; onOpenPlan: OpenP
     <button
       className="planlink"
       type="button"
+      aria-label="View this session in the project's Work Items"
       title="View this session in the project's Work Items"
       onClick={() => onOpenPlan(session)}
     >
-      ▤ plan ↗
+      <span aria-hidden="true">▤</span> plan <span aria-hidden="true">↗</span>
     </button>
   );
 }
@@ -40,11 +41,16 @@ function OpenLink({ session, open }: { session: Session; open: OpenController })
     <button
       className="openlink"
       type="button"
+      aria-label="Open this session in a local terminal"
       title="Open this session in a local terminal"
       disabled={pending}
       onClick={() => open.onOpen(session)}
     >
-      {pending ? "opening…" : "open ↗"}
+      {pending ? "opening…" : (
+        <>
+          open <span aria-hidden="true">↗</span>
+        </>
+      )}
     </button>
   );
 }
@@ -73,8 +79,10 @@ function AlertRow({
     <div className="alert" id={domId("board", session.id)}>
       <div className="body">
         <div className="r1">
-          <span className="name">{session.project}</span>
-          {session.branch && <span className="rbranch">⑂ {session.branch}</span>}
+          <span className="name" title={session.project}>
+            {session.project}
+          </span>
+          <Branch branch={session.branch} className="rbranch" />
           <PlanLink session={session} onOpenPlan={onOpenPlan} />
           {attention && (
             <span className="waiting" title={`Waiting since ${attention.since}`}>
@@ -84,7 +92,9 @@ function AlertRow({
         </div>
         <div className="cause">{attention ? causeLabel(attention.cause) : "Needs attention"}</div>
         {attention?.evidence ? (
-          <div className="evidence">{attention.evidence}</div>
+          <div className="evidence" title={attention.evidence}>
+            {attention.evidence}
+          </div>
         ) : attention?.detailsOnSource ? (
           <div className="evidence onsource">
             Details available only on {session.machine ?? "the source machine"}
@@ -102,7 +112,11 @@ function AlertRow({
         disabled={pending || !session.cwd}
         onClick={() => open.onOpen(session)}
       >
-        {pending ? "Opening…" : "Open session →"}
+        {pending ? "Opening…" : (
+          <>
+            Open session <span aria-hidden="true">→</span>
+          </>
+        )}
       </button>
     </div>
   );
@@ -129,21 +143,32 @@ function CompactRow({
     <div className={done ? "row done" : "row"} id={domId("board", session.id)}>
       <Tile tool={session.tool} small />
       <div>
-        <div className="name">{session.project}</div>
-        <div className="branch">⑂ {session.branch ?? "—"}</div>
+        <div className="name" title={session.project}>
+          {session.project}
+        </div>
+        {session.branch ? (
+          <Branch branch={session.branch} className="branch" />
+        ) : (
+          <span className="branch" aria-label="no branch">
+            <span aria-hidden="true">⑂ </span>—
+          </span>
+        )}
       </div>
-      <div className="act">
-        {done ? "✓ " : "▸ "}
+      <div className="act" title={session.activity ?? undefined}>
+        <span className="sr-only">{done ? "Finished: " : "Running: "}</span>
+        <span aria-hidden="true">{done ? "✓ " : "▸ "}</span>
         {session.activity ?? ""}
       </div>
       <div className="mini">
-        {failed && <span className="openerr" title={failed}>open failed</span>}
+        {failed && (
+          <span className="openerr" title={failed}>
+            {failed}
+          </span>
+        )}
         <OpenLink session={session} open={open} />
         <PlanLink session={session} onOpenPlan={onOpenPlan} />
         <Diff diff={session.diff} />
-        <span>
-          ↑{abbrevTokens(session.tokensIn)}/{abbrevTokens(session.tokensOut)}
-        </span>
+        <Tokens tokensIn={session.tokensIn} tokensOut={session.tokensOut} />
         <Cost usd={session.costUsd} show={showCost} />
         <Machine host={session.machine} />
         <span className="age">{relativeAge(session.lastEventAt, now)}</span>

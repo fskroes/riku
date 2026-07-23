@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import type { LinkedSession, ProjectRef, WorkItem, WorkStatus } from "./types";
 import { domId, shortModel, sourceLabel } from "./format";
-import { Machine, Tile, useFlash } from "./ui";
+import { Branch, Machine, Tile, useFlash } from "./ui";
 import { useWork } from "./useWork";
 
 const COLUMNS: { key: WorkStatus; label: string }[] = [
@@ -113,20 +113,35 @@ function WorkLoading() {
 
 /** The linked Agent Session chip — the Work Link, made visible. Clicking it
  *  cross-links to the same session's card on the Board. */
+const SESSION_STATE_LABEL: Record<LinkedSession["status"], string> = {
+  attention: "needs attention",
+  finished: "finished",
+  active: "running",
+};
+
 function SessionChip({ session, onOpen }: { session: LinkedSession; onOpen: OpenSession }) {
   const dot = session.status === "attention" ? "attention" : session.status === "finished" ? "finished" : "live";
+  const model = shortModel(session.model);
   return (
     <button className="link-sess" type="button" title="Open this session on the Board" onClick={() => onOpen(session.id)}>
       <Tile tool={session.tool} small />
       <span className="who">
-        <span className="repo">{session.project}</span>
+        <span className="repo" title={session.project}>
+          {session.project}
+        </span>
         <span className="sub">
-          {[shortModel(session.model), session.branch && `⑂ ${session.branch}`].filter(Boolean).join(" · ")}
+          {model && <span>{model}</span>}
+          <Branch branch={session.branch} />
           <Machine host={session.machine} />
         </span>
       </span>
-      <span className={`dot ${dot}`} style={{ marginLeft: 2 }} />
-      <span className="go">→</span>
+      {/* The status dot is colour-only decoration; its meaning is carried as
+          screen-reader text so the chip's state is not glyph/colour-only (audit M4). */}
+      <span className="sr-only">status: {SESSION_STATE_LABEL[session.status]}</span>
+      <span className={`dot ${dot}`} style={{ marginLeft: 2 }} aria-hidden="true" />
+      <span className="go" aria-hidden="true">
+        →
+      </span>
     </button>
   );
 }
