@@ -17,24 +17,27 @@ function machineCount(sessions: Session[]): number {
   return hosts.size;
 }
 
-/** The rail's Relay stat (C7). Grey dot with no Relay (zero-setup solo mode);
- *  green dot + machine count when subscribed and live; amber while reconnecting.
- *  The words live in the tooltip — the rail only has room for the count. */
+/** The rail's Relay stat (C7). Solo mode (no Relay) shows a hollow grey ring;
+ *  subscribed-and-live shows a solid green dot + machine count; reconnecting
+ *  shows a hollow amber ring. Shape — not colour alone — separates the states
+ *  (audit H3), and each carries an `aria-label` so the words are never tooltip-
+ *  only. The count sits beside the dot; the rest lives in the accessible name. */
 function RelayStat({ relay, machines }: { relay: RelayStatus; machines: number }) {
   if (!relay.configured) {
+    const label = "Relay: none configured — solo / local mode";
     return (
-      <span className="stat" title="No Relay configured — solo / local mode">
-        <span className="dot finished" /> ·
+      <span className="stat" role="img" aria-label={label} title={label}>
+        <span className="dot ring finished" aria-hidden="true" /> ·
       </span>
     );
   }
-  const label = `${machines} machine${machines === 1 ? "" : "s"}`;
+  const machineText = `${machines} machine${machines === 1 ? "" : "s"}`;
+  const label = relay.connected
+    ? `Relay: subscribed and live · ${machineText}`
+    : "Relay: reconnecting…";
   return (
-    <span
-      className="stat"
-      title={relay.connected ? `Subscribed to a Relay (C7) · ${label}` : "Reconnecting to the Relay…"}
-    >
-      <span className={`dot ${relay.connected ? "live" : "attention"}`} />
+    <span className="stat" role="img" aria-label={label} title={label}>
+      <span className={`dot ${relay.connected ? "live" : "ring attention"}`} aria-hidden="true" />
       {machines}
     </span>
   );
@@ -65,7 +68,7 @@ function useShowCost(): [boolean, () => void] {
 }
 
 export default function App() {
-  const { sessions, connected } = useSessions();
+  const { sessions, connected, loaded, everConnected } = useSessions();
   const relay = useRelay();
   const open = useOpen();
   const now = useNow(15000);
@@ -116,32 +119,47 @@ export default function App() {
     setWorkFocus(null);
   };
 
+  const liveLabel = `${live} live session${live === 1 ? "" : "s"}`;
+  const streamLabel = connected ? "Live stream: connected" : "Live stream: reconnecting…";
+  // The stream has dropped only after it once connected — the honest signal for a
+  // reconnecting banner (before the first connect, the Board shows "connecting…").
+  const reconnecting = everConnected && !connected;
+
   return (
     <div className="app">
       <aside className="rail">
-        <span className="brand" title="Agent Board">
+        <span className="brand" role="img" aria-label="Agent Board" title="Agent Board">
           ▦
         </span>
-        <nav role="tablist">
-          <button type="button" role="tab" aria-pressed={view === "board"} onClick={() => go("board")}>
+        <nav aria-label="Views">
+          <button
+            type="button"
+            aria-current={view === "board" ? "page" : undefined}
+            onClick={() => go("board")}
+          >
             Board
           </button>
-          <button type="button" role="tab" aria-pressed={view === "work"} onClick={() => go("work")}>
+          <button
+            type="button"
+            aria-current={view === "work" ? "page" : undefined}
+            onClick={() => go("work")}
+          >
             Work Items
           </button>
         </nav>
         <div className="foot">
-          <span className="stat" title={`${live} live session${live === 1 ? "" : "s"}`}>
-            <span className="dot live" /> {live}
+          <span className="stat" role="img" aria-label={liveLabel} title={liveLabel}>
+            <span className="dot live" aria-hidden="true" /> {live}
           </span>
           <RelayStat relay={relay} machines={machines} />
-          <span className="stat" title={connected ? "Live stream connected" : "Reconnecting…"}>
-            <span className={`dot ${connected ? "live" : "finished"}`} />
+          <span className="stat" role="img" aria-label={streamLabel} title={streamLabel}>
+            <span className={`dot ${connected ? "live" : "ring finished"}`} aria-hidden="true" />
           </span>
           <button
             type="button"
             className="costtoggle"
             aria-pressed={showCost}
+            aria-label={showCost ? "Hide estimated costs" : "Show estimated costs"}
             onClick={toggleCost}
             title={
               showCost
@@ -155,10 +173,17 @@ export default function App() {
       </aside>
 
       <main className={`stage ${view === "work" ? "view-work" : "view-board"}`}>
+        {reconnecting && (
+          <div className="reconnecting" role="status">
+            <span className="dot" aria-hidden="true" />
+            Reconnecting to the live stream…
+          </div>
+        )}
         {view === "board" ? (
           <Board
             sessions={sessions}
             now={now}
+            loading={!loaded}
             showCost={showCost}
             focusId={boardFocus}
             open={open}

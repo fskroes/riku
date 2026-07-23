@@ -171,6 +171,7 @@ export type OpenPlan = (session: Session) => void;
 export function Board({
   sessions,
   now,
+  loading,
   showCost,
   focusId,
   open,
@@ -178,6 +179,7 @@ export function Board({
 }: {
   sessions: Session[];
   now: number;
+  loading?: boolean;
   showCost: boolean;
   focusId: string | null;
   open: OpenController;
@@ -188,6 +190,21 @@ export function Board({
   const attention = sessions.filter((s) => s.status === "attention").sort(byOldestWaiting);
   const active = sessions.filter((s) => s.status === "active").sort(byMostRecent);
   const finished = sessions.filter((s) => s.status === "finished").sort(byMostRecent);
+
+  // Before the first snapshot resolves, "connecting…" — not the settled empty
+  // state — so the Board never flashes "no sessions" on first paint (audit M6).
+  if (sessions.length === 0 && loading) {
+    return (
+      <div className="board-loading">
+        <div className="connecting" role="status">
+          <span className="dot doing" aria-hidden="true" /> Connecting to the live stream…
+        </div>
+        <div className="skeleton sk-card" aria-hidden="true" />
+        <div className="skeleton sk-row" aria-hidden="true" />
+        <div className="skeleton sk-row" aria-hidden="true" />
+      </div>
+    );
+  }
 
   if (sessions.length === 0) {
     return (

@@ -12,7 +12,11 @@
 }
 [data-theme="paper"] {
   --bg-content: #FAF6EF; --surface: #FFFFFF; --surface-raised: #FFFFFF;
-  --ink: #2B241A; --ink-muted: rgba(43, 36, 26, 0.62); --ink-faint: rgba(43, 36, 26, 0.38);
+  /* Secondary/tertiary ink both carry real text (branch, activity, age, est.,
+     todo glyphs), so both must clear WCAG AA (≥4.5:1) on the lightest paper
+     surface (#FAF6EF): muted ≈ 5.9:1, faint ≈ 4.6:1, still two distinct tiers
+     below --ink (audit M5). */
+  --ink: #2B241A; --ink-muted: rgba(43, 36, 26, 0.72); --ink-faint: rgba(43, 36, 26, 0.64);
   --hairline: rgba(43, 36, 26, 0.12);
   --accent: #B4552D; --accent-soft: rgba(180, 85, 45, 0.12);
   --positive: #2E7D51; --warning: #B07514; --negative: #C24438; --info: #4A5FB5;
@@ -31,6 +35,15 @@ body {
 }
 .meta, .age, .diff, .cost, .band .n, .work-head .prog { font-variant-numeric: tabular-nums; }
 
+/* One shared keyboard-focus ring for every interactive surface — rail, Board
+   cards, Work Items, menus, segmented toggles and graph nodes (audit C1). No
+   custom control defined its own, so the UA outline (invisible on transparent
+   backgrounds) was the only cue. ≥2px and ≥3:1 against every surface. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Graph nodes clip their content (overflow:hidden) and live inside a scroll
+   viewport, so draw their ring just inside the border box where nothing clips it. */
+.gnode:focus-visible { outline-offset: -2px; }
+
 .label-micro { font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); font-weight: 500; }
 
 /* app frame: a slim icon rail on the left, full-width content beside it */
@@ -47,7 +60,7 @@ body {
   font: 500 12px var(--font-ui); letter-spacing: .06em; padding: 10px 6px; border-radius: 7px; cursor: pointer;
 }
 .rail nav button:hover { background: var(--ghost); }
-.rail nav button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.rail nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .rail .foot { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 12px; font: 500 11px var(--font-mono); color: var(--ink-muted); }
 .rail .stat { display: flex; flex-direction: column; align-items: center; gap: 3px; }
 .rail .costtoggle { border: 1px solid var(--hairline); background: transparent; color: var(--ink-faint); width: 24px; height: 24px; border-radius: 50%; cursor: pointer; font: 600 11px var(--font-mono); }
@@ -66,6 +79,12 @@ body {
 .dot.finished, .dot.todo { background: var(--ink-faint); }
 .dot.done { background: var(--positive); }
 .dot.live { background: var(--positive); }
+/* Shape, not just colour, separates the rail's connection states (audit H3): a
+   solid dot = connected/live, a hollow ring = degraded (reconnecting or solo),
+   so the three states stay distinct without relying on hue. */
+.dot.ring { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+.dot.ring.attention { color: var(--warning); }
+.dot.ring.finished { color: var(--ink-faint); }
 .age { color: var(--ink-faint); font-family: var(--font-mono); font-size: 11px; flex: none; }
 
 /* card stats (C5): live git +/- and the labelled cost estimate */
@@ -113,6 +132,26 @@ body {
 .pillstat { color: var(--warning); }
 
 .empty { text-align: center; color: var(--ink-muted); padding: 32px 0; font-size: 13px; }
+
+/* Unobtrusive banner shown when the local event stream drops after a first
+   successful connect (audit M6): a quiet, accessible "reconnecting" cue rather
+   than the rail dot alone. Amber hairline, no layout shift for the content. */
+.reconnecting {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 12px;
+  padding: 7px 12px; border: 1px solid var(--warning); border-radius: var(--r-md);
+  background: rgba(176, 117, 20, 0.08); color: var(--warning);
+  font-family: var(--font-mono); font-size: 12px;
+}
+.reconnecting .dot { background: var(--warning); }
+
+/* Board first paint: "connecting…" is distinct from the settled empty state
+   (audit M6) — a labelled status plus a shell skeleton of the focus board. */
+.board-loading { max-width: 1480px; margin: 0 auto; }
+.board-loading .connecting { display: flex; align-items: center; gap: 9px; color: var(--ink-muted); font-family: var(--font-mono); font-size: 13px; padding: 8px 2px 18px; border-bottom: 1px solid var(--hairline); }
+.board-loading .connecting .dot { background: var(--info); }
+.skeleton { border-radius: var(--r-md); background: var(--ghost); }
+.board-loading .sk-card { height: 210px; margin: 18px 0 28px; }
+.board-loading .sk-row { height: 44px; margin-bottom: 8px; }
 
 /* segmented toggle (the in-view Kanban | Graph switch) */
 .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--r-md); background: var(--ghost); }
