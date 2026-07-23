@@ -1,9 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import type { LinkedSession, ProjectRef, WorkItem, WorkStatus } from "./types";
 import { domId, shortModel, sourceLabel } from "./format";
 import { Branch, Machine, Tile, useFlash } from "./ui";
 import { useWork } from "./useWork";
+import {
+  agentAccessibleText,
+  blockedByLabel,
+  blocksLabel,
+  buildGraphModel,
+  computeDepths,
+  lineageOf,
+  nodeAccessibleName,
+  readingOrder,
+  statusLabel,
+} from "./graph";
 
 const COLUMNS: { key: WorkStatus; label: string }[] = [
   { key: "todo", label: "To do" },
@@ -229,121 +240,26 @@ const NODE_H = 74;
 const GAP_X = 60;
 const GAP_Y = 18;
 
-/** Longest-path depth (graph column) per item, over in-set blocked-by edges.
- *  Cycles resolve to depth 0 rather than looping. */
-function computeDepths(items: WorkItem[]): Map<string, number> {
-  const byId = new Map(items.map((i) => [i.id, i]));
-  const depth = new Map<string, number>();
-  const visiting = new Set<string>();
-  const d = (id: string): number => {
-    const memo = depth.get(id);
-    if (memo !== undefined) return memo;
-    if (visiting.has(id)) return 0; // cycle guard
-    visiting.add(id);
-    const blockers = (byId.get(id)?.blockedBy ?? []).filter((b) => byId.has(b));
-    const val = blockers.length ? 1 + Math.max(...blockers.map(d)) : 0;
-    visiting.delete(id);
-    depth.set(id, val);
-    return val;
-  };
-  items.forEach((i) => d(i.id));
-  return depth;
-}
-
 /** The accent colour for a status: green done, indigo doing, faint todo. */
 function statusColor(status: WorkStatus): string {
   return status === "done" ? "var(--positive)" : status === "doing" ? "var(--info)" : "var(--ink-faint)";
 }
 
-interface GraphModel {
-  edges: { from: string; to: string }[];
-  blockers: Map<string, string[]>; // id -> in-set ids it is blocked by
-  dependents: Map<string, string[]>; // id -> in-set ids blocked by it
-  criticalNodes: Set<string>;
-  criticalEdges: Set<string>; // "from->to" keys along the critical path
-}
-
-/** Blocker/dependent adjacency, the blocker→dependent edge list, and the critical
- *  path: the single longest dependency chain, so it can be drawn as a spine. Uses
- *  only in-set edges and is cycle-guarded (matches computeDepths' tolerance). */
-function buildGraphModel(items: WorkItem[], depth: Map<string, number>): GraphModel {
-  const byId = new Map(items.map((i) => [i.id, i]));
-  const blockers = new Map<string, string[]>();
-  const dependents = new Map<string, string[]>();
-  for (const it of items) dependents.set(it.id, []);
-  for (const it of items) {
-    const bs = it.blockedBy.filter((b) => byId.has(b));
-    blockers.set(it.id, bs);
-    for (const b of bs) dependents.get(b)!.push(it.id);
-  }
-  const edges: { from: string; to: string }[] = [];
-  for (const it of items) for (const b of blockers.get(it.id)!) edges.push({ from: b, to: it.id });
-
-  // Longest downstream chain from each node (by node count), cycle-guarded.
-  const best = new Map<string, { len: number; next: string | null }>();
-  const visiting = new Set<string>();
-  const longest = (id: string): { len: number; next: string | null } => {
-    const memo = best.get(id);
-    if (memo) return memo;
-    if (visiting.has(id)) return { len: 1, next: null };
-    visiting.add(id);
-    let pick: { len: number; next: string | null } = { len: 1, next: null };
-    for (const dep of dependents.get(id)!) {
-      const sub = longest(dep);
-      if (sub.len + 1 > pick.len) pick = { len: sub.len + 1, next: dep };
-    }
-    visiting.delete(id);
-    best.set(id, pick);
-    return pick;
-  };
-  items.forEach((i) => longest(i.id));
-
-  // The critical path starts at the root (depth 0) with the longest chain.
-  let start: string | null = null;
-  let bestLen = 0;
-  for (const it of items) {
-    if ((depth.get(it.id) ?? 0) !== 0) continue;
-    const len = best.get(it.id)!.len;
-    if (len > bestLen) {
-      bestLen = len;
-      start = it.id;
-    }
-  }
-  const criticalNodes = new Set<string>();
-  const criticalEdges = new Set<string>();
-  for (let cur = start; cur; cur = best.get(cur)!.next) {
-    criticalNodes.add(cur);
-    const nxt = best.get(cur)!.next;
-    if (nxt) criticalEdges.add(`${cur}->${nxt}`);
-  }
-  return { edges, blockers, dependents, criticalNodes, criticalEdges };
-}
-
-/** The lineage of `id`: itself plus every ancestor (up the blocked-by chain) and
- *  every descendant (down the dependents chain) — what hovering highlights. */
-function lineageOf(model: GraphModel, id: string): Set<string> {
-  const set = new Set<string>([id]);
-  const up = (x: string): void => {
-    for (const b of model.blockers.get(x) ?? []) if (!set.has(b)) (set.add(b), up(b));
-  };
-  const down = (x: string): void => {
-    for (const dep of model.dependents.get(x) ?? []) if (!set.has(dep)) (set.add(dep), down(dep));
-  };
-  up(id);
-  down(id);
-  return set;
-}
-
 /** The graph viewport: native overflow scroll plus grab-and-drag panning, so a
- *  wide dependency graph can be moved left↔right (and up/down) with the mouse.
- *  A drag starting on a node is left to the node — its click opens the session. */
+ *  wide dependency graph can be moved left↔right (and up/down). Uses Pointer
+ *  Events so a mouse or pen can drag-pan; touch keeps the browser's native
+ *  momentum scroll (we don't capture it). A drag starting on a node is left to the
+ *  node — its click opens the session. Keyboard users pan implicitly: focusing a
+ *  node scrolls it into view (see Graph), so the whole graph is reachable by Tab
+ *  without a drag (audit L2). */
 function GraphScroll({ children }: { children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const from = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const [panning, setPanning] = useState(false);
 
-  const onMouseDown = (e: ReactMouseEvent): void => {
-    if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
+  const onPointerDown = (e: ReactPointerEvent): void => {
+    // Mouse/pen only: leave touch to native scrolling so it isn't hijacked.
+    if (e.pointerType === "touch" || e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
     const el = ref.current;
     if (!el) return;
     from.current = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop };
@@ -352,7 +268,7 @@ function GraphScroll({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!panning) return;
-    const move = (e: MouseEvent): void => {
+    const move = (e: PointerEvent): void => {
       const f = from.current;
       const el = ref.current;
       if (!f || !el) return;
@@ -363,52 +279,71 @@ function GraphScroll({ children }: { children: ReactNode }) {
       from.current = null;
       setPanning(false);
     };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", stop);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
     return () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", stop);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
     };
   }, [panning]);
 
   return (
-    <div ref={ref} className={`graph-scroll${panning ? " panning" : ""}`} onMouseDown={onMouseDown}>
+    <div
+      ref={ref}
+      className={`graph-scroll${panning ? " panning" : ""}`}
+      onPointerDown={onPointerDown}
+      role="group"
+      aria-label="Dependency graph, drag to pan"
+    >
       {children}
     </div>
   );
 }
 
-/** Decodes the node encoding at a glance — status glyphs, the critical spine, and
- *  the live-agent rings. */
+/** The agent-pill wording for a linked session's status, shared by the graph node
+ *  and the ordered reading so both name the state the same way. */
+function agentPillText(status: LinkedSession["status"]): string {
+  return status === "attention" ? "⚠ attention" : status === "finished" ? "idle" : "◉ agent";
+}
+
+/** Decodes every encoding the graph still relies on — status glyphs, the critical
+ *  spine, and the live-agent rings — so nothing is colour/position-only without a
+ *  key (audit H4/L2). The ring wording is reduced-motion-safe: it names what each
+ *  ring *means*, not that it pulses, so it stays accurate when motion is off. */
 function GraphLegend() {
   return (
-    <div className="graph-legend">
+    <div className="graph-legend" aria-label="Graph legend">
       <span>
-        <i className="lg" style={{ color: "var(--positive)" }}>
+        <i className="lg" style={{ color: "var(--positive)" }} aria-hidden="true">
           ✓
         </i>{" "}
         done
       </span>
       <span>
-        <i className="lg" style={{ color: "var(--info)" }}>
+        <i className="lg" style={{ color: "var(--info)" }} aria-hidden="true">
           ◐
         </i>{" "}
         doing
       </span>
       <span>
-        <i className="lg" style={{ color: "var(--ink-faint)" }}>
+        <i className="lg" style={{ color: "var(--ink-faint)" }} aria-hidden="true">
           ○
         </i>{" "}
-        todo
+        to do
       </span>
       <span>
-        <i className="lg-crit" /> critical path
+        <i className="lg-crit" aria-hidden="true" /> critical path
       </span>
       <span>
-        <i className="lg-pulse active" /> agent working
+        <i className="lg-pulse active" aria-hidden="true" /> agent working
       </span>
       <span>
-        <i className="lg-pulse attention" /> needs attention
+        <i className="lg-pulse attention" aria-hidden="true" /> needs attention
+      </span>
+      <span>
+        <i className="lg-pulse finished" aria-hidden="true" /> agent idle
       </span>
     </div>
   );
@@ -417,15 +352,23 @@ function GraphLegend() {
 /**
  * The dependency-graph rendering (ADR 0005): the item set laid out left to right
  * by blocked-by depth, edges from each blocker to its dependent. The longest
- * dependency chain is drawn as an amber "critical path" spine; hovering a node
- * highlights its full lineage (ancestors + descendants) and dims the rest; a node
- * an agent is live on gets a status-coloured pulsing ring (green active, amber
- * attention). Done items read at a glance via a ✓ glyph and a green wash.
+ * dependency chain is drawn as an amber "critical path" spine; hovering *or
+ * focusing* a node highlights its full lineage (ancestors + descendants) and dims
+ * the rest; a node an agent is live on gets a status-coloured pulsing ring (green
+ * active, amber attention). Done items read at a glance via a ✓ glyph and a green
+ * wash.
+ *
+ * Accessibility (#37): nodes render in dependency reading order so Tab meets a
+ * blocker before the item it blocks; each node's `aria-label` states its status,
+ * critical-path membership, and blocked-by / blocks relations in words (edges are
+ * decorative `aria-hidden` SVG); focusing a node reveals its lineage and scrolls
+ * it into view, so a keyboard user can traverse and pan without a drag. The
+ * narrow-screen equivalent is `GraphReading`.
  */
 function Graph({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: OpenSession }) {
-  const [hover, setHover] = useState<string | null>(null);
+  const [active, setActive] = useState<string | null>(null);
 
-  const { pos, width, height, model } = useMemo(() => {
+  const { pos, ordered, width, height, model } = useMemo(() => {
     const depth = computeDepths(items);
     const model = buildGraphModel(items, depth);
 
@@ -443,12 +386,13 @@ function Graph({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: Ope
     return {
       pos,
       model,
+      ordered: readingOrder(items, depth),
       width: (maxCol + 1) * NODE_W + maxCol * GAP_X,
       height: maxRow * NODE_H + Math.max(0, maxRow - 1) * GAP_Y,
     };
   }, [items]);
 
-  const lineage = useMemo(() => (hover ? lineageOf(model, hover) : null), [model, hover]);
+  const lineage = useMemo(() => (active ? lineageOf(model, active) : null), [model, active]);
 
   if (items.length === 0) return <div className="empty">No Work Items to graph.</div>;
 
@@ -476,47 +420,121 @@ function Graph({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: Ope
           );
         })}
       </svg>
-      {items.map((item) => {
+      {ordered.map((item) => {
         const p = pos.get(item.id)!;
         const crit = model.criticalNodes.has(item.id);
         const dim = lineage ? !lineage.has(item.id) : false;
         const agent = item.session ? ` has-agent agent-${item.session.status}` : "";
+        // A node with a linked session is a button that opens it; a node without
+        // one is a focusable region whose purpose is to reveal its lineage on
+        // focus (audit L4 — no dead click, and the same button/div split as the
+        // narrow GraphReading). Both stay keyboard-reachable so a Tab user can read
+        // every node's dependency relations from its aria-label.
+        const Node = item.session ? "button" : "div";
         return (
-          <button
+          <Node
             key={item.id}
-            type="button"
             className={`gnode is-${item.status}${crit ? " crit" : ""}${dim ? " dim" : ""}${agent}`}
             id={domId("item", item.id)}
             style={{ left: p.x, top: p.y, width: NODE_W, height: NODE_H }}
-            title={item.session ? "Open the linked session on the Board" : item.title}
-            onMouseEnter={() => setHover(item.id)}
-            onMouseLeave={() => setHover(null)}
-            onClick={() => item.session && onOpenSession(item.session.id)}
+            aria-label={nodeAccessibleName(item, model)}
+            title={item.title}
+            onMouseEnter={() => setActive(item.id)}
+            onMouseLeave={() => setActive((a) => (a === item.id ? null : a))}
+            onFocus={(e) => {
+              setActive(item.id);
+              // Keyboard pan: bring the focused node into the scroll viewport.
+              e.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" });
+            }}
+            onBlur={() => setActive((a) => (a === item.id ? null : a))}
+            {...(item.session
+              ? { type: "button" as const, onClick: () => onOpenSession(item.session!.id) }
+              : { tabIndex: 0 })}
           >
             <div className="gtop">
-              <span className="glyph" style={{ color: statusColor(item.status) }}>
+              <span className="glyph" aria-hidden="true" style={{ color: statusColor(item.status) }}>
                 {STATUS_GLYPH[item.status]}
               </span>
               <span className="id">{item.id}</span>
-              {crit && <span className="crit-tag">critical</span>}
-              <span className="gright">
+              {crit && (
+                <span className="crit-tag" aria-hidden="true">
+                  critical
+                </span>
+              )}
+              <span className="gright" aria-hidden="true">
                 {item.session && (
-                  <span className={`agent-pill ${item.session.status}`}>
-                    {item.session.status === "attention"
-                      ? "⚠ attention"
-                      : item.session.status === "finished"
-                        ? "idle"
-                        : "◉ agent"}
-                  </span>
+                  <span className={`agent-pill ${item.session.status}`}>{agentPillText(item.session.status)}</span>
                 )}
                 {item.effort && <span className="eff">{item.effort}</span>}
               </span>
             </div>
             <div className="gtitle">{item.title}</div>
-          </button>
+          </Node>
         );
       })}
     </div>
+  );
+}
+
+/**
+ * The narrow-screen equivalent of the dependency graph (audit H4): the same items
+ * in dependency reading order (blockers before what they block) as a real ordered
+ * list, so the structure a wide screen shows spatially is available where the
+ * pan-scroll graph doesn't fit. Each row names its status, critical-path
+ * membership, and blocked-by / blocks relations; a row with a linked session opens
+ * it on the Board, matching the graph node's action.
+ */
+function GraphReading({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: OpenSession }) {
+  const { ordered, model } = useMemo(() => {
+    const depth = computeDepths(items);
+    return { ordered: readingOrder(items, depth), model: buildGraphModel(items, depth) };
+  }, [items]);
+
+  if (items.length === 0) return <div className="empty">No Work Items to graph.</div>;
+
+  return (
+    <ol className="graph-reading" aria-label="Work Items in dependency order">
+      {ordered.map((item) => {
+        const crit = model.criticalNodes.has(item.id);
+        const blocked = blockedByLabel(model, item.id);
+        const blocks = blocksLabel(model, item.id);
+        const Row = item.session ? "button" : "div";
+        return (
+          <li key={item.id}>
+            <Row
+              className={`gr-node is-${item.status}${crit ? " crit" : ""}`}
+              id={domId("reading", item.id)}
+              {...(item.session
+                ? { type: "button" as const, onClick: () => onOpenSession(item.session!.id) }
+                : {})}
+            >
+              <div className="gr-top">
+                <span className="glyph" aria-hidden="true" style={{ color: statusColor(item.status) }}>
+                  {STATUS_GLYPH[item.status]}
+                </span>
+                <span className="id">{item.id}</span>
+                <span className="sr-only">status: {statusLabel(item.status)}</span>
+                {crit && <span className="crit-tag">critical path</span>}
+                {item.session && (
+                  <span className={`agent-pill ${item.session.status}`}>
+                    <span aria-hidden="true">{agentPillText(item.session.status)}</span>
+                    <span className="sr-only">{agentAccessibleText(item.session.status)}</span>
+                  </span>
+                )}
+                {item.effort && <span className="eff">{item.effort}</span>}
+              </div>
+              <div className="gr-title">{item.title}</div>
+              {(blocked || blocks) && (
+                <div className="gr-rel">
+                  {blocked && <span className="gr-blocked">{blocked}</span>}
+                  {blocks && <span className="gr-blocks">{blocks}</span>}
+                </div>
+              )}
+            </Row>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -640,10 +658,16 @@ export function WorkItems({
         <Kanban items={items} onOpenSession={onOpenSession} />
       ) : (
         <>
-          <GraphLegend />
-          <GraphScroll>
-            <Graph items={items} onOpenSession={onOpenSession} />
-          </GraphScroll>
+          {/* Wide screens: the spatial pan-scroll graph. Narrow screens: the same
+              structure as an ordered dependency list (audit H4). CSS shows exactly
+              one, so a screen reader is never given both. */}
+          <div className="graph-visual">
+            <GraphLegend />
+            <GraphScroll>
+              <Graph items={items} onOpenSession={onOpenSession} />
+            </GraphScroll>
+          </div>
+          <GraphReading items={items} onOpenSession={onOpenSession} />
         </>
       )}
     </>
