@@ -324,6 +324,37 @@ body {
 .graph-legend .lg-pulse { width: 9px; height: 9px; border-radius: 50%; }
 .graph-legend .lg-pulse.active { background: var(--positive); box-shadow: 0 0 0 2px rgba(46, 125, 81, .22); }
 .graph-legend .lg-pulse.attention { background: var(--warning); box-shadow: 0 0 0 2px rgba(176, 117, 20, .22); }
+.graph-legend .lg-pulse.finished { background: var(--ink-faint); box-shadow: 0 0 0 2px var(--ghost); }
+
+/* The ordered dependency reading — the graph's narrow-screen equivalent (audit
+   H4). Hidden on wide screens (the spatial graph is shown instead); it takes over
+   below 720px where the pan-scroll graph doesn't fit. Exactly one of
+   .graph-visual / .graph-reading is displayed, so a screen reader never meets
+   both representations of the same items. */
+.graph-reading { display: none; list-style: none; margin: 0; padding: 0; }
+.graph-reading > li { margin: 0 0 8px; }
+.gr-node {
+  display: block; width: 100%; text-align: left; box-sizing: border-box;
+  background: var(--surface); border: 1px solid var(--hairline);
+  border-left: 3px solid var(--ink-faint); border-radius: var(--r-md);
+  padding: 10px 12px; color: var(--ink); font: inherit;
+}
+button.gr-node { cursor: pointer; }
+.gr-node.is-doing { border-left-color: var(--info); }
+.gr-node.is-done { border-left-color: var(--positive); background: rgba(46, 125, 81, 0.06); }
+.gr-node.crit { box-shadow: inset 0 0 0 1px var(--warning); }
+.gr-top { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }
+.gr-top .glyph { font-size: 12px; line-height: 1; flex: none; }
+.gr-top .eff { color: var(--ink-faint); margin-left: auto; }
+.gr-top .crit-tag { font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: var(--warning); }
+.gr-top .agent-pill { display: inline-flex; align-items: center; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: var(--r-pill); white-space: nowrap; }
+.gr-top .agent-pill.active { color: var(--positive); background: rgba(46, 125, 81, .14); }
+.gr-top .agent-pill.attention { color: var(--warning); background: rgba(176, 117, 20, .16); }
+.gr-top .agent-pill.finished { color: var(--ink-faint); background: var(--ghost); }
+.gr-title { font-weight: 550; font-size: 13px; margin-top: 5px; line-height: 1.3; }
+.gr-rel { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 12px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+.gr-blocked::before { content: "↑ "; color: var(--ink-faint); }
+.gr-blocks::before { content: "↓ "; color: var(--ink-faint); }
 
 /* narrow screens: the rail becomes a horizontal topbar, single-column kanban,
    stacked stream rows */
@@ -340,6 +371,9 @@ body {
   .rail .foot { margin-top: 0; margin-left: auto; flex-direction: row; gap: 10px; }
   .rail .stat { flex-direction: row; gap: 5px; }
   .work-head { flex-wrap: wrap; }
+  /* The pan-scroll graph doesn't fit a phone; swap to the ordered reading. */
+  .graph-visual { display: none; }
+  .graph-reading { display: block; }
 }
 
 @media (prefers-reduced-motion: reduce) {
