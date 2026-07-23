@@ -71,7 +71,6 @@ function AlertRow({
   const failed = open.error?.id === session.id ? open.error.message : null;
   return (
     <div className="alert" id={domId("board", session.id)}>
-      <Tile tool={session.tool} />
       <div className="body">
         <div className="r1">
           <span className="name">{session.project}</span>
@@ -165,12 +164,14 @@ function Band({ dot, label, count }: { dot: string; label: string; count: number
 
 export type OpenPlan = (session: Session) => void;
 
-/** The attention-first stream (ADR 0005): alerts pinned up top, running sessions
- *  compact, finished dimmed below. `focusId` scrolls to and flashes one card when
- *  arriving from a Work Item's session chip. */
+/** The attention-first focus board (ADR 0005): the oldest need is the primary
+ *  decision, later needs queue beside it, running sessions stay compact, and
+ *  finished sessions dim below the queue. `focusId` scrolls to and flashes one
+ *  card when arriving from a Work Item's session chip. */
 export function Board({
   sessions,
   now,
+  loading,
   showCost,
   focusId,
   open,
@@ -178,6 +179,7 @@ export function Board({
 }: {
   sessions: Session[];
   now: number;
+  loading?: boolean;
   showCost: boolean;
   focusId: string | null;
   open: OpenController;
@@ -189,6 +191,21 @@ export function Board({
   const active = sessions.filter((s) => s.status === "active").sort(byMostRecent);
   const finished = sessions.filter((s) => s.status === "finished").sort(byMostRecent);
 
+  // Before the first snapshot resolves, "connecting…" — not the settled empty
+  // state — so the Board never flashes "no sessions" on first paint (audit M6).
+  if (sessions.length === 0 && loading) {
+    return (
+      <div className="board-loading">
+        <div className="connecting" role="status">
+          <span className="dot doing" aria-hidden="true" /> Connecting to the live stream…
+        </div>
+        <div className="skeleton sk-card" aria-hidden="true" />
+        <div className="skeleton sk-row" aria-hidden="true" />
+        <div className="skeleton sk-row" aria-hidden="true" />
+      </div>
+    );
+  }
+
   if (sessions.length === 0) {
     return (
       <div className="stream">
@@ -197,22 +214,67 @@ export function Board({
     );
   }
 
+  const [next, ...later] = attention;
+
   return (
-    <div className="stream">
-      <Band dot="attention" label="Needs attention" count={attention.length} />
-      {attention.map((s) => (
-        <AlertRow key={s.id} session={s} now={now} open={open} onOpenPlan={onOpenPlan} />
-      ))}
+    <div className="focus-board">
+      <main>
+        <header className="board-heading">
+          <div>
+            <span className="label-micro">Next decision</span>
+            <h1>{next ? "One thing at a time." : "The desk is clear."}</h1>
+          </div>
+          <p>{later.length ? `${later.length} more waiting behind this` : "No other needs queued"}</p>
+        </header>
 
-      <Band dot="active" label="Running" count={active.length} />
-      {active.map((s) => (
-        <CompactRow key={s.id} session={s} now={now} open={open} showCost={showCost} onOpenPlan={onOpenPlan} />
-      ))}
+        {next ? (
+          <div className="focus-card">
+            <AlertRow session={next} now={now} open={open} onOpenPlan={onOpenPlan} />
+          </div>
+        ) : (
+          <div className="empty">No Agent Session needs attention.</div>
+        )}
 
-      <Band dot="finished" label="Finished" count={finished.length} />
-      {finished.map((s) => (
-        <CompactRow key={s.id} session={s} now={now} open={open} showCost={showCost} done onOpenPlan={onOpenPlan} />
-      ))}
+        <section className="focus-running">
+          <Band dot="active" label="Running in the background" count={active.length} />
+          {active.map((session) => (
+            <CompactRow
+              key={session.id}
+              session={session}
+              now={now}
+              open={open}
+              showCost={showCost}
+              onOpenPlan={onOpenPlan}
+            />
+          ))}
+        </section>
+      </main>
+
+      <aside>
+        <Band dot="attention" label="Up next" count={later.length} />
+        {later.map((session) => (
+          <AlertRow
+            key={session.id}
+            session={session}
+            now={now}
+            open={open}
+            onOpenPlan={onOpenPlan}
+          />
+        ))}
+
+        <Band dot="finished" label="Finished" count={finished.length} />
+        {finished.map((session) => (
+          <CompactRow
+            key={session.id}
+            session={session}
+            now={now}
+            open={open}
+            showCost={showCost}
+            done
+            onOpenPlan={onOpenPlan}
+          />
+        ))}
+      </aside>
     </div>
   );
 }
