@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import type { DiffStat, Session, Tool } from "./types";
-import { abbrevTokens, formatCost, shortModel } from "./format";
+import { abbrevTokens, diffLabel, formatCost, shortModel, tokensLabel } from "./format";
 
-/** Per-tool tile glyph + accent. One Session Source per tool (issue #5). */
-export const TOOL: Record<Tool, { label: string; color: string }> = {
-  claude: { label: "C", color: "#E8590C" },
-  codex: { label: "◆", color: "#10A37F" },
+/** Per-tool tile glyph, accessible name + accent. One Session Source per tool
+ *  (issue #5). `name` is the screen-reader label so the tile is not announced as
+ *  a bare "C"/"◆" glyph (audit M4). */
+export const TOOL: Record<Tool, { label: string; name: string; color: string }> = {
+  claude: { label: "C", name: "Claude Code", color: "#E8590C" },
+  codex: { label: "◆", name: "Codex", color: "#10A37F" },
 };
 
 /** A clock that ticks every `ms` so relative ages stay fresh. */
@@ -20,10 +22,15 @@ export function useNow(ms: number): number {
 
 /** The tool glyph tile shown on every session card and Work Link chip. */
 export function Tile({ tool, small }: { tool: Tool; small?: boolean }) {
-  const { label, color } = TOOL[tool];
+  const { label, name, color } = TOOL[tool];
   return (
-    <span className={small ? "tile sm" : "tile"} style={{ ["--tile" as string]: color }}>
-      {label}
+    <span
+      className={small ? "tile sm" : "tile"}
+      style={{ ["--tile" as string]: color }}
+      role="img"
+      aria-label={name}
+    >
+      <span aria-hidden="true">{label}</span>
     </span>
   );
 }
@@ -34,8 +41,40 @@ export function Tile({ tool, small }: { tool: Tool; small?: boolean }) {
 export function Machine({ host }: { host: string | null }) {
   if (!host) return null;
   return (
-    <span className="machine" title={`Running on ${host}`}>
-      <span className="mdot" /> {host}
+    <span className="machine" role="img" aria-label={`Running on ${host}`} title={`Running on ${host}`}>
+      <span className="mdot" aria-hidden="true" /> {host}
+    </span>
+  );
+}
+
+/** The git branch chip shared by every session presentation (C5). The `⑂` is
+ *  decorative and hidden; the chip announces as a labelled "branch <name>" and
+ *  the full name is `title`-backed so a clipped branch stays recoverable (audit
+ *  M2/M4). `className` places it in each surface (`.rbranch`, `.branch`, or the
+ *  Work Link `.sub`). Renders nothing for a branchless session. */
+export function Branch({ branch, className }: { branch: string | null; className?: string }) {
+  if (!branch) return null;
+  return (
+    <span className={className} role="img" aria-label={`branch ${branch}`} title={branch}>
+      <span aria-hidden="true">⑂ </span>
+      {branch}
+    </span>
+  );
+}
+
+/** The `↑in/out` token-count stat shared by session cards. The `↑` is decorative
+ *  and hidden; the pair announces as "N tokens in, N tokens out" rather than
+ *  literal glyphs (audit M4). `spaced` sets the roomier `↑ in / out` form used in
+ *  the metadata line vs the tight form used in a compact row. */
+export function Tokens({ tokensIn, tokensOut, spaced }: { tokensIn: number; tokensOut: number; spaced?: boolean }) {
+  const sep = spaced ? " / " : "/";
+  return (
+    <span role="img" aria-label={tokensLabel(tokensIn, tokensOut)}>
+      <span aria-hidden="true">↑</span>
+      {spaced ? " " : ""}
+      {abbrevTokens(tokensIn)}
+      {sep}
+      {abbrevTokens(tokensOut)}
     </span>
   );
 }
@@ -45,9 +84,18 @@ export function Machine({ host }: { host: string | null }) {
 export function Diff({ diff }: { diff: DiffStat | null }) {
   if (!diff) return null;
   return (
-    <span className="diff" title="Lines changed on this branch (uncommitted + since default branch)">
-      <span className="add">+{diff.added}</span>
-      <span className="del">−{diff.removed}</span>
+    <span
+      className="diff"
+      role="img"
+      aria-label={diffLabel(diff)}
+      title="Lines changed on this branch (uncommitted + since default branch)"
+    >
+      <span className="add" aria-hidden="true">
+        +{diff.added}
+      </span>
+      <span className="del" aria-hidden="true">
+        −{diff.removed}
+      </span>
     </span>
   );
 }
@@ -71,10 +119,8 @@ export function Meta({ session, showCost }: { session: Session; showCost: boolea
   return (
     <span className="meta">
       {model && <span className="k">{model}</span>}
-      {session.branch && <span>⑂ {session.branch}</span>}
-      <span>
-        ↑ {abbrevTokens(session.tokensIn)} / {abbrevTokens(session.tokensOut)}
-      </span>
+      <Branch branch={session.branch} />
+      <Tokens tokensIn={session.tokensIn} tokensOut={session.tokensOut} spaced />
       <Diff diff={session.diff} />
       <Cost usd={session.costUsd} show={showCost} />
       <Machine host={session.machine} />

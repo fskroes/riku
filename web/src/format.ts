@@ -1,6 +1,6 @@
 // Small display helpers shared by the Board.
 
-import type { AttentionCause } from "./types";
+import type { AttentionCause, DiffStat } from "./types";
 
 /** The label for each Attention cause. Text carries the triage meaning; all causes
  *  share one visual priority (ADR 0010), so there is no per-cause colour or icon. */
@@ -39,6 +39,18 @@ export function abbrevTokens(n: number): string {
   const k = n / 1000;
   const str = k < 100 ? k.toFixed(1) : k.toFixed(0);
   return `${str.replace(/\.0$/, "")}k`;
+}
+
+/** Screen-reader name for the `↑in/out` token pair, so it announces as words
+ *  rather than "up-arrow 4.7k slash 1.2k" (audit M4). */
+export function tokensLabel(tokensIn: number, tokensOut: number): string {
+  return `${abbrevTokens(tokensIn)} tokens in, ${abbrevTokens(tokensOut)} tokens out`;
+}
+
+/** Screen-reader name for the `+/−` diff stat, so it announces as words rather
+ *  than "plus 12 minus 3" (audit M4). */
+export function diffLabel(diff: DiffStat): string {
+  return `${diff.added} lines added, ${diff.removed} removed`;
 }
 
 /** The source badge label for a project's Work Items. */

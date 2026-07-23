@@ -44,6 +44,14 @@ body {
    viewport, so draw their ring just inside the border box where nothing clips it. */
 .gnode:focus-visible { outline-offset: -2px; }
 
+/* Visually-hidden but screen-reader-readable text — carries facts a sighted user
+   reads from a glyph or grouping (e.g. a row's Running/Finished status) without
+   adding visible chrome (audit M4). */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
 .label-micro { font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); font-weight: 500; }
 
 /* app frame: a slim icon rail on the left, full-width content beside it */
@@ -125,10 +133,12 @@ body {
 .view-board .row { grid-column: 1 / -1; display: grid; grid-template-columns: auto minmax(150px, 240px) 1fr auto; gap: 14px; align-items: center; padding: 8px 12px; border-radius: 8px; background: var(--surface); border: 1px solid var(--hairline); transition: border-color var(--t-fast); }
 .view-board .row:hover { border-color: rgba(43, 36, 26, 0.28); }
 .view-board .row .name { font-weight: 550; }
-.view-board .row .branch { font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.view-board .row .branch { display: block; font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .view-board .row .act { color: var(--ink-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .view-board .row.done { opacity: .65; }
-.view-board .row .mini { display: flex; gap: 12px; align-items: center; font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }
+/* Metadata wraps rather than pushing the row wider than the page at narrow
+   widths / high zoom (audit M6 responsive acceptance, #35 criterion 6). */
+.view-board .row .mini { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }
 .pillstat { color: var(--warning); }
 
 .empty { text-align: center; color: var(--ink-muted); padding: 32px 0; font-size: 13px; }
@@ -226,7 +236,9 @@ body {
 .view-board .alert .cta:disabled, .openlink:disabled { opacity: .55; cursor: default; }
 .openerr { color: var(--negative); font-size: 11px; }
 .view-board .alert .openerr { margin-top: 8px; font-weight: 500; }
-.view-board .row .mini .openerr { white-space: nowrap; cursor: help; }
+/* The open-failure message is shown, not hidden in `title` only (audit M2):
+   its real text, bounded to one ellipsised line, with the full text on hover. */
+.view-board .row .mini .openerr { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
 
 /* WORK ITEMS — per-project kanban plan */
 .work-head { display: flex; align-items: center; gap: 16px; margin-bottom: 10px; }
@@ -376,7 +388,9 @@ body {
   -webkit-line-clamp: 2;
   line-clamp: 2;
 }
-.focus-board > aside .alert .routing { display: none; }
+/* Queued cards keep the same facts as the primary, just tighter — the machine
+   chip stays so local vs remote context is not lost in the queue (audit M3). */
+.focus-board > aside .alert .routing { margin-top: 6px; gap: 8px; }
 .focus-board > aside .row { display: grid; grid-template-columns: auto 1fr; gap: 8px; margin-bottom: 6px; }
 .focus-board > aside .row .act, .focus-board > aside .row .mini { grid-column: 2; }
 .focus-board > aside .row .mini { flex-wrap: wrap; gap: 6px; }
