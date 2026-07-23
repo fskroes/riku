@@ -131,8 +131,11 @@ pub fn local_hostname() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Stamp a session unless it already carries a remote machine identity.
-pub fn stamp(session: &mut Session, machine: &str) {
+/// Stamp a session unless it already carries a remote machine identity. Private to
+/// the Engine: machine stamping is an internal step of local-session production, not
+/// a capability the Engine hands out. Adapters that need a machine label read it from
+/// [`local_hostname`] and label their own values; they never re-stamp Engine output.
+fn stamp(session: &mut Session, machine: &str) {
     if session.machine.is_none() {
         session.machine = Some(machine.to_string());
     }
@@ -229,7 +232,30 @@ mod tests {
 
     use super::{local_hostname, stamp, Engine};
     use chrono::Utc;
-    use sessions::{Session, Status, Tool};
+    use sessions::{Event, Session, Status, Tool};
+    use tokio::sync::broadcast;
+
+    /// Write a one-line Claude transcript for `session_id` under `root/<slug>/`,
+    /// so a test can drive discovery or the live watcher off a real file. Keeps the
+    /// transcript JSON skeleton in one place across the Engine's tests.
+    fn write_transcript(root: &std::path::Path, slug: &str, session_id: &str, cwd: &str) {
+        let project = root.join(slug);
+        fs::create_dir_all(&project).unwrap();
+        let transcript = serde_json::json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": "2026-07-19T10:00:00Z",
+            "cwd": cwd,
+            "gitBranch": "main",
+            "message": {
+                "model": "claude-opus-4-8",
+                "usage": { "input_tokens": 100, "output_tokens": 10 },
+                "content": [{ "type": "text", "text": session_id }]
+            }
+        })
+        .to_string();
+        fs::write(project.join("session.jsonl"), format!("{transcript}\n")).unwrap();
+    }
 
     fn bare_session() -> Session {
         Session {
@@ -266,24 +292,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_exposes_an_enriched_machine_stamped_local_session() {
+    async fn a_watched_transcript_update_reaches_a_subscription_stamped_with_the_machine() {
+        // Prove the live path — filesystem watch → ingest → finalize → broadcast —
+        // carries this machine's identity to a subscriber, not just the snapshot path.
+        // This is the Engine's own guarantee, independent of any Board or Relay wiring.
         let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("-Users-x-repos-foo");
-        fs::create_dir_all(&project).unwrap();
-        let transcript = serde_json::json!({
-            "type": "assistant",
-            "sessionId": "engine-1",
-            "timestamp": "2026-07-19T10:00:00Z",
-            "cwd": "/Users/x/repos/foo",
-            "gitBranch": "main",
-            "message": {
-                "model": "claude-opus-4-8",
-                "usage": { "input_tokens": 100, "output_tokens": 10 },
-                "content": [{ "type": "text", "text": "through the engine" }]
+        let engine = Engine::start(root.path().to_path_buf(), None, "loki.local");
+        let mut rx = engine.subscribe();
+
+        // Write a transcript *after* subscribing so the update travels the live
+        // watcher path rather than being seen only by the initial scan.
+        write_transcript(root.path(), "-Users-x-repos-bar", "watched-1", "/Users/x/repos/bar");
+
+        // The watcher debounces (~250ms) on a dedicated thread, so allow a generous
+        // budget before giving up rather than racing a fixed sleep.
+        let upserted = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await {
+                    Ok(Event::Upsert(session)) if session.id == "watched-1" => return session,
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("event stream closed before the watched update arrived")
+                    }
+                }
             }
         })
-        .to_string();
-        fs::write(project.join("session.jsonl"), format!("{transcript}\n")).unwrap();
+        .await
+        .expect("a watched transcript update should reach the subscription");
+
+        assert_eq!(upserted.machine.as_deref(), Some("loki.local"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_exposes_an_enriched_machine_stamped_local_session() {
+        let root = tempfile::tempdir().unwrap();
+        write_transcript(root.path(), "-Users-x-repos-foo", "engine-1", "/Users/x/repos/foo");
 
         let engine = Engine::start(root.path().to_path_buf(), None, "loki.local");
         let sessions = engine.snapshot();
