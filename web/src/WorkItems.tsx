@@ -171,22 +171,35 @@ function WorkCard({ item, onOpenSession }: { item: WorkItem; onOpenSession: Open
   );
 }
 
-/** The three-column To do / In progress / Done kanban (variant A layout). */
+/** The three-column To do / In progress / Done kanban (variant A layout). Each
+ *  column is a labelled list so a screen reader announces the status, its item
+ *  count, and each Work Item as a list entry; empty columns say so rather than
+ *  showing a bare `0` (audit L3). `role="list"` is kept explicit because
+ *  `list-style:none` drops list semantics in some browsers. */
 function Kanban({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: OpenSession }) {
   return (
     <div className="cols">
       {COLUMNS.map(({ key, label }) => {
         const inCol = items.filter((i) => i.status === key);
+        const countLabel = `${label}, ${inCol.length} ${inCol.length === 1 ? "item" : "items"}`;
         return (
           <div className="col" key={key}>
             <div className="col-head">
-              <span className={`dot ${key}`} />
+              <span className={`dot ${key}`} aria-hidden="true" />
               <b>{label}</b>
               <span className="count">{inCol.length}</span>
             </div>
-            {inCol.map((item) => (
-              <WorkCard key={item.id} item={item} onOpenSession={onOpenSession} />
-            ))}
+            <ul className="col-list" role="list" aria-label={countLabel}>
+              {inCol.length === 0 ? (
+                <li className="col-empty">Nothing here yet.</li>
+              ) : (
+                inCol.map((item) => (
+                  <li key={item.id}>
+                    <WorkCard item={item} onOpenSession={onOpenSession} />
+                  </li>
+                ))
+              )}
+            </ul>
           </div>
         );
       })}
@@ -558,7 +571,15 @@ export function WorkItems({
         </span>
         <span className="prog">
           {done}/{total} done
-          <span className="track">
+          <span
+            className="track"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={total}
+            aria-valuenow={done}
+            aria-valuetext={`${done} of ${total} Work Items done`}
+            aria-label="Project progress"
+          >
             <span style={{ width: `${pct}%` }} />
           </span>
         </span>
