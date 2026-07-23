@@ -15,8 +15,11 @@ const STATUS_GLYPH: Record<WorkStatus, string> = { todo: "○", doing: "◐", do
 
 export type OpenSession = (sessionId: string) => void;
 
-/** The project selector — a pill dropdown, one project at a time (ADR 0005: no
- *  all-projects roll-up). Projects come from the live sessions. */
+/** The project selector — one project at a time (ADR 0005: no all-projects
+ *  roll-up). A native `<select>` styled as the Paper Deck pill: keyboard
+ *  traversal, type-ahead, dismissal, focus management and screen-reader semantics
+ *  are the platform's, not hand-built (audit H1 / #33). The leading ▤ and trailing
+ *  ▾ are decorative overlays; option text stays plain so it announces cleanly. */
 function ProjectSelector({
   project,
   projects,
@@ -26,44 +29,85 @@ function ProjectSelector({
   projects: ProjectRef[];
   onSelect: (p: ProjectRef) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    const close = (): void => setOpen(false);
-    document.addEventListener("click", close);
-    return () => document.removeEventListener("click", close);
-  }, [open]);
-
   return (
-    <span style={{ position: "relative" }}>
-      <button
-        className="pill"
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
+    <span className="pill-select">
+      <span className="lead" aria-hidden="true">
+        ▤
+      </span>
+      <select
+        aria-label="Project"
+        value={project.cwd}
+        onChange={(e) => {
+          const next = projects.find((p) => p.cwd === e.target.value);
+          if (next) onSelect(next);
         }}
       >
-        ▤ {project.name} <span className="chev">▾</span>
-      </button>
-      {open && (
-        <div className="menu">
-          {projects.map((p) => (
-            <button
-              key={p.cwd}
-              type="button"
-              aria-current={p.cwd === project.cwd}
-              onClick={() => {
-                setOpen(false);
-                onSelect(p);
-              }}
-            >
-              ▤ {p.name}
-            </button>
-          ))}
-        </div>
-      )}
+        {projects.map((p) => (
+          <option key={p.cwd} value={p.cwd}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+      <span className="chev" aria-hidden="true">
+        ▾
+      </span>
     </span>
+  );
+}
+
+/** A distinct, labelled state panel for the non-content states — loading failure,
+ *  no project, and no Work Items (audit M1). Each carries a live-region role so a
+ *  screen reader announces the change, and an optional single next action. */
+function StateBlock({
+  tone,
+  live,
+  icon,
+  title,
+  detail,
+  action,
+}: {
+  tone: "error" | "info";
+  live: "status" | "alert";
+  icon: string;
+  title: string;
+  detail?: ReactNode;
+  action?: { label: string; onClick: () => void };
+}) {
+  return (
+    <div className={`state-block ${tone}`} role={live}>
+      <span className="ico" aria-hidden="true">
+        {icon}
+      </span>
+      <div className="state-body">
+        <b>{title}</b>
+        {detail != null && <span className="detail">{detail}</span>}
+      </div>
+      {action && (
+        <button type="button" className="state-action" onClick={action.onClick}>
+          {action.label}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The kanban structure, skeletoned, shown while the first read is in flight — the
+ *  three columns are known ahead of the data, so we hold their shape rather than
+ *  flashing centred "Loading…" text (audit M1/M6). */
+function WorkLoading() {
+  return (
+    <div className="cols" role="status" aria-label="Loading Work Items…">
+      {COLUMNS.map(({ key, label }) => (
+        <div className="col" key={key}>
+          <div className="col-head">
+            <span className={`dot ${key}`} aria-hidden="true" />
+            <b>{label}</b>
+          </div>
+          <div className="skeleton sk-wcard" aria-hidden="true" />
+          <div className="skeleton sk-wcard" aria-hidden="true" />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -470,7 +514,7 @@ export function WorkItems({
   onOpenSession: OpenSession;
 }) {
   const [mode, setMode] = useState<"kanban" | "graph">("kanban");
-  const { data, loading, error } = useWork(project?.cwd ?? null);
+  const { data, loading, error, refetch } = useWork(project?.cwd ?? null);
 
   const items = data?.items ?? [];
   // The item to reveal when arriving from a Board session's "plan" link.
@@ -478,19 +522,31 @@ export function WorkItems({
   useFlash(focusItem ? domId("item", focusItem.id) : null);
 
   if (!project) {
-    return <div className="empty">No projects yet — a project appears once it has a session.</div>;
+    return (
+      <StateBlock
+        tone="info"
+        live="status"
+        icon="▤"
+        title="No project selected yet."
+        detail="A project appears here once it has an Agent Session in the last 24h."
+      />
+    );
   }
 
   const done = items.filter((i) => i.status === "done").length;
   const total = items.length;
   const pct = total ? Math.round((done / total) * 100) : 0;
+  // A background refetch failed while a plan is already on screen: keep the data,
+  // flag it quietly instead of blanking the view (audit M1).
+  const staleRefresh = error && total > 0;
+  const source = data ? sourceLabel(data.source) : null;
 
   return (
     <>
       <div className="work-head">
         <ProjectSelector project={project} projects={projects} onSelect={onSelectProject} />
         <span className="src">
-          source: {data ? sourceLabel(data.source) : "…"} · {total} items
+          source: {source ?? "…"} · {total} items
         </span>
         <span className="seg small">
           <button type="button" aria-pressed={mode === "kanban"} onClick={() => setMode("kanban")}>
@@ -508,12 +564,42 @@ export function WorkItems({
         </span>
       </div>
 
+      {staleRefresh && (
+        <div className="stale-refresh" role="status">
+          <span className="dot" aria-hidden="true" />
+          Couldn’t refresh — showing the last version.
+          <button type="button" onClick={refetch}>
+            Retry
+          </button>
+        </div>
+      )}
+
       {error && total === 0 ? (
-        <div className="empty">Couldn’t read Work Items for this project.</div>
+        <StateBlock
+          tone="error"
+          live="alert"
+          icon="⚠"
+          title="Couldn’t read Work Items for this project."
+          detail="The plan source didn’t respond."
+          action={{ label: "Retry", onClick: refetch }}
+        />
       ) : loading && total === 0 ? (
-        <div className="empty">Loading Work Items…</div>
+        <WorkLoading />
       ) : total === 0 ? (
-        <div className="empty">No Work Items ({data ? sourceLabel(data.source) : "—"}).</div>
+        <StateBlock
+          tone="info"
+          live="status"
+          icon="▤"
+          title={`No Work Items yet${source ? ` (${source})` : ""}.`}
+          detail={
+            data?.source === "workMd"
+              ? "Add tasks to WORK.md, then refresh."
+              : data?.source === "github"
+                ? "Open issues in this repo will appear here."
+                : undefined
+          }
+          action={{ label: "Refresh", onClick: refetch }}
+        />
       ) : mode === "kanban" ? (
         <Kanban items={items} onOpenSession={onOpenSession} />
       ) : (
