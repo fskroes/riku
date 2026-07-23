@@ -121,6 +121,11 @@ listbox/menu. **Every other finding is CSS + semantics + small handlers** using 
 already here. This matches #32's "existing primitives first, dependency only with
 evidence" constraint.
 
+**Delivered (#33):** the H1 rework used a **native `<select>`** styled as the pill —
+fully keyboard/screen-reader accessible with no new runtime dependency. Base UI was
+evaluated and **not adopted**; the "existing primitives first" clause resolved in favour
+of the platform primitive, so the epic shipped **zero new runtime dependencies**.
+
 ## Suggested sequencing
 
 1. **C1 first** (global focus-visible) — unblocks the a11y acceptance on every ticket.
