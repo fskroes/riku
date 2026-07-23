@@ -80,7 +80,7 @@ Explicit flags take precedence over `RELAY_URL`, `RELAY_TOKEN`, `RIKU_ROOT`, and
 The **Work Items** view shows one project's work as a kanban and dependency graph.
 It uses `WORK.md` when present; otherwise it reads GitHub Issues through `gh`.
 
-![Work Items kanban for one project, sourced from GitHub Issues](docs/images/work-items.png)
+![Work Items kanban for one project: To do, In progress, and Done columns](docs/images/work-items.png)
 
 `WORK.md` is a Markdown checklist. Use `- [ ]` for To do, `- [~]`, `- [-]`, or
 `- [/]` for In progress, and `- [x]` for Done. The first token is the stable item
