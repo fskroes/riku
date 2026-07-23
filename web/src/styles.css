@@ -377,7 +377,8 @@ button.gr-node { cursor: pointer; }
 @media (max-width: 960px) {
   .view-work .cols { grid-template-columns: 1fr; }
   .view-board .row { grid-template-columns: auto 1fr auto; }
-  .view-board .row .branch { display: none; }
+  /* Keep the branch visible but let it truncate — its full value stays
+     recoverable via the Branch `title`/`aria-label` at narrow width (audit M2). */
 }
 @media (max-width: 720px) {
   .app { flex-direction: column; }
