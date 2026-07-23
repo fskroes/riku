@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { DiffStat, Session, Tool } from "./types";
+import type { DiffStat, Session, SubAgents, Tool } from "./types";
 import { abbrevTokens, diffLabel, formatCost, shortModel, tokensLabel } from "./format";
 
 /** Per-tool tile glyph, accessible name + accent. One Session Source per tool
@@ -96,6 +96,46 @@ export function Diff({ diff }: { diff: DiffStat | null }) {
       <span className="del" aria-hidden="true">
         −{diff.removed}
       </span>
+    </span>
+  );
+}
+
+/** The Sub-agent fan-out badge (issue #23): a count pill on the parent's card
+ *  showing how many Sub-agents are running right now, with each active one's short
+ *  description revealed on hover/focus. A Sub-agent is never its own card. Renders
+ *  nothing when none is active — a quiet or Codex session stays badge-less. The
+ *  count is the accessible label; the pulse dot is decorative "still working". */
+export function SubAgentBadge({ subAgents }: { subAgents: SubAgents }) {
+  const { active, descriptions } = subAgents;
+  if (active <= 0) return null;
+  const noun = active === 1 ? "sub-agent" : "sub-agents";
+  return (
+    <span className="subagents">
+      <span
+        className="pill"
+        role="img"
+        aria-label={`${active} ${noun} running`}
+        // The full list rides `title` too, so the descriptions are reachable without
+        // hover (native tooltip) as well as through the styled panel below.
+        title={descriptions.length ? descriptions.join("\n") : undefined}
+        tabIndex={0}
+      >
+        <span className="pulse" aria-hidden="true" />
+        <span className="fan" aria-hidden="true">⑃</span> {active}
+      </span>
+      {descriptions.length > 0 && (
+        <span className="tip" role="tooltip">
+          <span className="tip-h">{active} {noun} running</span>
+          <ul>
+            {descriptions.map((d, i) => (
+              <li key={i}>
+                <span className="d" aria-hidden="true" />
+                {d}
+              </li>
+            ))}
+          </ul>
+        </span>
+      )}
     </span>
   );
 }

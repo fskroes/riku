@@ -31,6 +31,15 @@ export interface DiffStat {
   removed: number;
 }
 
+// The Sub-agents a session is currently fanning work out to — the card's badge
+// (issue #23). A Sub-agent is never its own card. `active` is the badge count;
+// `descriptions` are the active ones' short descriptions, for the tooltip. Empty
+// for a session not fanning out and for Codex (no Sub-agent concept).
+export interface SubAgents {
+  active: number;
+  descriptions: string[];
+}
+
 export interface Session {
   id: string;
   tool: Tool;
@@ -50,6 +59,10 @@ export interface Session {
   costUsd: number | null;
   // Live git `+/-` for the session's repo, or `null` when there is none.
   diff: DiffStat | null;
+  // The Sub-agents this session is currently fanning out to (issue #23). Empty when
+  // it is not fanning out or the source has no Sub-agent concept (Codex) — the card
+  // then omits the badge. Always present (defaults to an empty set on the wire).
+  subAgents: SubAgents;
   // The machine this session runs on — the host's name (C7). Stamped by the board
   // (or a Collector) so every card shows which machine it is on; `null` only for a
   // pre-C7 session that was never stamped.

@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::attention::PendingAttention;
 use crate::liveness::ProcessLiveness;
-use crate::model::{Status, Tool};
+use crate::model::{Status, SubAgents, Tool};
 
 /// A session is Active/Attention while its file was touched within this window,
 /// and Finished once it goes quiet. Locked for C1 (mtime only); shared by every
@@ -40,7 +40,9 @@ pub trait Fold: Send {
 
 /// Tool-agnostic inputs the shared builder turns into a [`Session`]. Everything
 /// except `status`, which the builder computes from `pending_input` and mtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only (not `Eq`): `sub_agent_cost_usd` is an `f64`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Projection {
     pub id: String,
     pub tool: Tool,
@@ -48,8 +50,23 @@ pub struct Projection {
     pub model: Option<String>,
     pub branch: Option<String>,
     pub cwd: Option<String>,
+    /// Main-conversation assistant token usage. The Sub-agent (sidechain) usage is
+    /// kept apart in `sub_tokens_*` so cost can be priced per each agent's own model;
+    /// the builder sums the two into the card's displayed counts.
     pub tokens_in: u64,
     pub tokens_out: u64,
+    /// Sub-agent (sidechain) assistant token usage folded into this parent, held
+    /// separately only for per-model pricing (see `sub_agent_cost_usd`). `0` for a
+    /// source with no Sub-agent concept.
+    pub sub_tokens_in: u64,
+    pub sub_tokens_out: u64,
+    /// Cost of the Sub-agent usage, already priced per each Sub-agent entry's *own*
+    /// model (they may run cheaper models than the orchestrator). The builder adds it
+    /// to the main-model cost. `0.0` when there is no Sub-agent usage.
+    pub sub_agent_cost_usd: f64,
+    /// The Sub-agents currently fanning out under this session — the card's badge.
+    /// Empty for a source with no Sub-agent concept.
+    pub sub_agents: SubAgents,
     pub activity: Option<String>,
     /// Latest entry timestamp; falls back to the file mtime when a source records
     /// no timestamps.
@@ -72,8 +89,14 @@ pub struct Projection {
 /// Finished no matter how fresh. Only without liveness data does the mtime
 /// window decide. Staleness alone never produces Attention. Identical for every
 /// source.
+///
+/// `has_active_sub_agents` is the one refinement of the staleness fallback: a parent
+/// still fanning work out to Sub-agents is *working*, never stale, so it stays Active
+/// even if its own main-loop transcript has gone quiet past the window. It does not
+/// override a process-liveness verdict (a dead process is ground truth either way).
 pub fn status_for(
     has_attention: bool,
+    has_active_sub_agents: bool,
     mtime: DateTime<Utc>,
     now: DateTime<Utc>,
     liveness: ProcessLiveness,
@@ -85,7 +108,9 @@ pub fn status_for(
             ProcessLiveness::Alive => Status::Active,
             ProcessLiveness::Dead => Status::Finished,
             ProcessLiveness::Unknown => {
-                if now.signed_duration_since(mtime) >= ACTIVITY_WINDOW {
+                if has_active_sub_agents {
+                    Status::Active
+                } else if now.signed_duration_since(mtime) >= ACTIVITY_WINDOW {
                     Status::Finished
                 } else {
                     Status::Active

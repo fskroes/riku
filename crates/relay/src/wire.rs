@@ -22,7 +22,7 @@
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use axum::response::sse::Event as SseEvent;
 use chrono::{DateTime, Utc};
-use sessions::{Attention, AttentionCause, DiffStat, Event, Session, Status, Tool};
+use sessions::{Attention, AttentionCause, DiffStat, Event, Session, Status, SubAgents, Tool};
 use serde::{Deserialize, Serialize};
 
 /// The `Authorization` scheme prefix for the shared token.
@@ -103,6 +103,11 @@ pub struct WireSession {
     pub diff: Option<DiffStat>,
     #[serde(default)]
     pub machine: Option<String>,
+    /// The parent's active Sub-agents (C-sub-agent badge), carried through the Relay
+    /// like any other field so a remote teammate's board shows fan-out too. `default`
+    /// → empty, so a legacy Collector that omits it degrades to no badge.
+    #[serde(default)]
+    pub sub_agents: SubAgents,
     /// A legacy (pre-ADR-0010) Collector sends `attentionReason` ("waiting" |
     /// "error") in place of `attention`. Captured only so the board can detect and
     /// degrade legacy Attention; never re-serialized onto the wire.
@@ -140,6 +145,7 @@ impl From<Session> for WireSession {
             cost_usd: s.cost_usd,
             diff: s.diff,
             machine: s.machine,
+            sub_agents: s.sub_agents,
             legacy_attention_reason: None,
         }
     }
@@ -172,6 +178,7 @@ impl From<WireSession> for Session {
             cost_usd: w.cost_usd,
             diff: w.diff,
             machine: w.machine,
+            sub_agents: w.sub_agents,
         }
     }
 }
@@ -359,6 +366,7 @@ mod tests {
             cost_usd: None,
             diff: None,
             machine: Some(machine.into()),
+            sub_agents: SubAgents::default(),
         }
         .into()
     }
