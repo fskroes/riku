@@ -59,8 +59,8 @@ pub fn init(
     web_dist: Option<PathBuf>,
     relay: Option<RelayConfig>,
 ) -> Started {
-    let machine: Arc<str> = Arc::from(local_hostname());
-    let engine = Arc::new(Engine::start(claude_root, codex_root, machine.clone()));
+    // Machine identity is the Engine's to stamp; the HTTP adapter no longer needs it.
+    let engine = Arc::new(Engine::start(claude_root, codex_root, local_hostname()));
     let (events, _) = broadcast::channel::<Event>(1024);
     spawn_local_events(engine.clone(), events.clone());
 
@@ -76,7 +76,6 @@ pub fn init(
             events,
             web_dist,
             launcher: Arc::new(TerminalLauncher),
-            machine,
             remote,
             relay_status,
         },

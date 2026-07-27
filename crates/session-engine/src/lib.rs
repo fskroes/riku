@@ -103,21 +103,31 @@ impl Engine {
         self.events.subscribe()
     }
 
-    /// Resolve a local session's trusted transcript path for deep-linking.
+    /// Resolve a local session's trusted transcript path for deep-linking. The
+    /// returned session is machine-stamped like every Engine read; the diff is not
+    /// enriched, since a deep-link needs only the transcript path.
     pub fn find_by_id(&self, id: &str) -> Option<(PathBuf, Session)> {
-        self.store.lock().unwrap().find_by_id(id, Utc::now())
+        let (transcript, mut session) = self.store.lock().unwrap().find_by_id(id, Utc::now())?;
+        stamp(&mut session, &self.machine);
+        Some((transcript, session))
     }
 
-    /// Return local sessions in one working directory. The Board uses this to
-    /// build Work Links without exposing the store itself.
+    /// Return local sessions in one working directory, each machine-stamped like
+    /// every Engine read. The Board uses this to build Work Links without exposing
+    /// the store itself; the diff is not enriched, since a Work Link carries no diff.
     pub fn sessions_in(&self, cwd: &str) -> Vec<Session> {
-        self.store
+        let mut sessions: Vec<Session> = self
+            .store
             .lock()
             .unwrap()
             .snapshot(Utc::now())
             .into_iter()
             .filter(|session| session.cwd.as_deref() == Some(cwd))
-            .collect()
+            .collect();
+        for session in &mut sessions {
+            stamp(session, &self.machine);
+        }
+        sessions
     }
 }
 
@@ -133,8 +143,10 @@ pub fn local_hostname() -> String {
 
 /// Stamp a session unless it already carries a remote machine identity. Private to
 /// the Engine: machine stamping is an internal step of local-session production, not
-/// a capability the Engine hands out. Adapters that need a machine label read it from
-/// [`local_hostname`] and label their own values; they never re-stamp Engine output.
+/// a capability the Engine hands out. Every read that returns a `Session`
+/// ([`snapshot`](Engine::snapshot), [`sessions_in`](Engine::sessions_in),
+/// [`find_by_id`](Engine::find_by_id)) applies it, so an adapter never has to
+/// re-stamp Engine output.
 fn stamp(session: &mut Session, machine: &str) {
     if session.machine.is_none() {
         session.machine = Some(machine.to_string());
@@ -335,5 +347,30 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "engine-1");
         assert_eq!(sessions[0].machine.as_deref(), Some("loki.local"));
+    }
+
+    #[tokio::test]
+    async fn sessions_in_returns_machine_stamped_sessions() {
+        // The Work-Link read is machine-stamped like every Engine read, so the Board
+        // never has to re-stamp a candidate (see `Engine::sessions_in`).
+        let root = tempfile::tempdir().unwrap();
+        write_transcript(root.path(), "-Users-x-repos-foo", "engine-1", "/Users/x/repos/foo");
+
+        let engine = Engine::start(root.path().to_path_buf(), None, "loki.local");
+        let sessions = engine.sessions_in("/Users/x/repos/foo");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "engine-1");
+        assert_eq!(sessions[0].machine.as_deref(), Some("loki.local"));
+    }
+
+    #[tokio::test]
+    async fn find_by_id_returns_a_machine_stamped_session() {
+        // The deep-link read is machine-stamped too, keeping the invariant uniform.
+        let root = tempfile::tempdir().unwrap();
+        write_transcript(root.path(), "-Users-x-repos-foo", "engine-1", "/Users/x/repos/foo");
+
+        let engine = Engine::start(root.path().to_path_buf(), None, "loki.local");
+        let (_, session) = engine.find_by_id("engine-1").expect("session resolves by id");
+        assert_eq!(session.machine.as_deref(), Some("loki.local"));
     }
 }
