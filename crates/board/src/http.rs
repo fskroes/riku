@@ -43,9 +43,6 @@ pub struct AppState {
     /// How the board opens a local session (a terminal launch); injectable so
     /// tests can record the deep link instead of spawning Terminal.
     pub launcher: Arc<dyn Launcher>,
-    /// This machine's name, stamped onto every local session and Work Link (C7) so
-    /// each card shows which machine it is on.
-    pub machine: Arc<str>,
     /// Sessions relayed from other machines (C7), merged with local sessions at the
     /// snapshot boundary. Empty on a local-only board.
     pub remote: RemoteSessions,
@@ -264,7 +261,7 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
         .items
         .into_iter()
         .map(|item| {
-            let session = link_session(&item, &candidates, &state.machine);
+            let session = link_session(&item, &candidates);
             WorkItemOut { item, session }
         })
         .collect();
@@ -279,7 +276,7 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
 
 /// The Work Link for `item`: the most-recently-active candidate session whose
 /// branch the item's id can be inferred from. `None` if nothing links.
-fn link_session(item: &WorkItem, candidates: &[Session], machine: &str) -> Option<LinkedSession> {
+fn link_session(item: &WorkItem, candidates: &[Session]) -> Option<LinkedSession> {
     candidates
         .iter()
         .filter(|s| {
@@ -295,9 +292,9 @@ fn link_session(item: &WorkItem, candidates: &[Session], machine: &str) -> Optio
             model: s.model.clone(),
             branch: s.branch.clone(),
             status: s.status,
-            // Snapshot candidates are unstamped; a Work Link is local, so use this
-            // machine's name (falling back to the session's own tag if present).
-            machine: s.machine.clone().or_else(|| Some(machine.to_string())),
+            // Candidates come machine-stamped from the Engine (every read is), so the
+            // Work Link's machine is just the session's own tag.
+            machine: s.machine.clone(),
         })
 }
 
