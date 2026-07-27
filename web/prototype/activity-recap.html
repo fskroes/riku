@@ -10,9 +10,13 @@
     A — Timeline  : reverse-chron event stream, bucketed by time. Live-appends.
     B — Lanes     : one column per session/project, each a running story.
     C — Catch me up: prose recap at the top, supporting detail demoted below.
-    D — Day board : (DEFAULT) day sidebar + per-project summary — done / where
+    D — Day board : day sidebar + per-project summary — done / where
                     I am (timeline) / what's next — for every project at once.
                     The synthesis of A's timeline + C's summary + all projects.
+    E — Threads   : (DEFAULT) thread-first — one card per ongoing effort, days
+                    demoted to an activity strip inside the card. Work doesn't
+                    respect midnight; the effort, not the date, is the unit.
+                    Sorted by what needs you, then by recency.
 
   All three share ONE live event stream (setInterval pushes synthetic events so
   the real-time "it updates while I watch" feel is visible). Synthetic data only,
@@ -206,6 +210,25 @@
     .pcol { grid-template-columns: 1fr; gap: 14px; }
   }
 
+  /* ---------- E: Threads (thread-first, days demoted to annotation) ------- */
+  .t-lead { font-size: 14.5px; line-height: 1.55; margin: 0 0 6px; }
+  .t-lead b { font-weight: 600; }
+  .tcard .pcard-h { align-items: baseline; }
+  .tnm { font-size: 13.5px; font-weight: 600; }
+  .tnm .proj { margin-left: 10px; }
+  .t-meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint);
+    margin: -8px 0 13px; }
+  .daychips { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 4px; }
+  .daychip { font-family: var(--font-mono); font-size: 10px; padding: 3px 8px;
+    border-radius: 999px; background: var(--ghost); color: var(--ink-faint);
+    display: inline-flex; gap: 6px; align-items: center; }
+  .daychip.today { background: var(--kcs); color: var(--kc); }
+  .daychip .n { font-weight: 600; }
+  .daychip.idle { opacity: 0.45; }
+  .t-done-day { font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint);
+    text-transform: uppercase; letter-spacing: 0.06em; margin: 7px 0 3px; }
+  .t-done-day:first-child { margin-top: 0; }
+
   /* ---------- switcher (verbatim from attention-stats prototype) ---------- */
   .switcher {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
@@ -245,10 +268,10 @@
 // sid = the session id Riku already knows (it reads local transcripts). `next`
 // is the next best step; the card turns both into a copy-paste resume command.
 const SESSIONS = {
-  relay:   { proj: "riku/relay",     model: "opus-4.8",  sid: "rk-relay-8f2",  next: "Approve the store.rs replay change, then re-run cargo test -p sessions" },
-  ledger:  { proj: "riku/attention", model: "opus-4.8",  sid: "rk-ledger-4c1", next: "Review ADR 0012 storage trade-offs, then mark it Accepted or request changes" },
-  web:     { proj: "riku/web",       model: "sonnet-5",  sid: "rk-web-2a1",    next: "Fold the D day-board recap into web/src and drop the prototype variants" },
-  docs:    { proj: "riku/docs",      model: "haiku-4.5", sid: "rk-docs-9b7",   next: "Continue the README follow-ups from #48" },
+  relay:   { proj: "riku/relay",     model: "opus-4.8",  sid: "rk-relay-8f2",  thread: "Engine read seam refactor",  next: "Approve the store.rs replay change, then re-run cargo test -p sessions" },
+  ledger:  { proj: "riku/attention", model: "opus-4.8",  sid: "rk-ledger-4c1", thread: "Attention Ledger (ADR 0012)", next: "Review ADR 0012 storage trade-offs, then mark it Accepted or request changes" },
+  web:     { proj: "riku/web",       model: "sonnet-5",  sid: "rk-web-2a1",    thread: "Activity recap surface",      next: "Fold the D day-board recap into web/src and drop the prototype variants" },
+  docs:    { proj: "riku/docs",      model: "haiku-4.5", sid: "rk-docs-9b7",   thread: "README + licensing refresh",  next: "Continue the README follow-ups from #48" },
 };
 // ---- the project journal -------------------------------------------------
 // The model from chat: an AGENT (not Riku) reads a session and APPENDS an entry
@@ -586,18 +609,102 @@ function variantD() {
   </div>`;
 }
 
+// ---- variant E: threads (thread-first, days as annotation) ---------------
+// The unit is the EFFORT, not the date. One card per ongoing thread; the days
+// it spans become an activity strip inside the card. Sorted by what needs you.
+function dayShort(d) {
+  if (d === 0) return "Today";
+  if (d === 1) return "Yst";
+  const dt = new Date();
+  dt.setDate(dt.getDate() - d);
+  return dt.toLocaleDateString(undefined, { weekday: "short" });
+}
+function variantE() {
+  const W = { blocked: 0, review: 1, track: 2 };
+  const threads = Object.keys(SESSIONS).map(key => {
+    const evs = sorted().filter(e => e.sess === key);
+    const entry = JOURNAL[key].reduce((a, b) => (b.min < a.min ? b : a));
+    return { key, evs, entry, last: evs[0]?.min ?? Infinity };
+  }).filter(t => t.evs.length)
+    .sort((a, b) => (W[a.entry.status] - W[b.entry.status]) || (a.last - b.last));
+
+  const needs = threads.filter(t => t.entry.status !== "track").length;
+  const summary = `<div class="d-summary"><p class="t-lead">
+    You have <b>${threads.length} ongoing threads</b>. ${needs
+      ? `<b>${needs}</b> ${needs === 1 ? "needs" : "need"} you to move forward — they're on top.`
+      : "Nothing is blocked on you."}</p>
+    <p class="d-note">Thread-first: the unit is the <b>effort</b>, not the day.
+      Each card is one journal (<span class="mono">journal/&lt;project&gt;.jsonl</span>);
+      the days it spans are the chip strip inside the card.</p></div>`;
+
+  const cards = threads.map(t => {
+    const s = SESSIONS[t.key];
+    const st = STATUS[t.entry.status];
+    const maxDay = Math.max(...t.evs.map(e => daysAgo(e.min)));
+    const chips = [];
+    for (let d = maxDay; d >= 0; d--) {
+      const n = t.evs.filter(e => daysAgo(e.min) === d).length;
+      chips.push(`<span class="daychip${d === 0 ? " today" : ""}${n ? "" : " idle"}">
+        ${dayShort(d)}${n ? ` <span class="n">${n}</span>` : ""}</span>`);
+    }
+    // done, accumulated across the whole thread, grouped by journal-entry day
+    const byDay = new Map();
+    for (const e of [...JOURNAL[t.key]].sort((a, b) => a.min - b.min)) {
+      const d = daysAgo(e.min);
+      byDay.set(d, (byDay.get(d) || []).concat(e.done));
+    }
+    const doneHtml = [...byDay.entries()].map(([d, items]) => `
+      <div class="t-done-day">${dayShort(d)}</div>
+      <ul class="donelist">${items.map(x =>
+        `<li class="${st.cls}"><span class="chk"></span><span>${x}</span></li>`).join("")}</ul>`).join("");
+    const isFresh = justPosted === t.key;
+    const q = AGENT_UPDATES[t.key], hasMore = q && q.length;
+    return `<div class="pcard tcard ${st.cls}${isFresh ? " cardfresh" : ""}">
+      <div class="pcard-h">
+        <span class="tnm">${s.thread}<span class="proj">${s.proj}</span></span>
+        <span class="pill">${st.pill}</span>
+      </div>
+      <div class="t-meta">active ${maxDay + 1} ${maxDay ? "days" : "day"} ·
+        ${t.evs.length} events · last ${agoLabel(t.last)}</div>
+      <div class="pcol">
+        <div class="pseg"><div class="seg-h">Done so far</div>${doneHtml}</div>
+        <div class="pseg">
+          <div class="seg-h">Days active</div>
+          <div class="daychips">${chips.join("")}</div>
+          <div class="mnow mono">${JOURNAL[t.key].length} journal ${JOURNAL[t.key].length === 1 ? "entry" : "entries"} · latest ${agoLabel(t.entry.min)}</div>
+        </div>
+        <div class="pseg next ${st.cls}">
+          <div class="seg-h">To go further</div>
+          <div class="nexttxt">${t.entry.next}</div>
+        </div>
+      </div>
+      <div class="cmd ${st.cls}">
+        <span class="cmd-run">▶ run in a clean session</span>
+        <code>${mkcmd(t.key, t.entry.next)}</code>
+        <button class="copybtn" onclick="copyCmd(this)"><span>copy</span></button>
+      </div>
+      <button class="agentbtn" ${hasMore ? "" : "disabled"} onclick="agentPost('${t.key}')">${hasMore
+        ? `▶ agent re-reads sessions &amp; appends to journal/${t.key}.jsonl`
+        : "✓ journal up to date"}</button>
+    </div>`;
+  }).join("");
+
+  return summary + `<div class="pgrid">${cards}</div>`;
+}
+
 // ---- switcher (verbatim shape from attention-stats prototype) ------------
 const VARIANTS = {
+  E: { name: "Threads",     render: variantE },
   D: { name: "Day board",   render: variantD },
   A: { name: "Timeline",    render: variantA, narrow: true },
   B: { name: "Lanes",       render: variantB },
   C: { name: "Catch me up", render: variantC, narrow: true },
 };
-const ORDER = ["D", "A", "B", "C"];
+const ORDER = ["E", "D", "A", "B", "C"];
 
 function current() {
   const v = new URLSearchParams(location.search).get("variant");
-  return VARIANTS[v] ? v : "D";
+  return VARIANTS[v] ? v : "E";
 }
 function setVariant(v) {
   const u = new URL(location.href);
@@ -612,7 +719,7 @@ function render() {
     `<div class="${narrow ? "v-narrow" : ""}">
      <h1 class="proto-h">riku recap <span class="muted">— what did I do?</span>
        <span class="livedot" style="margin-left:8px"><i></i>live</span></h1>
-     <p class="proto-sub">Prototype of the activity recap · synthetic live stream · variant ${v} of 4</p>` +
+     <p class="proto-sub">Prototype of the activity recap · synthetic live stream · variant ${v} of 5</p>` +
     VARIANTS[v].render() + `</div>`;
   document.getElementById("vname").innerHTML = `<b>${v}</b> — ${VARIANTS[v].name}`;
 }
