@@ -228,6 +228,20 @@
   .t-done-day { font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint);
     text-transform: uppercase; letter-spacing: 0.06em; margin: 7px 0 3px; }
   .t-done-day:first-child { margin-top: 0; }
+  .who-tag { font-size: 9px; font-family: var(--font-mono); text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--ink-faint); margin-left: 6px; }
+  .nexttxt.byyou { color: var(--ink); }
+  .nexttxt.byyou::before { content: "“"; color: var(--ink-faint); }
+  .nexttxt.byyou::after { content: "” — you"; color: var(--ink-faint); font-size: 11px; }
+  .replyrow { margin-top: 8px; display: flex; gap: 8px; }
+  .replyrow input { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono);
+    font-size: 11px; padding: 8px 11px; border-radius: 8px; background: var(--surface);
+    border: 1px solid var(--hairline); color: var(--ink); }
+  .replyrow input::placeholder { color: var(--ink-faint); }
+  .replyrow input:focus { outline: none; border-color: var(--ink-muted); }
+  .replyrow button { flex: 0 0 auto; background: var(--ink); color: #FAF6EF; border: 0;
+    border-radius: 8px; font-family: var(--font-mono); font-size: 10.5px;
+    padding: 0 14px; cursor: pointer; }
 
   /* ---------- switcher (verbatim from attention-stats prototype) ---------- */
   .switcher {
@@ -428,7 +442,19 @@ window.agentPost = (key) => {
   const q = AGENT_UPDATES[key];
   if (!q || !q.length) return;
   const u = q.shift();
-  JOURNAL[key].push({ min: 0, status: u.status, done: u.done, next: u.next });
+  JOURNAL[key].push({ min: 0, who: "agent", status: u.status, done: u.done, next: u.next });
+  justPosted = key;
+  render();
+  setTimeout(() => { justPosted = null; render(); }, 1500);
+};
+// the journal is a CONVERSATION: the user appends a correction entry
+// (who:"user") rather than editing the agent's. Latest entry wins.
+window.userReply = (key) => {
+  const inp = document.getElementById("reply-" + key);
+  const txt = (inp.value || "").trim();
+  if (!txt) return;
+  const prev = JOURNAL[key].reduce((a, b) => (b.min < a.min ? b : a));
+  JOURNAL[key].push({ min: 0, who: "user", status: prev.status, done: [], next: txt });
   justPosted = key;
   render();
   setTimeout(() => { justPosted = null; render(); }, 1500);
@@ -650,6 +676,7 @@ function variantE() {
     // done, accumulated across the whole thread, grouped by journal-entry day
     const byDay = new Map();
     for (const e of [...JOURNAL[t.key]].sort((a, b) => a.min - b.min)) {
+      if (!e.done.length) continue; // user corrections carry no done items
       const d = daysAgo(e.min);
       byDay.set(d, (byDay.get(d) || []).concat(e.done));
     }
@@ -671,11 +698,13 @@ function variantE() {
         <div class="pseg">
           <div class="seg-h">Days active</div>
           <div class="daychips">${chips.join("")}</div>
-          <div class="mnow mono">${JOURNAL[t.key].length} journal ${JOURNAL[t.key].length === 1 ? "entry" : "entries"} · latest ${agoLabel(t.entry.min)}</div>
+          <div class="mnow mono">${JOURNAL[t.key].length} journal ${JOURNAL[t.key].length === 1 ? "entry" : "entries"}${
+            (n => n ? ` (${n} yours)` : "")(JOURNAL[t.key].filter(e => e.who === "user").length)
+          } · latest ${agoLabel(t.entry.min)}</div>
         </div>
         <div class="pseg next ${st.cls}">
-          <div class="seg-h">To go further</div>
-          <div class="nexttxt">${t.entry.next}</div>
+          <div class="seg-h">To go further<span class="who-tag">${t.entry.who === "user" ? "your call" : "agent suggests"}</span></div>
+          <div class="nexttxt${t.entry.who === "user" ? " byyou" : ""}">${t.entry.next}</div>
         </div>
       </div>
       <div class="cmd ${st.cls}">
@@ -686,6 +715,11 @@ function variantE() {
       <button class="agentbtn" ${hasMore ? "" : "disabled"} onclick="agentPost('${t.key}')">${hasMore
         ? `▶ agent re-reads sessions &amp; appends to journal/${t.key}.jsonl`
         : "✓ journal up to date"}</button>
+      <div class="replyrow">
+        <input id="reply-${t.key}" placeholder="Disagree? Answer the agent — appends a who:user entry, latest wins"
+          onkeydown="if(event.key==='Enter')userReply('${t.key}')" />
+        <button onclick="userReply('${t.key}')">append</button>
+      </div>
     </div>`;
   }).join("");
 
@@ -714,6 +748,11 @@ function setVariant(v) {
 }
 function render() {
   const v = current();
+  // the 5s live re-render must not eat a half-typed reply: carry the focused
+  // reply input's value + caret across the innerHTML swap.
+  const ae = document.activeElement;
+  const keep = ae && ae.id && ae.id.startsWith("reply-")
+    ? { id: ae.id, val: ae.value, pos: ae.selectionStart } : null;
   const narrow = VARIANTS[v].narrow;
   document.getElementById("root").innerHTML =
     `<div class="${narrow ? "v-narrow" : ""}">
@@ -722,6 +761,10 @@ function render() {
      <p class="proto-sub">Prototype of the activity recap · synthetic live stream · variant ${v} of 5</p>` +
     VARIANTS[v].render() + `</div>`;
   document.getElementById("vname").innerHTML = `<b>${v}</b> — ${VARIANTS[v].name}`;
+  if (keep) {
+    const el = document.getElementById(keep.id);
+    if (el) { el.value = keep.val; el.focus(); el.setSelectionRange(keep.pos, keep.pos); }
+  }
 }
 function cycle(dir) {
   const i = ORDER.indexOf(current());

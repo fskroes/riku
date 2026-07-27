@@ -41,7 +41,9 @@ and never transports commands) constrains the shape of any answer here.
 ## Decision
 
 Add an **agent-written project journal**: an append-only, opt-in log that the
-**agent writes on stop** and Riku only ever reads.
+**agent writes on stop**, the **human can answer**, and Riku never writes on its
+own behalf. The journal is a conversation between the user and the agent, not an
+authoritative agent narrative.
 
 **Who writes, and when.** The agent appends **one entry as the last thing it does
 before a session ends** — driven by a stop hook (Claude Code `Stop`, the Codex
@@ -61,7 +63,7 @@ and rotated, with a version tag per record for future format changes.
 **Records.** One entry kind:
 
 ```
-{v, project, session, at, status:"track"|"review"|"blocked",
+{v, project, session, at, who:"agent"|"user", status:"track"|"review"|"blocked",
  done:[string], next:string, resume:{sid, instruction}}
 ```
 
@@ -74,6 +76,18 @@ Done / next / resume command come from the **latest entry not newer than the
 selected day**; the derived transcript timeline stays visible beside the prose, so
 a wrong agent summary is caught against the real events — the journal never
 replaces ground truth, it annotates it.
+
+**Disagreement.** The agent's entry is an interpretation, and it will sometimes
+be wrong. The user does not edit or delete it — append-only holds for both
+voices. Instead the user **appends a correction entry** (`who:"user"`), either
+from the card itself or via `riku journal note <project> "<text>"`. When Riku
+appends that entry it is acting as the user's pen — an explicit user action, not
+Riku writing state on its own, so the read-only posture survives. Resolution is
+simple recency: **the latest entry wins** for status and next step regardless of
+author. Closing the loop is the agent's job: the stop hook hands the agent the
+journal tail, so a correction is read before the next entry is written — the
+agent answers the user's answer, which is what makes it a conversation rather
+than two monologues.
 
 **Privacy and control.**
 
