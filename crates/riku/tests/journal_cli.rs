@@ -7,6 +7,7 @@
 //! the file the stop hook writes, and a note surviving as a record the reader
 //! accepts.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -98,13 +99,75 @@ fn a_note_is_written_read_back_and_purged() {
         assert_eq!(mode & 0o777, 0o600, "the journal is the user's alone");
     }
 
-    // A second note appends; the first is still there, word for word.
-    assert!(riku(home, &["journal", "note", project, "and Rankine"])
-        .status
-        .success());
-    let both = std::fs::read_to_string(&path).unwrap();
-    assert!(both.starts_with(&first), "an append rewrote history");
-    assert_eq!(both.lines().count(), 2);
+    // Nothing had spoken yet, so there was no thread to answer and the output
+    // says so rather than naming an empty session.
+    assert!(
+        stdout(&noted).contains("first entry"),
+        "unexpected output: {}",
+        stdout(&noted)
+    );
+
+    // An agent session ends and writes its own entry, as the stop hook does.
+    let agent = format!(
+        "{{\"v\":1,\"project\":\"{}\",\"session\":\"a-real-session\",\"at\":\"2026-07-27T09:00:00Z\",\"who\":\"agent\",\"handoff\":\"needs-review\",\"done\":[\"Added Kelvin\"],\"next\":\"Review it\",\"resume\":{{\"instruction\":\"pick it up\"}}}}\n",
+        path.file_stem().unwrap().to_str().unwrap()
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(agent.as_bytes())
+        .unwrap();
+
+    // A second note appends; the first is still there, word for word. The user
+    // never named a thread, so the output says which one their words landed on
+    // rather than leaving them to guess between the sessions they have running.
+    let second = riku(home, &["journal", "note", project, "and Rankine"]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    let all = std::fs::read_to_string(&path).unwrap();
+    assert!(all.starts_with(&first), "an append rewrote history");
+    assert_eq!(all.lines().count(), 3);
+    assert!(
+        stdout(&second).contains("a-real-session"),
+        "the thread answered is not named: {}",
+        stdout(&second)
+    );
+
+    // The user can lower a card as well as raise it: "carry on" must not pin the
+    // card to the front of the board until an agent session happens to run.
+    let carry_on = riku(
+        home,
+        &[
+            "journal",
+            "note",
+            project,
+            "that's fine, carry on",
+            "--handoff",
+            "on-track",
+        ],
+    );
+    assert!(carry_on.status.success(), "{}", stderr(&carry_on));
+    let last = std::fs::read_to_string(&path).unwrap();
+    let last: serde_json::Value = serde_json::from_str(last.lines().last().unwrap()).unwrap();
+    assert_eq!(last["handoff"], "on-track");
+    assert_eq!(last["who"], "user");
+
+    // A status that does not exist is refused, and nothing is written.
+    let bad = riku(
+        home,
+        &["journal", "note", project, "hm", "--handoff", "blocked"],
+    );
+    assert!(!bad.status.success());
+    assert!(
+        stderr(&bad).contains("needs-you"),
+        "unexpected error: {}",
+        stderr(&bad)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap().lines().count(),
+        4,
+        "a refused status still wrote a note"
+    );
 
     // A project that names nothing is refused rather than quietly filed away.
     let typo = riku(home, &["journal", "note", "proj-that-isnt", "hello"]);

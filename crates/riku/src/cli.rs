@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use sessions::Handoff;
 use url::{Host, Url};
 
 /// Persistent values that can be shared by the Board and Collector. Parsing and
@@ -125,6 +126,9 @@ pub enum ResolvedCommand {
     JournalNote {
         project: String,
         text: String,
+        /// The status the user is putting the card in, `needs-you` unless they
+        /// said otherwise.
+        handoff: Handoff,
     },
     JournalPurge,
     Help,
@@ -311,9 +315,12 @@ fn resolve_config(args: &[String]) -> Result<ResolvedCommand, String> {
 }
 
 fn resolve_journal(args: &[String], config: &Config) -> Result<ResolvedCommand, String> {
-    match args {
-        [purge] if purge == "--purge" => Ok(ResolvedCommand::JournalPurge),
-        [note, project, text] if note == "note" => {
+    let (args, handoff) = take_handoff(args)?;
+    match (args.as_slice(), handoff) {
+        // `--handoff` says something about a note; on anything else it is a
+        // misunderstanding worth answering with the usage rather than ignoring.
+        ([purge], None) if purge == "--purge" => Ok(ResolvedCommand::JournalPurge),
+        ([note, project, text], handoff) if note == "note" => {
             // Writing is inert while the journal is off, and the refusal is the
             // command that turns it on — the toggle is the whole opt-in (ADR 0013).
             if !config.journal.enabled {
@@ -328,12 +335,48 @@ fn resolve_journal(args: &[String], config: &Config) -> Result<ResolvedCommand, 
             Ok(ResolvedCommand::JournalNote {
                 project: project.clone(),
                 text: text.clone(),
+                // A correction is usually the user asking for something, so
+                // that is the default; naming a status is how they lower one.
+                handoff: handoff.unwrap_or(Handoff::NeedsYou),
             })
         }
-        _ => Err(
-            "usage: riku journal note <project> \"<text>\", or riku journal --purge".to_string(),
-        ),
+        _ => Err(format!(
+            "usage: riku journal note <project> \"<text>\" [--handoff <{}>], or riku journal --purge",
+            handoff_choices()
+        )),
     }
+}
+
+/// Pull `--handoff <status>` out wherever it was typed, leaving the positional
+/// arguments to match on their own. A flag is not a position, and a user who
+/// writes it before the text should not be told the command does not exist.
+fn take_handoff(args: &[String]) -> Result<(Vec<String>, Option<Handoff>), String> {
+    let mut rest = Vec::new();
+    let mut handoff = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] != "--handoff" {
+            rest.push(args[index].clone());
+            index += 1;
+            continue;
+        }
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("--handoff requires a status: {}", handoff_choices()))?;
+        handoff = Some(value.parse::<Handoff>()?);
+        index += 2;
+    }
+    Ok((rest, handoff))
+}
+
+/// The statuses `--handoff` takes, spelled from the enum itself so the usage
+/// text cannot promise a word the parser does not accept.
+fn handoff_choices() -> String {
+    Handoff::ALL
+        .iter()
+        .map(|handoff| handoff.as_str())
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn next_flag_value(args: &[String], index: &mut usize, flag: &str) -> Result<String, String> {
@@ -411,7 +454,7 @@ fn validate_relay_bind(addr: &SocketAddr) -> Result<(), String> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{resolve, Config, ResolvedCommand};
+    use super::{resolve, Config, Handoff, ResolvedCommand};
 
     fn env(values: &[(&str, &str)]) -> BTreeMap<String, String> {
         values
@@ -586,8 +629,78 @@ mod tests {
             ResolvedCommand::JournalNote {
                 project: ".".to_string(),
                 text: "temps.py is NOT done - I also need Kelvin".to_string(),
+                // A correction asks for something unless the user says otherwise.
+                handoff: Handoff::NeedsYou,
             }
         );
+    }
+
+    #[test]
+    fn a_note_may_name_the_status_it_leaves_the_card_in() {
+        // Without this the user can only ever raise a card to the front of the
+        // board; "that's fine, carry on" is a correction too.
+        for args in [
+            vec![
+                "journal".to_string(),
+                "note".into(),
+                ".".into(),
+                "carry on".into(),
+                "--handoff".into(),
+                "on-track".into(),
+            ],
+            // A flag is not a position: written first, it means the same thing.
+            vec![
+                "journal".to_string(),
+                "note".into(),
+                "--handoff".into(),
+                "on-track".into(),
+                ".".into(),
+                "carry on".into(),
+            ],
+        ] {
+            assert_eq!(
+                resolve(&args, &env(&[]), Some(&journal_on())).unwrap(),
+                ResolvedCommand::JournalNote {
+                    project: ".".to_string(),
+                    text: "carry on".to_string(),
+                    handoff: Handoff::OnTrack,
+                },
+                "unexpected resolution for {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_status_that_is_not_one_names_the_ones_that_are() {
+        let error = resolve(
+            &[
+                "journal".into(),
+                "note".into(),
+                ".".into(),
+                "text".into(),
+                "--handoff".into(),
+                "blocked".into(),
+            ],
+            &env(&[]),
+            Some(&journal_on()),
+        )
+        .unwrap_err();
+        assert!(error.contains("needs-review"), "unexpected error: {error}");
+
+        // The flag without its value is the same mistake, answered the same way.
+        let error = resolve(
+            &[
+                "journal".into(),
+                "note".into(),
+                ".".into(),
+                "text".into(),
+                "--handoff".into(),
+            ],
+            &env(&[]),
+            Some(&journal_on()),
+        )
+        .unwrap_err();
+        assert!(error.contains("requires a status"), "unexpected: {error}");
     }
 
     #[test]
@@ -653,6 +766,13 @@ mod tests {
                 ".".into(),
                 "text".into(),
                 "extra".into(),
+            ],
+            // A status is something a note carries; purge deletes files.
+            vec![
+                "journal".into(),
+                "--purge".into(),
+                "--handoff".into(),
+                "on-track".into(),
             ],
         ] {
             let error = resolve(&args, &env(&[]), Some(&journal_on())).unwrap_err();

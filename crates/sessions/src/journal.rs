@@ -58,6 +58,41 @@ pub enum Handoff {
     OnTrack,
 }
 
+impl Handoff {
+    /// Every status, in card order — the one list the CLI's `--handoff` flag
+    /// and its usage line are both built from.
+    pub const ALL: [Handoff; 3] = [Handoff::NeedsYou, Handoff::NeedsReview, Handoff::OnTrack];
+
+    /// How the status is spelled, on disk and on the command line. The two are
+    /// deliberately the same word: what the user types into `--handoff` is what
+    /// lands in the record, so there is nothing to translate and nothing to
+    /// drift.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Handoff::NeedsYou => "needs-you",
+            Handoff::NeedsReview => "needs-review",
+            Handoff::OnTrack => "on-track",
+        }
+    }
+}
+
+impl std::str::FromStr for Handoff {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Handoff, String> {
+        Handoff::ALL
+            .into_iter()
+            .find(|handoff| handoff.as_str() == text)
+            .ok_or_else(|| {
+                let known: Vec<&str> = Handoff::ALL.iter().map(|h| h.as_str()).collect();
+                format!(
+                    "'{text}' is not a handoff status; expected {}",
+                    known.join(", ")
+                )
+            })
+    }
+}
+
 /// Who wrote an entry. Both voices are equal for resolution — the journal is a
 /// conversation, and the last word wins whoever spoke it (ADR 0013).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,21 +145,33 @@ impl JournalEntry {
     ///
     /// A note finishes nothing, so `done` is empty and `resume` carries no
     /// instruction; the user's text is the `next` step, which is the field
-    /// latest-wins resolution reads. `handoff` is always [`Handoff::NeedsYou`]
-    /// — a correction is the user asking for something, and it belongs at the
-    /// front of the board until an agent answers it.
+    /// latest-wins resolution reads.
+    ///
+    /// `handoff` is the user's own assessment, defaulting to
+    /// [`Handoff::NeedsYou`] at the surfaces that offer no picker — a correction
+    /// is usually the user asking for something. It is a parameter rather than a
+    /// constant because the last word on a card belongs to whoever spoke it: a
+    /// user who says "that's fine, carry on" must be able to *lower* the status,
+    /// or the card stays pinned to the front of the board until an agent session
+    /// happens to run again.
     ///
     /// `session` is the thread the note answers, so the correction lands on
     /// that card rather than floating free; it is empty when there is no entry
     /// to answer yet.
-    pub fn user_note(project: &str, session: &str, at: DateTime<Utc>, text: &str) -> JournalEntry {
+    pub fn user_note(
+        project: &str,
+        session: &str,
+        at: DateTime<Utc>,
+        text: &str,
+        handoff: Handoff,
+    ) -> JournalEntry {
         JournalEntry {
             v: JOURNAL_VERSION,
             project: project.to_string(),
             session: session.to_string(),
             at,
             who: Voice::User,
-            handoff: Handoff::NeedsYou,
+            handoff,
             done: Vec::new(),
             next: text.to_string(),
             resume: Resume::default(),
@@ -201,6 +248,18 @@ impl Journal {
     /// Every decoded entry, in append order.
     pub fn entries(&self) -> &[JournalEntry] {
         &self.entries
+    }
+
+    /// Read `later`'s entries as the continuation of this journal — how a
+    /// rotated generation and the live file become one conversation.
+    ///
+    /// Order is the whole point: rotation renames the live file mid-history, and
+    /// only the caller knows which side is older. Joining decoded entries rather
+    /// than the two files' text also means a generation truncated by a crash
+    /// costs its own last line and never swallows the next file's first one.
+    pub fn followed_by(mut self, later: Journal) -> Journal {
+        self.entries.extend(later.entries);
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -470,7 +529,8 @@ mod tests {
     #[test]
     fn a_user_note_is_a_correction_in_the_shared_shape() {
         let at = local_at(2026, 7, 27, 10);
-        let note = JournalEntry::user_note(PROJECT, "s1", at, "I also need Kelvin");
+        let note =
+            JournalEntry::user_note(PROJECT, "s1", at, "I also need Kelvin", Handoff::NeedsYou);
         assert_eq!(note.who, Voice::User);
         assert_eq!(note.handoff, Handoff::NeedsYou);
         assert_eq!(note.session, "s1", "a note answers a thread");
@@ -499,6 +559,7 @@ mod tests {
             "s1",
             local_at(2026, 7, 27, 10),
             "temps.py is NOT done - I also need Kelvin",
+            Handoff::NeedsYou,
         ))
         .unwrap();
 
@@ -524,6 +585,7 @@ mod tests {
             "",
             local_at(2026, 7, 27, 10),
             "first thing\nsecond thing",
+            Handoff::NeedsYou,
         );
         let line = serde_json::to_string(&note).unwrap();
         assert!(
@@ -779,6 +841,105 @@ mod tests {
         );
         // A clock-skewed future entry reads as brand new, never negative.
         assert_eq!(reading.age(at - Duration::hours(1)), Duration::zero());
+    }
+
+    #[test]
+    fn a_note_can_lower_the_status_as_well_as_raise_it() {
+        // "That's fine, carry on" is a correction too, and the card must be able
+        // to leave the front of the board without waiting for an agent session.
+        let agent = line(
+            "s1",
+            local_at(2026, 7, 27, 9),
+            "agent",
+            "needs-you",
+            "Wrote the parser",
+            "Which format do you want?",
+        );
+        let note = serde_json::to_string(&JournalEntry::user_note(
+            PROJECT,
+            "s1",
+            local_at(2026, 7, 27, 10),
+            "Either is fine - keep going",
+            Handoff::OnTrack,
+        ))
+        .unwrap();
+
+        let reading = Journal::parse(PROJECT, &[agent, note].join("\n"))
+            .resolve(None)
+            .unwrap();
+        assert_eq!(reading.latest.who, Voice::User);
+        assert_eq!(reading.latest.handoff, Handoff::OnTrack);
+    }
+
+    #[test]
+    fn a_status_is_spelled_the_same_on_disk_and_on_the_command_line() {
+        for handoff in Handoff::ALL {
+            // What `--handoff` accepts is exactly what serde writes into the
+            // record, so the flag can never name a status the reader rejects.
+            assert_eq!(
+                serde_json::to_string(&handoff).unwrap(),
+                format!("\"{}\"", handoff.as_str())
+            );
+            assert_eq!(handoff.as_str().parse::<Handoff>(), Ok(handoff));
+        }
+
+        // Anything else names the ones that exist rather than guessing.
+        let error = "blocked".parse::<Handoff>().unwrap_err();
+        assert!(error.contains("needs-you"), "unexpected error: {error}");
+        assert!(error.contains("on-track"), "unexpected error: {error}");
+        assert!(
+            "Needs-You".parse::<Handoff>().is_err(),
+            "case is the spelling"
+        );
+    }
+
+    #[test]
+    fn a_rotated_generation_reads_as_the_earlier_half_of_one_conversation() {
+        // What the reader does with `<project>.jsonl.1` and the live file: the
+        // older generation's entries come first, so the live file still holds
+        // the last word and the retired days are still on the board.
+        let earlier = Journal::parse(
+            PROJECT,
+            &[
+                line(
+                    "s1",
+                    local_at(2026, 7, 25, 9),
+                    "agent",
+                    "on-track",
+                    "Sat a",
+                    "x",
+                ),
+                // A crash mid-append leaves a partial line; it must cost that
+                // line only, not the first entry of the file that follows.
+                r#"{"v":1,"project":"riku","session":"s2","at":"2026-"#.to_string(),
+            ]
+            .join("\n"),
+        );
+        let live = Journal::parse(
+            PROJECT,
+            &line(
+                "s3",
+                local_at(2026, 7, 27, 9),
+                "agent",
+                "needs-review",
+                "Mon a",
+                "Review it",
+            ),
+        );
+
+        let reading = earlier.followed_by(live).resolve(None).unwrap();
+        assert_eq!(
+            reading.latest.session, "s3",
+            "the live file has the last word"
+        );
+        assert_eq!(reading.latest.next, "Review it");
+        assert_eq!(
+            reading.days.len(),
+            2,
+            "the rotated day is still on the board: {:?}",
+            reading.days
+        );
+        assert_eq!(reading.days[1].done, vec!["Sat a"]);
     }
 
     #[test]

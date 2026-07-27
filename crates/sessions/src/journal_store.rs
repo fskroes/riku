@@ -22,16 +22,18 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use tracing::{debug, warn};
 
-use crate::journal::{project_slug, Journal, JournalEntry};
+use crate::journal::{project_slug, Handoff, Journal, JournalEntry};
 
 /// How large one project's journal may grow before it is rotated — roughly a
 /// couple of thousand entries, or years of an ordinary project's handoffs.
 ///
 /// Rotation keeps exactly one previous generation (`<project>.jsonl.1`), so a
-/// journal costs at most twice this on disk however long it runs, and the
-/// parse cost of a board refresh stays bounded (ADR 0013). The reader only ever
-/// reads the live file: rotating retires history from the board rather than
-/// deleting it.
+/// journal costs at most twice this on disk however long it runs, and the parse
+/// cost of a board refresh stays bounded at twice it (ADR 0013).
+///
+/// Both generations are read, so rotation is a write-side concern only: what a
+/// reader sees is one conversation across the pair, and history leaves the board
+/// only when the *rotated* file is itself replaced.
 pub const JOURNAL_SIZE_CAP: u64 = 1 << 20;
 
 /// What a project's journal is called, and what its one rotated generation is
@@ -69,13 +71,24 @@ fn rotated_file(dir: &Path, project: &str) -> PathBuf {
 /// and an unreadable one all read as empty — a missing journal costs the prose,
 /// never the board.
 pub fn read_journal(project: &str) -> Journal {
-    match journal_path(project) {
-        Some(path) => read_journal_file(project, &path),
+    match journal_dir() {
+        Some(dir) => read_journal_in(&dir, project),
         None => {
             debug!(project, "no data directory; journal unavailable");
             Journal::default()
         }
     }
+}
+
+/// Both generations of a project's journal in a known directory, oldest first.
+///
+/// The rotated file is read *before* the live one because that is the order they
+/// were written in, and append order is the only recency the journal enforces.
+/// Reading only the live file would be cheaper by half, and would quietly drop
+/// every day before the last rotation off the recap while it still sat on disk.
+fn read_journal_in(dir: &Path, project: &str) -> Journal {
+    read_journal_file(project, &rotated_file(dir, project))
+        .followed_by(read_journal_file(project, &journal_file(dir, project)))
 }
 
 /// Read one journal file, decoding it against `project`. Split out from
@@ -98,13 +111,27 @@ fn read_journal_file(project: &str, path: &Path) -> Journal {
     }
 }
 
+/// Where a note landed: the file it was appended to, and the thread it answered.
+///
+/// The session is reported rather than kept private because the caller chose it
+/// by implication — a note answers whatever spoke last, and with two threads
+/// active that may not be the one the user had in mind. Naming it is what turns
+/// a silent guess into something the user can see and correct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Noted {
+    pub path: PathBuf,
+    /// The Agent Session the note answers, empty when the journal had no entry
+    /// to answer yet.
+    pub session: String,
+}
+
 /// Append the user's note to a project's journal, answering whatever had the
-/// last word, and return the file it landed in.
+/// last word, and return where it landed.
 ///
 /// This is the user's pen: an explicit user action, never Riku narrating state
 /// of its own.
-pub fn append_note(project: &str, text: &str) -> Result<PathBuf, String> {
-    append_note_in(&require_journal_dir()?, project, text, Utc::now())
+pub fn append_note(project: &str, text: &str, handoff: Handoff) -> Result<Noted, String> {
+    append_note_in(&require_journal_dir()?, project, text, handoff, Utc::now())
 }
 
 /// Delete every journal file, returning what was removed. Deliberately not
@@ -148,22 +175,30 @@ fn resolve_journal_project_in(dir: &Path, argument: &str) -> Result<String, Stri
 
 /// [`append_note`] against a known directory: read the journal to find the
 /// thread that spoke last, then append the user's answer to it.
+///
+/// The lookup reads what the board reads, both generations included: the thread
+/// a note answers has to be the thread whose card the user was looking at, and a
+/// live file left empty or truncated by a crash must not turn a reply into a
+/// free-floating entry while the conversation it belongs to sits in the rotated
+/// generation.
 fn append_note_in(
     dir: &Path,
     project: &str,
     text: &str,
+    handoff: Handoff,
     at: DateTime<Utc>,
-) -> Result<PathBuf, String> {
-    let session = read_journal_file(project, &journal_file(dir, project))
+) -> Result<Noted, String> {
+    let session = read_journal_in(dir, project)
         .entries()
         .last()
         .map(|entry| entry.session.clone())
         .unwrap_or_default();
-    append_entry_in(
+    let path = append_entry_in(
         dir,
         project,
-        &JournalEntry::user_note(project, &session, at, text),
-    )
+        &JournalEntry::user_note(project, &session, at, text, handoff),
+    )?;
+    Ok(Noted { path, session })
 }
 
 /// The one write path: serialize to a single line, rotate if this append would
@@ -350,15 +385,20 @@ mod tests {
         )
     }
 
+    /// The ordinary note: this project, now, asking for something.
+    fn note(dir: &Path, text: &str) -> Noted {
+        append_note_in(dir, "riku", text, Handoff::NeedsYou, Utc::now()).unwrap()
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_note_creates_a_private_journal_file() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
-        let path = append_note_in(dir.path(), "riku", "answer me", Utc::now()).unwrap();
+        let noted = note(dir.path(), "answer me");
         assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&noted.path).unwrap().permissions().mode() & 0o777,
             0o600,
             "the journal is prose about the user's work; it is theirs alone"
         );
@@ -370,7 +410,7 @@ mod tests {
         let path = dir.path().join("riku.jsonl");
         std::fs::write(&path, agent_line("s1", "Finished temps.py")).unwrap();
 
-        append_note_in(dir.path(), "riku", "Not done - I need Kelvin", Utc::now()).unwrap();
+        let noted = note(dir.path(), "Not done - I need Kelvin");
 
         // The agent's line survives verbatim: an append never rewrites history.
         let text = std::fs::read_to_string(&path).unwrap();
@@ -385,13 +425,39 @@ mod tests {
             reading.latest.session, "s1",
             "the note answers the thread that spoke last"
         );
+        assert_eq!(
+            noted.session, "s1",
+            "and the caller is told which thread that was"
+        );
+    }
+
+    #[test]
+    fn a_note_can_carry_the_users_own_assessment() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("riku.jsonl"), agent_line("s1", "Work")).unwrap();
+
+        let noted = append_note_in(
+            dir.path(),
+            "riku",
+            "That's fine, carry on",
+            Handoff::OnTrack,
+            Utc::now(),
+        )
+        .unwrap();
+
+        let reading = read_journal_file("riku", &noted.path)
+            .resolve(None)
+            .unwrap();
+        assert_eq!(reading.latest.handoff, Handoff::OnTrack);
+        assert_eq!(reading.latest.who, Voice::User);
     }
 
     #[test]
     fn a_note_on_an_empty_journal_answers_no_thread() {
         let dir = tempfile::tempdir().unwrap();
-        let path = append_note_in(dir.path(), "riku", "start here", Utc::now()).unwrap();
-        let journal = read_journal_file("riku", &path);
+        let noted = note(dir.path(), "start here");
+        assert_eq!(noted.session, "");
+        let journal = read_journal_file("riku", &noted.path);
         let entry = &journal.entries()[0];
         assert_eq!(entry.session, "");
         assert_eq!(entry.next, "start here");
@@ -403,13 +469,20 @@ mod tests {
 
         // The reader verifies an entry's project against the file it was found
         // in, so a misfiled entry would be written and then skipped forever.
-        let theirs = JournalEntry::user_note("someone-elses-repo", "s1", Utc::now(), "hi");
+        let theirs = JournalEntry::user_note(
+            "someone-elses-repo",
+            "s1",
+            Utc::now(),
+            "hi",
+            Handoff::NeedsYou,
+        );
         let error = append_entry_in(dir.path(), "riku", &theirs).unwrap_err();
         assert!(error.contains("refusing to file"), "unexpected: {error}");
 
         // An unresolvable project would name the file `.jsonl` and belong to
         // nothing.
-        let error = append_note_in(dir.path(), "", "hi", Utc::now()).unwrap_err();
+        let error =
+            append_note_in(dir.path(), "", "hi", Handoff::NeedsYou, Utc::now()).unwrap_err();
         assert!(error.contains("needs a project"), "unexpected: {error}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
@@ -426,7 +499,7 @@ mod tests {
         let filled = one.repeat(JOURNAL_SIZE_CAP as usize / one.len() + 1);
         std::fs::write(&path, &filled).unwrap();
 
-        append_note_in(dir.path(), "riku", "after rotation", Utc::now()).unwrap();
+        note(dir.path(), "after rotation");
 
         assert_eq!(std::fs::read_to_string(&rotated).unwrap(), filled);
         let entries = read_journal_file("riku", &path);
@@ -436,7 +509,7 @@ mod tests {
         // Rotating again keeps exactly one generation, so the journal is bounded
         // rather than growing a new file per rotation.
         std::fs::write(&path, &filled).unwrap();
-        append_note_in(dir.path(), "riku", "after the second rotation", Utc::now()).unwrap();
+        note(dir.path(), "after the second rotation");
         assert_eq!(std::fs::read_to_string(&rotated).unwrap(), filled);
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
@@ -449,8 +522,53 @@ mod tests {
     fn an_append_below_the_cap_does_not_rotate() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("riku.jsonl"), agent_line("s1", "Work")).unwrap();
-        append_note_in(dir.path(), "riku", "note", Utc::now()).unwrap();
+        note(dir.path(), "note");
         assert!(!dir.path().join("riku.jsonl.1").exists());
+    }
+
+    #[test]
+    fn a_read_spans_the_rotated_generation() {
+        // Rotation bounds the write; it must not retire days from the recap
+        // while they are still sitting on disk.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("riku.jsonl.1"),
+            agent_line("s1", "Retired work"),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("riku.jsonl"), agent_line("s2", "Live work")).unwrap();
+
+        let journal = read_journal_in(dir.path(), "riku");
+        assert_eq!(journal.entries().len(), 2);
+        assert_eq!(journal.entries()[0].done, vec!["Retired work"]);
+        assert_eq!(
+            journal.entries()[1].session,
+            "s2",
+            "the live file still has the last word"
+        );
+
+        // A project with nothing rotated yet is the ordinary case, not an error.
+        let fresh = tempfile::tempdir().unwrap();
+        std::fs::write(fresh.path().join("riku.jsonl"), agent_line("s1", "Work")).unwrap();
+        assert_eq!(read_journal_in(fresh.path(), "riku").entries().len(), 1);
+        assert!(read_journal_in(fresh.path(), "unknown-project").is_empty());
+    }
+
+    #[test]
+    fn a_note_answers_the_thread_the_board_shows_it() {
+        // The note's session comes from the same read the board does. A crash
+        // between rotating and writing the entry that caused it leaves the live
+        // file empty, and the reply would otherwise float free of the
+        // conversation it is answering.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("riku.jsonl.1"),
+            agent_line("s1", "Retired work"),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("riku.jsonl"), "").unwrap();
+
+        assert_eq!(note(dir.path(), "answer me").session, "s1");
     }
 
     #[test]
