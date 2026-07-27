@@ -10,9 +10,9 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use crate::attention::{AttentionReducer, NeedEvidence, Observation};
-use crate::fold::{project_from_cwd, status_for, Fold, Projection};
+use crate::fold::{assemble, project_from_cwd, Fold, Projection};
 use crate::liveness::ProcessLiveness;
-use crate::model::{Attention, AttentionCause, Session, Status, SubAgents, Tool};
+use crate::model::{AttentionCause, Session, SubAgents, Tool};
 use crate::parse::{parse_entry, Entry, ToolUseInfo};
 
 /// The Claude Code `Task` tool spawns a Sub-agent; its tool-use `id` correlates the
@@ -299,73 +299,9 @@ impl FileState {
         now: DateTime<Utc>,
         liveness: ProcessLiveness,
     ) -> Option<Session> {
-        let p = self.fold.projection()?;
-        let status = status_for(
-            p.attention.is_some(),
-            p.sub_agents.active > 0,
-            mtime,
-            now,
-            liveness,
-        );
-        // Resolve the current need into the atomic `attention` value only when the
-        // status is actually Attention, so the two can never disagree on the wire.
-        // Attention Since falls back to the file mtime when the source recorded no
-        // timestamp for the need.
-        let attention = (status == Status::Attention)
-            .then_some(p.attention)
-            .flatten()
-            .map(|a| Attention {
-                cause: a.cause,
-                // Attention survives process death (the wait still needs a human),
-                // but the card must not pretend the session is resumable in place:
-                // a local, factual note rides after the source-faithful evidence.
-                evidence: match (a.evidence, liveness == ProcessLiveness::Dead) {
-                    (Some(e), true) => Some(format!("{e} · process exited")),
-                    (None, true) => Some("process exited".to_string()),
-                    (e, false) => e,
-                },
-                since: a.since.unwrap_or(mtime),
-                details_on_source: false,
-                remote_evidence: a.remote_evidence,
-            });
-        // Cost is pure (tokens × the model's list price). The main-conversation usage
-        // is priced at the session model; the Sub-agent usage was already priced per
-        // each Sub-agent's own model as it was folded (they may run cheaper models),
-        // so the two are summed here. When the main model is unpriced but Sub-agents
-        // ran priced models, the card still shows their cost rather than nothing. The
-        // live git `diff` is out-of-transcript, so the board fills it and the sessions
-        // projection leaves it None.
-        let main_cost =
-            crate::pricing::estimate_cost_usd(p.model.as_deref(), p.tokens_in, p.tokens_out);
-        let cost_usd = match main_cost {
-            Some(main) => Some(main + p.sub_agent_cost_usd),
-            None if p.sub_agent_cost_usd > 0.0 => Some(p.sub_agent_cost_usd),
-            None => None,
-        };
-        // The card's token counts include Sub-agent usage — fan-out spend is real and
-        // counted (the split above exists only so cost could be priced per model).
-        let tokens_in = p.tokens_in + p.sub_tokens_in;
-        let tokens_out = p.tokens_out + p.sub_tokens_out;
-        Some(Session {
-            id: p.id,
-            tool: p.tool,
-            project: p.project,
-            model: p.model,
-            branch: p.branch,
-            cwd: p.cwd,
-            tokens_in,
-            tokens_out,
-            activity: p.activity,
-            last_event_at: p.last_event_at.unwrap_or(mtime),
-            status,
-            attention,
-            cost_usd,
-            diff: None,
-            sub_agents: p.sub_agents,
-            // Stamped by the board's runtime (or a Collector) at the source, not by
-            // the transcript projection — see `Session::machine`.
-            machine: None,
-        })
+        // The projection is this fold's job; turning it into a card is the shared,
+        // pure `assemble` seam (see `fold::assemble`), which every source crosses.
+        Some(assemble(self.fold.projection()?, mtime, now, liveness))
     }
 }
 
@@ -539,25 +475,6 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_cost_shows_even_when_the_main_model_is_unpriced() {
-        // An unknown orchestrator model has no main cost, but a priced Sub-agent's
-        // spend still surfaces rather than vanishing.
-        let mut fs = claude();
-        let unknown = r#"{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{"model":"some-future-model","usage":{"input_tokens":10,"output_tokens":1},"content":[{"type":"text","text":"go"}]}}"#;
-        let mut data = unknown.to_string();
-        data.push('\n');
-        data.push_str(&sidechain("claude-haiku-4-5", "sub", 1_000_000, 0));
-        data.push('\n');
-        fs.feed(data.as_bytes());
-
-        let s = fs
-            .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
-            .unwrap();
-        let cost = s.cost_usd.expect("Sub-agent cost surfaces");
-        assert!((cost - 0.80).abs() < 1e-9, "cost was {cost}");
-    }
-
-    #[test]
     fn pending_tool_use_is_attention() {
         let mut fs = claude();
         let line = r#"{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{"model":"m","content":[{"type":"tool_use","id":"toolu_1","name":"Bash"}]}}"#;
@@ -646,22 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn old_unanswered_wait_stays_attention_not_finished() {
-        // Precedence: a present attention reason outranks staleness (story 6).
-        let mut fs = claude();
-        let mut data = assistant_tool_use("s1");
-        data.push('\n');
-        fs.feed(data.as_bytes());
-
-        // File quiet for 30 min (well past ACTIVITY_WINDOW), yet still waiting.
-        let s = fs
-            .build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z"))
-            .unwrap();
-        assert_eq!(s.status, Status::Attention);
-        assert_eq!(cause(&s), Some(AttentionCause::Input));
-    }
-
-    #[test]
     fn activity_after_api_error_clears_attention() {
         // Recovery (story 19): a fresh turn after an error leaves the error state.
         let mut fs = claude();
@@ -678,19 +579,6 @@ mod tests {
             .unwrap();
         assert_eq!(s.status, Status::Active);
         assert_eq!(cause(&s), None);
-    }
-
-    #[test]
-    fn quiet_session_is_finished() {
-        let mut fs = claude();
-        let mut data = assistant("s1", "done", 1, 1);
-        data.push('\n');
-        fs.feed(data.as_bytes());
-
-        // mtime 20 min before now.
-        let now = ts("2026-07-19T10:20:00Z");
-        let s = fs.build(ts("2026-07-19T10:00:00Z"), now).unwrap();
-        assert_eq!(s.status, Status::Finished);
     }
 
     #[test]
@@ -821,61 +709,6 @@ mod tests {
             .unwrap();
         assert_eq!(a.since, ts("2026-07-19T10:03:00Z"));
         assert_eq!(a.evidence.as_deref(), Some("Bash"));
-    }
-
-    #[test]
-    fn alive_process_overrides_a_stale_mtime() {
-        // The board's Running band is ground truth: a live agent whose transcript
-        // has been quiet past the window is still Active.
-        let mut fs = claude();
-        let mut data = assistant("s1", "thinking", 1, 1);
-        data.push('\n');
-        fs.feed(data.as_bytes());
-        let s = fs
-            .build_with_liveness(
-                ts("2026-07-19T10:00:00Z"),
-                ts("2026-07-19T10:25:00Z"),
-                crate::liveness::ProcessLiveness::Alive,
-            )
-            .unwrap();
-        assert_eq!(s.status, Status::Active);
-    }
-
-    #[test]
-    fn dead_process_overrides_a_fresh_mtime() {
-        // The Ctrl-C false positive: file fresh, process gone → Finished.
-        let mut fs = claude();
-        let mut data = assistant("s1", "was working", 1, 1);
-        data.push('\n');
-        fs.feed(data.as_bytes());
-        let s = fs
-            .build_with_liveness(
-                ts("2026-07-19T10:04:00Z"),
-                ts("2026-07-19T10:05:00Z"),
-                crate::liveness::ProcessLiveness::Dead,
-            )
-            .unwrap();
-        assert_eq!(s.status, Status::Finished);
-    }
-
-    #[test]
-    fn attention_survives_process_death_with_annotated_evidence() {
-        // An unanswered wait still needs a human even after Ctrl-C; the card says
-        // the process exited instead of silently filing under Finished.
-        let mut fs = claude();
-        let mut data = assistant_tool_use("s1");
-        data.push('\n');
-        fs.feed(data.as_bytes());
-        let s = fs
-            .build_with_liveness(
-                ts("2026-07-19T10:04:00Z"),
-                ts("2026-07-19T10:05:00Z"),
-                crate::liveness::ProcessLiveness::Dead,
-            )
-            .unwrap();
-        assert_eq!(s.status, Status::Attention);
-        let evidence = s.attention.unwrap().evidence.unwrap();
-        assert!(evidence.ends_with("· process exited"), "{evidence}");
     }
 
     #[test]
