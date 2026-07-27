@@ -37,6 +37,9 @@
     --card-edge: 0 0 0 1px rgba(43,36,26,0.1);
     --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
     --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+    /* strong custom curves — built-in CSS easings are too weak (emil-design-eng) */
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   }
   * { box-sizing: border-box; }
   body {
@@ -44,7 +47,9 @@
     font-family: var(--font-ui); font-size: 13px; line-height: 1.45;
     -webkit-font-smoothing: antialiased; padding: 0 0 96px;
   }
-  .wrap { max-width: 880px; margin: 0 auto; padding: 40px 24px 0; }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 40px 32px 0; }
+  /* prose-heavy variants keep a readable measure; board variants go wide */
+  .v-narrow { max-width: 880px; margin: 0 auto; }
   h1.proto-h { font-size: 15px; margin: 0 0 4px; letter-spacing: -0.01em; }
   .proto-sub { color: var(--ink-faint); font-size: 12px; margin: 0 0 24px; }
   .mono { font-family: var(--font-mono); }
@@ -66,10 +71,14 @@
     animation: pulse 1.8s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
   @keyframes flashin {
-    0% { background: var(--positive-soft); transform: translateY(-4px); opacity: 0; }
+    0% { background: var(--positive-soft); transform: translateY(-6px); opacity: 0; }
     100% { background: transparent; transform: none; opacity: 1; }
   }
-  .fresh { animation: flashin 1.1s ease-out; }
+  .fresh { animation: flashin 600ms var(--ease-out); }
+
+  /* every pressable answers the press (scale 0.97, fast ease-out) */
+  button { transition: transform 140ms var(--ease-out), background 150ms ease, color 150ms ease, border-color 150ms ease; }
+  button:active:not(:disabled) { transform: scale(0.97); }
 
   .pill { display: inline-block; font-size: 10.5px; font-family: var(--font-mono);
     padding: 1px 7px; border-radius: 999px; background: var(--kcs); color: var(--kc);
@@ -128,7 +137,8 @@
   .detail .row { grid-template-columns: 70px 1fr; }
 
   /* ---------- D: Day board (sidebar + per-project summary) ---------- */
-  .d-wrap { display: grid; grid-template-columns: 152px 1fr; gap: 26px; align-items: start; }
+  .d-wrap { display: grid; grid-template-columns: 172px 1fr; gap: 34px; align-items: start; }
+  .d-main { min-width: 0; } /* stop the nowrap resume command blowing out the grid */
   .d-rail { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 3px; }
   .rail-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
     color: var(--ink-faint); font-family: var(--font-mono); margin: 0 0 6px 4px; }
@@ -136,7 +146,7 @@
     background: transparent; border: 0; text-align: left; cursor: pointer;
     padding: 8px 11px; border-radius: 8px; font-family: var(--font-ui);
     font-size: 12.5px; color: var(--ink-muted); }
-  .d-day:hover { background: var(--ghost); }
+  .d-day:hover:not(.on) { background: var(--ghost); }
   .d-day.on { background: var(--ink); color: #FAF6EF; }
   .d-day.on .dc { color: rgba(250,246,239,0.7); }
   .d-day .dc { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); }
@@ -150,7 +160,7 @@
   .pcard-h { display: flex; align-items: center; justify-content: space-between;
     margin-bottom: 13px; }
   .pnm { font-size: 12.5px; font-weight: 600; }
-  .pcol { display: grid; grid-template-columns: 1.1fr 0.9fr 1fr; gap: 20px; }
+  .pcol { display: grid; grid-template-columns: 1.2fr 0.7fr 1fr; gap: 32px; }
   .seg-h { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
     color: var(--ink-faint); font-family: var(--font-mono); margin: 0 0 8px; }
   .donelist { list-style: none; margin: 0; padding: 0; display: flex;
@@ -174,7 +184,10 @@
     white-space: nowrap; overflow-x: auto; flex: 1 1 auto; }
   .cmd .copybtn { flex: 0 0 auto; background: rgba(255,255,255,0.12); border: 0;
     color: #EDE6D8; font-family: var(--font-mono); font-size: 10.5px; padding: 5px 11px;
-    border-radius: 6px; cursor: pointer; }
+    border-radius: 6px; cursor: pointer; min-width: 64px; }
+  .cmd .copybtn.did { background: var(--positive); }
+  .cmd .copybtn span { display: inline-block; transition: filter 180ms ease, opacity 180ms ease; }
+  .cmd .copybtn.swapping span { filter: blur(2px); opacity: 0.4; }
   .cmd .copybtn:hover { background: rgba(255,255,255,0.24); }
   .agentbtn { margin-top: 11px; width: 100%; background: var(--ghost);
     border: 1px dashed var(--hairline); color: var(--ink-muted); font-family: var(--font-mono);
@@ -182,7 +195,7 @@
   .agentbtn:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent);
     border-color: var(--accent); }
   .agentbtn:disabled { opacity: 0.5; cursor: default; }
-  .cardfresh { animation: cardflash 1.4s ease-out; }
+  .cardfresh { animation: cardflash 900ms var(--ease-out); }
   @keyframes cardflash {
     0% { box-shadow: 0 0 0 2px var(--positive), var(--card-edge); background: var(--positive-soft); }
     100% { box-shadow: var(--card-edge); background: var(--surface); }
@@ -375,9 +388,17 @@ window.selectDay = (i) => { selDay = i; render(); };
 window.copyCmd = (btn) => {
   const txt = btn.parentElement.querySelector("code").textContent;
   if (navigator.clipboard) navigator.clipboard.writeText(txt);
-  const old = btn.textContent;
-  btn.textContent = "copied ✓";
-  setTimeout(() => { btn.textContent = old; }, 1400);
+  const label = btn.querySelector("span");
+  const swap = (text, cls) => {
+    btn.classList.add("swapping");
+    setTimeout(() => {
+      label.textContent = text;
+      btn.classList.toggle("did", cls);
+      btn.classList.remove("swapping");
+    }, 180);
+  };
+  swap("copied ✓", true);
+  setTimeout(() => swap("copy", false), 1400);
 };
 // the append: agent reads sessions → pushes one entry onto journal/<key>.jsonl.
 window.agentPost = (key) => {
@@ -411,7 +432,7 @@ function variantA() {
       <div class="bucket-h"><span>${g.name}</span><span class="cnt mono">${g.items.length}</span></div>
       ${g.items.map(e => {
         const k = KIND[e.kind], s = SESSIONS[e.sess];
-        return `<div class="row ${k.cls}${e.min < 1 ? " fresh" : ""}">
+        return `<div class="row ${k.cls}${e.min < 0.05 ? " fresh" : ""}">
           <div class="t">${clockLabel(e.min)}</div>
           <div class="body">
             <div class="line1">
@@ -442,7 +463,7 @@ function variantB() {
         <span class="st pill">${statusTxt}</span>
       </div>
       ${evs.slice(0, 5).map(e => `
-        <div class="ev ${KIND[e.kind].cls}${e.min < 1 ? " fresh" : ""}">
+        <div class="ev ${KIND[e.kind].cls}${e.min < 0.05 ? " fresh" : ""}">
           <span class="dot"></span>
           <span class="tt">${e.txt}</span>
           <span class="ago">${agoLabel(e.min)}</span>
@@ -478,7 +499,7 @@ function variantC() {
     <div class="detail">
       ${evs.slice(0, 8).map(e => {
         const k = KIND[e.kind], s = SESSIONS[e.sess];
-        return `<div class="row ${k.cls}${e.min < 1 ? " fresh" : ""}">
+        return `<div class="row ${k.cls}${e.min < 0.05 ? " fresh" : ""}">
           <div class="t">${agoLabel(e.min)}</div>
           <div class="body">
             <div class="line1"><span class="pill">${k.pill}</span><span class="proj">${s.proj}</span></div>
@@ -551,7 +572,7 @@ function variantD() {
       <div class="cmd ${st.cls}">
         <span class="cmd-run">▶ run in a clean session</span>
         <code>${mkcmd(key, entry.next)}</code>
-        <button class="copybtn" onclick="copyCmd(this)">copy</button>
+        <button class="copybtn" onclick="copyCmd(this)"><span>copy</span></button>
       </div>
       ${selDay === 0 ? `<button class="agentbtn" ${hasMore ? "" : "disabled"} onclick="agentPost('${key}')">${hasMore
         ? `▶ agent re-reads sessions &amp; appends to journal/${key}.jsonl`
@@ -568,9 +589,9 @@ function variantD() {
 // ---- switcher (verbatim shape from attention-stats prototype) ------------
 const VARIANTS = {
   D: { name: "Day board",   render: variantD },
-  A: { name: "Timeline",    render: variantA },
+  A: { name: "Timeline",    render: variantA, narrow: true },
   B: { name: "Lanes",       render: variantB },
-  C: { name: "Catch me up", render: variantC },
+  C: { name: "Catch me up", render: variantC, narrow: true },
 };
 const ORDER = ["D", "A", "B", "C"];
 
@@ -586,11 +607,13 @@ function setVariant(v) {
 }
 function render() {
   const v = current();
+  const narrow = VARIANTS[v].narrow;
   document.getElementById("root").innerHTML =
-    `<h1 class="proto-h">riku recap <span class="muted">— what did I do?</span>
+    `<div class="${narrow ? "v-narrow" : ""}">
+     <h1 class="proto-h">riku recap <span class="muted">— what did I do?</span>
        <span class="livedot" style="margin-left:8px"><i></i>live</span></h1>
      <p class="proto-sub">Prototype of the activity recap · synthetic live stream · variant ${v} of 4</p>` +
-    VARIANTS[v].render();
+    VARIANTS[v].render() + `</div>`;
   document.getElementById("vname").innerHTML = `<b>${v}</b> — ${VARIANTS[v].name}`;
 }
 function cycle(dir) {
