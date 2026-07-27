@@ -1,0 +1,795 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Answers the chat question: "what did I do this morning?
+  what did I do yesterday?" A real-time activity recap fed by agent events.
+
+  Question: what should the recap surface look like — a chronological live feed,
+  a per-session digest, or a written "catch me up" narrative?
+
+  Three variants, switchable via ?variant=A|B|C and the floating bottom bar:
+    A — Timeline  : reverse-chron event stream, bucketed by time. Live-appends.
+    B — Lanes     : one column per session/project, each a running story.
+    C — Catch me up: prose recap at the top, supporting detail demoted below.
+    D — Day board : day sidebar + per-project summary — done / where
+                    I am (timeline) / what's next — for every project at once.
+                    The synthesis of A's timeline + C's summary + all projects.
+    E — Threads   : (DEFAULT) thread-first — one card per ongoing effort, days
+                    demoted to an activity strip inside the card. Work doesn't
+                    respect midnight; the effort, not the date, is the unit.
+                    Sorted by what needs you, then by recency.
+
+  All three share ONE live event stream (setInterval pushes synthetic events so
+  the real-time "it updates while I watch" feel is visible). Synthetic data only,
+  no backend, no persistence. Open the file directly, or
+  `cd web && npx vite` and hit /prototype/activity-recap.html.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE — riku recap (what did I do)</title>
+<style>
+  :root {
+    --bg-content: #FAF6EF; --surface: #FFFFFF; --ink: #2B241A;
+    --ink-muted: rgba(43,36,26,0.72); --ink-faint: rgba(43,36,26,0.58);
+    --hairline: rgba(43,36,26,0.12); --accent: #B4552D;
+    --accent-soft: rgba(180,85,45,0.12); --positive: #2E7D51;
+    --positive-soft: rgba(46,125,81,0.13);
+    --warning: #B07514; --negative: #C24438; --info: #4A5FB5;
+    --info-soft: rgba(74,95,181,0.14); --ghost: rgba(43,36,26,0.07);
+    --shadow-float: 0 12px 32px rgba(43,36,26,0.16);
+    --card-edge: 0 0 0 1px rgba(43,36,26,0.1);
+    --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+    /* strong custom curves — built-in CSS easings are too weak (emil-design-eng) */
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg-content); color: var(--ink);
+    font-family: var(--font-ui); font-size: 13px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased; padding: 0 0 96px;
+  }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 40px 32px 0; }
+  /* prose-heavy variants keep a readable measure; board variants go wide */
+  .v-narrow { max-width: 880px; margin: 0 auto; }
+  h1.proto-h { font-size: 15px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .proto-sub { color: var(--ink-faint); font-size: 12px; margin: 0 0 24px; }
+  .mono { font-family: var(--font-mono); }
+  .muted { color: var(--ink-faint); }
+
+  /* kind accents — shared across variants */
+  .k-shipped  { --kc: var(--positive); --kcs: var(--positive-soft); }
+  .k-blocked  { --kc: var(--negative); --kcs: rgba(194,68,56,0.12); }
+  .k-review   { --kc: var(--accent);   --kcs: var(--accent-soft); }
+  .k-answer   { --kc: var(--info);     --kcs: var(--info-soft); }
+  .k-edit     { --kc: var(--ink-faint);--kcs: var(--ghost); }
+  .k-test     { --kc: var(--warning);  --kcs: rgba(176,117,20,0.13); }
+  .k-start    { --kc: var(--ink-muted);--kcs: var(--ghost); }
+
+  .livedot { display: inline-flex; align-items: center; gap: 6px; font-size: 11px;
+    font-family: var(--font-mono); color: var(--positive); text-transform: uppercase;
+    letter-spacing: 0.06em; }
+  .livedot i { width: 7px; height: 7px; border-radius: 999px; background: var(--positive);
+    animation: pulse 1.8s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+  @keyframes flashin {
+    0% { background: var(--positive-soft); transform: translateY(-6px); opacity: 0; }
+    100% { background: transparent; transform: none; opacity: 1; }
+  }
+  .fresh { animation: flashin 600ms var(--ease-out); }
+
+  /* every pressable answers the press (scale 0.97, fast ease-out) */
+  button { transition: transform 140ms var(--ease-out), background 150ms ease, color 150ms ease, border-color 150ms ease; }
+  button:active:not(:disabled) { transform: scale(0.97); }
+
+  .pill { display: inline-block; font-size: 10.5px; font-family: var(--font-mono);
+    padding: 1px 7px; border-radius: 999px; background: var(--kcs); color: var(--kc);
+    letter-spacing: 0.02em; white-space: nowrap; }
+  .proj { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); }
+
+  /* ---------- A: Timeline ---------- */
+  .bucket { margin: 0 0 30px; }
+  .bucket-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-faint); font-family: var(--font-mono); margin: 0 0 10px;
+    display: flex; align-items: baseline; gap: 10px; }
+  .bucket-h .cnt { color: var(--ink); }
+  .row { display: grid; grid-template-columns: 58px 1fr; gap: 14px;
+    padding: 9px 0; border-bottom: 1px solid var(--hairline); align-items: start; }
+  .row .t { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-faint);
+    padding-top: 1px; text-align: right; }
+  .row .body { display: flex; flex-direction: column; gap: 3px; }
+  .row .line1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .row .txt { color: var(--ink); }
+  .row .txt b { font-weight: 600; }
+
+  /* ---------- B: Lanes ---------- */
+  .lanes { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 14px; }
+  .lane { background: var(--surface); border-radius: 12px; box-shadow: var(--card-edge);
+    padding: 14px 15px; display: flex; flex-direction: column; gap: 2px; }
+  .lane-h { display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--hairline); }
+  .lane-h .nm { font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
+  .lane-h .st { font-size: 10px; font-family: var(--font-mono); }
+  .lane .ev { display: grid; grid-template-columns: 8px 1fr auto; gap: 9px;
+    padding: 6px 0; align-items: start; font-size: 12px; }
+  .lane .ev .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--kc);
+    margin-top: 4px; }
+  .lane .ev .tt { color: var(--ink); }
+  .lane .ev .ago { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint);
+    white-space: nowrap; }
+  .lane .now { font-size: 11px; color: var(--kc); font-family: var(--font-mono);
+    margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--hairline); }
+
+  /* ---------- C: Catch me up ---------- */
+  .recap { background: var(--surface); border-radius: 14px; box-shadow: var(--card-edge);
+    padding: 26px 28px; margin-bottom: 24px; }
+  .recap .lead { font-size: 15.5px; line-height: 1.6; color: var(--ink); margin: 0 0 14px; }
+  .recap .lead b { font-weight: 600; }
+  .recap .stats { display: flex; gap: 26px; flex-wrap: wrap; margin: 18px 0 0;
+    padding-top: 16px; border-top: 1px solid var(--hairline); }
+  .recap .stat .n { font-size: 22px; font-family: var(--font-mono); font-weight: 600;
+    display: block; line-height: 1.1; }
+  .recap .stat .l { font-size: 11px; color: var(--ink-faint); text-transform: uppercase;
+    letter-spacing: 0.05em; }
+  .recap .now { margin-top: 18px; font-size: 13px; color: var(--accent);
+    font-family: var(--font-mono); }
+  .detail-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-faint); font-family: var(--font-mono); margin: 0 0 8px; }
+  .detail .row { grid-template-columns: 70px 1fr; }
+
+  /* ---------- D: Day board (sidebar + per-project summary) ---------- */
+  .d-wrap { display: grid; grid-template-columns: 172px 1fr; gap: 34px; align-items: start; }
+  .d-main { min-width: 0; } /* stop the nowrap resume command blowing out the grid */
+  .d-rail { position: sticky; top: 24px; display: flex; flex-direction: column; gap: 3px; }
+  .rail-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-faint); font-family: var(--font-mono); margin: 0 0 6px 4px; }
+  .d-day { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    background: transparent; border: 0; text-align: left; cursor: pointer;
+    padding: 8px 11px; border-radius: 8px; font-family: var(--font-ui);
+    font-size: 12.5px; color: var(--ink-muted); }
+  .d-day:hover:not(.on) { background: var(--ghost); }
+  .d-day.on { background: var(--ink); color: #FAF6EF; }
+  .d-day.on .dc { color: rgba(250,246,239,0.7); }
+  .d-day .dc { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); }
+  .d-summary .lead { font-size: 14.5px; line-height: 1.55; margin: 0 0 8px; }
+  .d-summary .lead b { font-weight: 600; }
+  .d-note { font-size: 12px; color: var(--ink-faint); margin: 0 0 20px; line-height: 1.5; }
+  .d-note b { color: var(--ink-muted); font-weight: 600; }
+  .pgrid { display: flex; flex-direction: column; gap: 14px; }
+  .pcard { background: var(--surface); border-radius: 12px; box-shadow: var(--card-edge);
+    padding: 16px 18px; border-left: 3px solid var(--kc); }
+  .pcard-h { display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 13px; }
+  .pnm { font-size: 12.5px; font-weight: 600; }
+  .pcol { display: grid; grid-template-columns: 1.2fr 0.7fr 1fr; gap: 32px; }
+  .seg-h { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--ink-faint); font-family: var(--font-mono); margin: 0 0 8px; }
+  .donelist { list-style: none; margin: 0; padding: 0; display: flex;
+    flex-direction: column; gap: 6px; }
+  .donelist li { display: flex; gap: 8px; align-items: flex-start; font-size: 12px;
+    color: var(--ink); }
+  .donelist .chk { width: 13px; height: 13px; border-radius: 3px; background: var(--kcs);
+    border: 1px solid var(--kc); flex: 0 0 auto; margin-top: 2px; position: relative; }
+  .donelist .chk::after { content: "✓"; position: absolute; inset: 0; font-size: 9px;
+    line-height: 11px; text-align: center; color: var(--kc); }
+  .miniline { display: flex; align-items: center; flex-wrap: wrap; }
+  .mdot { width: 9px; height: 9px; border-radius: 999px; background: var(--kc); flex: 0 0 auto; }
+  .mbar { width: 12px; height: 2px; background: var(--hairline); flex: 0 0 auto; }
+  .mnow { font-size: 10.5px; color: var(--ink-faint); margin-top: 9px; }
+  .pseg.next .nexttxt { font-size: 12.5px; color: var(--kc); line-height: 1.4; font-weight: 500; }
+  .cmd { margin-top: 14px; display: flex; align-items: center; gap: 10px;
+    background: #211C15; border-radius: 9px; padding: 9px 11px; }
+  .cmd-run { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--kc); white-space: nowrap; flex: 0 0 auto; }
+  .cmd code { font-family: var(--font-mono); font-size: 11.5px; color: #EDE6D8;
+    white-space: nowrap; overflow-x: auto; flex: 1 1 auto; }
+  .cmd .copybtn { flex: 0 0 auto; background: rgba(255,255,255,0.12); border: 0;
+    color: #EDE6D8; font-family: var(--font-mono); font-size: 10.5px; padding: 5px 11px;
+    border-radius: 6px; cursor: pointer; min-width: 64px; }
+  .cmd .copybtn.did { background: var(--positive); }
+  .cmd .copybtn span { display: inline-block; transition: filter 180ms ease, opacity 180ms ease; }
+  .cmd .copybtn.swapping span { filter: blur(2px); opacity: 0.4; }
+  .cmd .copybtn:hover { background: rgba(255,255,255,0.24); }
+  .agentbtn { margin-top: 11px; width: 100%; background: var(--ghost);
+    border: 1px dashed var(--hairline); color: var(--ink-muted); font-family: var(--font-mono);
+    font-size: 11px; padding: 9px; border-radius: 8px; cursor: pointer; }
+  .agentbtn:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent);
+    border-color: var(--accent); }
+  .agentbtn:disabled { opacity: 0.5; cursor: default; }
+  .cardfresh { animation: cardflash 900ms var(--ease-out); }
+  @keyframes cardflash {
+    0% { box-shadow: 0 0 0 2px var(--positive), var(--card-edge); background: var(--positive-soft); }
+    100% { box-shadow: var(--card-edge); background: var(--surface); }
+  }
+  @media (max-width: 720px) {
+    .d-wrap { grid-template-columns: 1fr; }
+    .d-rail { position: static; flex-direction: row; flex-wrap: wrap; }
+    .pcol { grid-template-columns: 1fr; gap: 14px; }
+  }
+
+  /* ---------- E: Threads (thread-first, days demoted to annotation) ------- */
+  .t-lead { font-size: 14.5px; line-height: 1.55; margin: 0 0 6px; }
+  .t-lead b { font-weight: 600; }
+  .tcard .pcard-h { align-items: baseline; }
+  .tnm { font-size: 13.5px; font-weight: 600; }
+  .tnm .proj { margin-left: 10px; }
+  .t-meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint);
+    margin: -8px 0 13px; }
+  .daychips { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 4px; }
+  .daychip { font-family: var(--font-mono); font-size: 10px; padding: 3px 8px;
+    border-radius: 999px; background: var(--ghost); color: var(--ink-faint);
+    display: inline-flex; gap: 6px; align-items: center; }
+  .daychip.today { background: var(--kcs); color: var(--kc); }
+  .daychip .n { font-weight: 600; }
+  .daychip.idle { opacity: 0.45; }
+  .t-done-day { font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint);
+    text-transform: uppercase; letter-spacing: 0.06em; margin: 7px 0 3px; }
+  .t-done-day:first-child { margin-top: 0; }
+  .who-tag { font-size: 9px; font-family: var(--font-mono); text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--ink-faint); margin-left: 6px; }
+  .nexttxt.byyou { color: var(--ink); }
+  .nexttxt.byyou::before { content: "“"; color: var(--ink-faint); }
+  .nexttxt.byyou::after { content: "” — you"; color: var(--ink-faint); font-size: 11px; }
+  .replyrow { margin-top: 8px; display: flex; gap: 8px; }
+  .replyrow input { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono);
+    font-size: 11px; padding: 8px 11px; border-radius: 8px; background: var(--surface);
+    border: 1px solid var(--hairline); color: var(--ink); }
+  .replyrow input::placeholder { color: var(--ink-faint); }
+  .replyrow input:focus { outline: none; border-color: var(--ink-muted); }
+  .replyrow button { flex: 0 0 auto; background: var(--ink); color: #FAF6EF; border: 0;
+    border-radius: 8px; font-family: var(--font-mono); font-size: 10.5px;
+    padding: 0 14px; cursor: pointer; }
+
+  /* ---------- switcher (verbatim from attention-stats prototype) ---------- */
+  .switcher {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #211C15; color: #EDE6D8; border-radius: 999px;
+    box-shadow: var(--shadow-float); display: flex; align-items: center;
+    gap: 4px; padding: 6px 8px; z-index: 100; user-select: none;
+  }
+  .switcher button {
+    background: transparent; border: 0; color: #EDE6D8; cursor: pointer;
+    font-size: 16px; width: 30px; height: 30px; border-radius: 999px;
+    display: grid; place-items: center;
+  }
+  .switcher button:hover { background: rgba(255,255,255,0.12); }
+  .switcher .name { font-size: 12px; font-family: var(--font-mono); padding: 0 12px;
+    min-width: 168px; text-align: center; }
+  .switcher .name b { color: #C9A15A; }
+  .proto-flag { position: fixed; top: 10px; right: 12px; font-size: 10px;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint);
+    font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+  <div class="proto-flag">prototype · throwaway</div>
+  <div class="wrap" id="root"></div>
+
+  <div class="switcher" role="group" aria-label="Prototype variant switcher">
+    <button id="prev" aria-label="Previous variant">‹</button>
+    <span class="name" id="vname"></span>
+    <button id="next" aria-label="Next variant">›</button>
+  </div>
+
+<script>
+// ---- one shared event stream, newest last -------------------------------
+// kind → verb template. `at` is minutes-ago (grows as time passes; live pushes
+// arrive at at=0). Buckets are derived from `at` so "this morning / yesterday"
+// stays honest as the synthetic clock advances.
+// sid = the session id Riku already knows (it reads local transcripts). `next`
+// is the next best step; the card turns both into a copy-paste resume command.
+const SESSIONS = {
+  relay:   { proj: "riku/relay",     model: "opus-4.8",  sid: "rk-relay-8f2",  thread: "Engine read seam refactor",  next: "Approve the store.rs replay change, then re-run cargo test -p sessions" },
+  ledger:  { proj: "riku/attention", model: "opus-4.8",  sid: "rk-ledger-4c1", thread: "Attention Ledger (ADR 0012)", next: "Review ADR 0012 storage trade-offs, then mark it Accepted or request changes" },
+  web:     { proj: "riku/web",       model: "sonnet-5",  sid: "rk-web-2a1",    thread: "Activity recap surface",      next: "Fold the D day-board recap into web/src and drop the prototype variants" },
+  docs:    { proj: "riku/docs",      model: "haiku-4.5", sid: "rk-docs-9b7",   thread: "README + licensing refresh",  next: "Continue the README follow-ups from #48" },
+};
+// ---- the project journal -------------------------------------------------
+// The model from chat: an AGENT (not Riku) reads a session and APPENDS an entry
+// to journal/<project>.jsonl. Riku only reads it. Each entry is the agent's
+// interpretation — what's done, what's next — captured at a moment in time.
+// Append-only ⇒ old entries ARE the "what did I do yesterday" history.
+function mkcmd(key, instr) { return `claude --resume ${SESSIONS[key].sid} "${instr}"`; }
+const STATUS = {
+  blocked: { cls: "k-blocked", pill: "needs you" },
+  review:  { cls: "k-review",  pill: "review" },
+  track:   { cls: "k-shipped", pill: "on track" },
+};
+// seed log: one-plus entries per project, `min` = minutes ago it was appended.
+const JOURNAL = {
+  relay: [
+    { min: 690, status: "track",   done: ["Opened the machine-stamped read interface"], next: "Draft the Engine read seam" },
+    { min: 96,  status: "blocked", done: ["Refactored the Engine read seam (6 files)", "Ran cargo test — 214 passing"], next: "Approve the store.rs replay change, then re-run cargo test -p sessions" },
+  ],
+  ledger: [
+    { min: 842, status: "review", done: ["Drafted ADR 0012 — storage + records"], next: "Review ADR 0012 trade-offs, then mark it Accepted or request changes" },
+  ],
+  web: [
+    { min: 24, status: "track", done: ["Built the day-board recap prototype (variant D)"], next: "Fold variant D into web/src and drop the prototype variants" },
+  ],
+  docs: [
+    { min: 1420, status: "track", done: ["Merged #48 — LICENSE + README elements"], next: "Continue the README follow-ups from #48" },
+  ],
+};
+// what the agent would append on its NEXT re-read (drained by the card button).
+const AGENT_UPDATES = {
+  relay: [
+    { status: "track",  done: ["Approval granted — replay path updated", "Re-ran suite: 214 passing, 0 failed"], next: "Wire the ledger writer into the AttentionReducer choke point" },
+    { status: "review", done: ["Ledger writer wired in", "Added the (session,key,since) dedup test"], next: "Get review on the writer's idempotency key" },
+  ],
+  ledger: [
+    { status: "track", done: ["ADR 0012 marked Accepted", "Cross-linked from CONTEXT.md"], next: "Scaffold the attention.jsonl writer behind metrics.enabled" },
+  ],
+  web: [
+    { status: "review", done: ["Folded variant D into web/src/Recap.tsx", "Removed A/B/C prototype variants"], next: "Get design review on the day-board spacing" },
+  ],
+  docs: [
+    { status: "track", done: ["Closed the README follow-ups from #48"], next: "Screenshot-refresh the board images for the new UI" },
+  ],
+};
+let justPosted = null; // project key that just got an entry (drives the flash)
+
+const KIND = {
+  shipped: { cls: "k-shipped", pill: "shipped" },
+  blocked: { cls: "k-blocked", pill: "needs you" },
+  review:  { cls: "k-review",  pill: "review" },
+  answer:  { cls: "k-answer",  pill: "answered" },
+  edit:    { cls: "k-edit",    pill: "edit" },
+  test:    { cls: "k-test",    pill: "tests" },
+  start:   { cls: "k-start",   pill: "started" },
+};
+// minutes-ago at load. Small = this morning; ~600-900 = yesterday; more = earlier.
+let SEQ = 0;
+function ev(min, sess, kind, txt) {
+  return { id: ++SEQ, min, sess, kind, txt };
+}
+const STREAM = [
+  ev(1490, "docs",   "start",   "Opened session on the README refresh"),
+  ev(1455, "docs",   "edit",    "Rewrote the install section, 3 files"),
+  ev(1420, "docs",   "shipped", "Merged <b>#48</b> — LICENSE + README elements"),
+  ev(880,  "ledger", "start",   "Picked up the Attention Ledger ADR"),
+  ev(842,  "ledger", "edit",    "Drafted <b>ADR 0012</b> — local metrics store"),
+  ev(805,  "ledger", "review",  "Waiting on your read of the storage trade-offs"),
+  ev(760,  "web",    "edit",    "Built the attention-stats prototype, 3 variants"),
+  ev(735,  "web",    "answer",  "You picked variant A (terminal) as the base"),
+  ev(690,  "relay",  "start",   "Began the machine-stamped read interface"),
+  ev(150,  "relay",  "test",    "Ran <b>cargo test -p sessions</b> — 214 passing"),
+  ev(96,   "relay",  "edit",    "Refactored Engine read seam, 6 files"),
+  ev(52,   "relay",  "blocked", "Needs approval to touch <b>store.rs</b> replay path"),
+  ev(24,   "web",    "edit",    "Started the activity-recap prototype"),
+  ev(6,    "ledger", "review",  "Second pass on ADR 0012 ready for you"),
+  // ---- yesterday (day 1) ----
+  ev(1100, "relay",  "test",    "Suite passing after the assemble refactor"),
+  ev(1180, "ledger", "edit",    "Second draft of <b>ADR 0012</b>"),
+  // ---- 2 days ago (day 2) ----
+  ev(2400, "web",    "shipped", "Merged <b>#49</b> — refreshed Work Items screenshots"),
+  ev(2460, "web",    "test",    "Visual snapshot suite green"),
+  ev(2520, "relay",  "edit",    "First cut of the Collector read path"),
+  ev(2600, "ledger", "start",   "Sketched the ledger record shape"),
+  // ---- 3 days ago (day 3) ----
+  ev(3850, "docs",   "edit",    "Outlined ADR 0011"),
+  ev(3900, "relay",  "review",  "Design review on the Session assembler seam"),
+];
+// synthetic live pushes (fire on a timer to show real-time updating)
+const LIVE = [
+  ev(0, "relay",  "answer",  "Approval granted — resumed the replay refactor"),
+  ev(0, "relay",  "test",    "Re-ran suite — <b>214 passing</b>, 0 failed"),
+  ev(0, "web",    "shipped", "Committed the recap prototype to a branch"),
+  ev(0, "ledger", "blocked", "Needs you: confirm the JSONL rotation cap"),
+];
+let liveIdx = 0;
+
+// ---- derived helpers -----------------------------------------------------
+function agoLabel(min) {
+  if (min < 1) return "now";
+  if (min < 60) return min + "m ago";
+  const h = Math.floor(min / 60);
+  if (min < 60 * 20) return h + "h ago";
+  const d = Math.round(min / (60 * 24));
+  return d + "d ago";
+}
+function clockLabel(min) {
+  // synthetic wall-clock: pretend "now" is 15:20. Render HH:MM for the row gutter.
+  const base = 15 * 60 + 20; // minutes since midnight "now"
+  let m = ((base - min) % (24 * 60) + 24 * 60) % (24 * 60);
+  const hh = String(Math.floor(m / 60)).padStart(2, "0");
+  const mm = String(Math.floor(m % 60)).padStart(2, "0");
+  return hh + ":" + mm;
+}
+function bucketOf(min) {
+  if (min < 60 * 8) return "This morning";
+  if (min < 60 * 30) return "Yesterday";
+  if (min < 60 * 24 * 7) return "Earlier this week";
+  return "Older";
+}
+function sorted() { return [...STREAM].sort((a, b) => a.min - b.min); } // newest first
+
+// day helpers for variant D. "now" is 15:20 (920 min into today).
+const NOW_MIN_INTO_DAY = 15 * 60 + 20;
+function daysAgo(min) {
+  if (min <= NOW_MIN_INTO_DAY) return 0;
+  return 1 + Math.floor((min - NOW_MIN_INTO_DAY) / 1440);
+}
+function dayLabel(idx) {
+  if (idx === 0) return "Today";
+  if (idx === 1) return "Yesterday";
+  const d = new Date();
+  d.setDate(d.getDate() - idx);
+  return d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+}
+let selDay = 0;
+window.selectDay = (i) => { selDay = i; render(); };
+window.copyCmd = (btn) => {
+  const txt = btn.parentElement.querySelector("code").textContent;
+  if (navigator.clipboard) navigator.clipboard.writeText(txt);
+  const label = btn.querySelector("span");
+  const swap = (text, cls) => {
+    btn.classList.add("swapping");
+    setTimeout(() => {
+      label.textContent = text;
+      btn.classList.toggle("did", cls);
+      btn.classList.remove("swapping");
+    }, 180);
+  };
+  swap("copied ✓", true);
+  setTimeout(() => swap("copy", false), 1400);
+};
+// the append: agent reads sessions → pushes one entry onto journal/<key>.jsonl.
+window.agentPost = (key) => {
+  const q = AGENT_UPDATES[key];
+  if (!q || !q.length) return;
+  const u = q.shift();
+  JOURNAL[key].push({ min: 0, who: "agent", status: u.status, done: u.done, next: u.next });
+  justPosted = key;
+  render();
+  setTimeout(() => { justPosted = null; render(); }, 1500);
+};
+// the journal is a CONVERSATION: the user appends a correction entry
+// (who:"user") rather than editing the agent's. Latest entry wins.
+window.userReply = (key) => {
+  const inp = document.getElementById("reply-" + key);
+  const txt = (inp.value || "").trim();
+  if (!txt) return;
+  const prev = JOURNAL[key].reduce((a, b) => (b.min < a.min ? b : a));
+  JOURNAL[key].push({ min: 0, who: "user", status: prev.status, done: [], next: txt });
+  justPosted = key;
+  render();
+  setTimeout(() => { justPosted = null; render(); }, 1500);
+};
+// the read: newest journal entry that is NOT newer than the selected day.
+function stateAsOf(key, day) {
+  const cands = JOURNAL[key].filter(e => daysAgo(e.min) >= day);
+  if (!cands.length) return null;
+  return cands.reduce((a, b) => (b.min < a.min ? b : a));
+}
+
+// ---- variant A: timeline -------------------------------------------------
+function variantA() {
+  const evs = sorted();
+  const buckets = [];
+  for (const e of evs) {
+    const b = bucketOf(e.min);
+    let g = buckets.find(x => x.name === b);
+    if (!g) { g = { name: b, items: [] }; buckets.push(g); }
+    g.items.push(e);
+  }
+  return buckets.map(g => `
+    <div class="bucket">
+      <div class="bucket-h"><span>${g.name}</span><span class="cnt mono">${g.items.length}</span></div>
+      ${g.items.map(e => {
+        const k = KIND[e.kind], s = SESSIONS[e.sess];
+        return `<div class="row ${k.cls}${e.min < 0.05 ? " fresh" : ""}">
+          <div class="t">${clockLabel(e.min)}</div>
+          <div class="body">
+            <div class="line1">
+              <span class="pill">${k.pill}</span>
+              <span class="proj">${s.proj}</span>
+            </div>
+            <div class="txt">${e.txt}</div>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>`).join("");
+}
+
+// ---- variant B: session lanes -------------------------------------------
+function variantB() {
+  const keys = Object.keys(SESSIONS);
+  return `<div class="lanes">` + keys.map(key => {
+    const s = SESSIONS[key];
+    const evs = sorted().filter(e => e.sess === key);
+    if (!evs.length) return "";
+    const last = evs[0];
+    const openNeed = evs.find(e => e.kind === "blocked" || e.kind === "review");
+    const statusCls = openNeed ? KIND[openNeed.kind].cls : "k-shipped";
+    const statusTxt = openNeed ? KIND[openNeed.kind].pill : "clear";
+    return `<div class="lane ${statusCls}">
+      <div class="lane-h">
+        <span class="nm">${s.proj.split("/")[1]}</span>
+        <span class="st pill">${statusTxt}</span>
+      </div>
+      ${evs.slice(0, 5).map(e => `
+        <div class="ev ${KIND[e.kind].cls}${e.min < 0.05 ? " fresh" : ""}">
+          <span class="dot"></span>
+          <span class="tt">${e.txt}</span>
+          <span class="ago">${agoLabel(e.min)}</span>
+        </div>`).join("")}
+      <div class="now ${statusCls}">${openNeed ? "→ " + openNeed.txt.replace(/<[^>]+>/g, "") : "→ nothing waiting"}</div>
+    </div>`;
+  }).join("") + `</div>`;
+}
+
+// ---- variant C: catch me up ---------------------------------------------
+function variantC() {
+  const evs = sorted();
+  const shipped = evs.filter(e => e.kind === "shipped").length;
+  const needs = evs.filter(e => e.kind === "blocked" || e.kind === "review");
+  const sessN = new Set(evs.map(e => e.sess)).size;
+  const morning = evs.filter(e => e.min < 60 * 8);
+  return `
+    <div class="recap">
+      <p class="lead">Since this morning you touched <b>${sessN} sessions</b> and
+        shipped <b>${shipped}</b> ${shipped === 1 ? "thing" : "things"}. The relay
+        refactor is moving — <b>214 tests pass</b>. ${needs.length
+          ? `<b>${needs.length}</b> ${needs.length === 1 ? "thing needs" : "things need"} you before they go further.`
+          : `Nothing is blocked on you.`}</p>
+      <div class="stats">
+        <div class="stat"><span class="n">${sessN}</span><span class="l">sessions</span></div>
+        <div class="stat"><span class="n" style="color:var(--positive)">${shipped}</span><span class="l">shipped</span></div>
+        <div class="stat"><span class="n" style="color:var(--negative)">${needs.length}</span><span class="l">need you</span></div>
+        <div class="stat"><span class="n">${morning.length}</span><span class="l">events today</span></div>
+      </div>
+      ${needs.length ? `<div class="now">→ Next: ${needs[0].txt.replace(/<[^>]+>/g, "")} (${SESSIONS[needs[0].sess].proj})</div>` : ""}
+    </div>
+    <p class="detail-h">The detail, newest first</p>
+    <div class="detail">
+      ${evs.slice(0, 8).map(e => {
+        const k = KIND[e.kind], s = SESSIONS[e.sess];
+        return `<div class="row ${k.cls}${e.min < 0.05 ? " fresh" : ""}">
+          <div class="t">${agoLabel(e.min)}</div>
+          <div class="body">
+            <div class="line1"><span class="pill">${k.pill}</span><span class="proj">${s.proj}</span></div>
+            <div class="txt">${e.txt}</div>
+          </div>
+        </div>`;
+      }).join("")}
+    </div>`;
+}
+
+// ---- variant D: day board (sidebar + per-project summary) ---------------
+// The synthesis: pick a day on the left; on the right, every project you
+// touched that day gets a card with Done / Where I am (timeline) / What's next.
+function variantD() {
+  const days = [...new Set(sorted().map(e => daysAgo(e.min)))].sort((a, b) => a - b);
+  if (!days.includes(selDay)) selDay = days[0] ?? 0;
+
+  const rail = days.map(d => {
+    const cnt = STREAM.filter(e => daysAgo(e.min) === d).length;
+    return `<button class="d-day${d === selDay ? " on" : ""}" onclick="selectDay(${d})">
+      <span class="dl">${dayLabel(d)}</span><span class="dc">${cnt}</span></button>`;
+  }).join("");
+
+  const dayEvs = sorted().filter(e => daysAgo(e.min) === selDay);
+  const projs = [...new Set(dayEvs.map(e => e.sess))];
+  const shipped = dayEvs.filter(e => e.kind === "shipped").length;
+  const needsAll = sorted().filter(e => e.kind === "blocked" || e.kind === "review");
+
+  const summary = `<div class="d-summary"><p class="lead">
+    On <b>${dayLabel(selDay)}</b> you worked across <b>${projs.length}</b>
+    ${projs.length === 1 ? "project" : "projects"} — ${dayEvs.length} events,
+    <b>${shipped}</b> shipped. ${needsAll.length
+      ? `<b>${needsAll.length}</b> ${needsAll.length === 1 ? "thing needs" : "things need"} you to move forward.`
+      : "Nothing is blocked on you."}</p>
+    <p class="d-note">Each card is written by an <b>agent</b> appending to
+      <span class="mono">journal/&lt;project&gt;.jsonl</span> — Riku only reads it.${selDay === 0
+        ? " Press a card's button to watch the agent post an update."
+        : " (Historical log — the agent posts on Today.)"}</p></div>`;
+
+  const cards = projs.map(key => {
+    const s = SESSIONS[key];
+    const entry = stateAsOf(key, selDay);
+    if (!entry) return "";
+    const st = STATUS[entry.status];
+    const log = JOURNAL[key].filter(e => daysAgo(e.min) >= selDay).sort((a, b) => b.min - a.min);
+    const isFresh = justPosted === key;
+    const q = AGENT_UPDATES[key], hasMore = q && q.length;
+    return `<div class="pcard ${st.cls}${isFresh ? " cardfresh" : ""}">
+      <div class="pcard-h">
+        <span class="pnm mono">${s.proj}</span>
+        <span class="pill">${st.pill}</span>
+      </div>
+      <div class="pcol">
+        <div class="pseg">
+          <div class="seg-h">Done</div>
+          <ul class="donelist">
+            ${entry.done.map(d => `<li class="${st.cls}"><span class="chk"></span><span>${d}</span></li>`).join("") || '<li class="muted">—</li>'}
+          </ul>
+        </div>
+        <div class="pseg">
+          <div class="seg-h">Where I am</div>
+          <div class="miniline ${st.cls}">${log.map(() => '<span class="mdot"></span>').join('<span class="mbar"></span>')}</div>
+          <div class="mnow mono">${log.length} log ${log.length === 1 ? "entry" : "entries"} · latest ${agoLabel(entry.min)}</div>
+        </div>
+        <div class="pseg next ${st.cls}">
+          <div class="seg-h">To go further</div>
+          <div class="nexttxt">${entry.next}</div>
+        </div>
+      </div>
+      <div class="cmd ${st.cls}">
+        <span class="cmd-run">▶ run in a clean session</span>
+        <code>${mkcmd(key, entry.next)}</code>
+        <button class="copybtn" onclick="copyCmd(this)"><span>copy</span></button>
+      </div>
+      ${selDay === 0 ? `<button class="agentbtn" ${hasMore ? "" : "disabled"} onclick="agentPost('${key}')">${hasMore
+        ? `▶ agent re-reads sessions &amp; appends to journal/${key}.jsonl`
+        : "✓ journal up to date"}</button>` : ""}
+    </div>`;
+  }).join("");
+
+  return `<div class="d-wrap">
+    <aside class="d-rail"><div class="rail-h">Days</div>${rail}</aside>
+    <div class="d-main">${summary}<div class="pgrid">${cards}</div></div>
+  </div>`;
+}
+
+// ---- variant E: threads (thread-first, days as annotation) ---------------
+// The unit is the EFFORT, not the date. One card per ongoing thread; the days
+// it spans become an activity strip inside the card. Sorted by what needs you.
+function dayShort(d) {
+  if (d === 0) return "Today";
+  if (d === 1) return "Yst";
+  const dt = new Date();
+  dt.setDate(dt.getDate() - d);
+  return dt.toLocaleDateString(undefined, { weekday: "short" });
+}
+function variantE() {
+  const W = { blocked: 0, review: 1, track: 2 };
+  const threads = Object.keys(SESSIONS).map(key => {
+    const evs = sorted().filter(e => e.sess === key);
+    const entry = JOURNAL[key].reduce((a, b) => (b.min < a.min ? b : a));
+    return { key, evs, entry, last: evs[0]?.min ?? Infinity };
+  }).filter(t => t.evs.length)
+    .sort((a, b) => (W[a.entry.status] - W[b.entry.status]) || (a.last - b.last));
+
+  const needs = threads.filter(t => t.entry.status !== "track").length;
+  const summary = `<div class="d-summary"><p class="t-lead">
+    You have <b>${threads.length} ongoing threads</b>. ${needs
+      ? `<b>${needs}</b> ${needs === 1 ? "needs" : "need"} you to move forward — they're on top.`
+      : "Nothing is blocked on you."}</p>
+    <p class="d-note">Thread-first: the unit is the <b>effort</b>, not the day.
+      Each card is one journal (<span class="mono">journal/&lt;project&gt;.jsonl</span>);
+      the days it spans are the chip strip inside the card.</p></div>`;
+
+  const cards = threads.map(t => {
+    const s = SESSIONS[t.key];
+    const st = STATUS[t.entry.status];
+    const maxDay = Math.max(...t.evs.map(e => daysAgo(e.min)));
+    const chips = [];
+    for (let d = maxDay; d >= 0; d--) {
+      const n = t.evs.filter(e => daysAgo(e.min) === d).length;
+      chips.push(`<span class="daychip${d === 0 ? " today" : ""}${n ? "" : " idle"}">
+        ${dayShort(d)}${n ? ` <span class="n">${n}</span>` : ""}</span>`);
+    }
+    // done, accumulated across the whole thread, grouped by journal-entry day
+    const byDay = new Map();
+    for (const e of [...JOURNAL[t.key]].sort((a, b) => a.min - b.min)) {
+      if (!e.done.length) continue; // user corrections carry no done items
+      const d = daysAgo(e.min);
+      byDay.set(d, (byDay.get(d) || []).concat(e.done));
+    }
+    const doneHtml = [...byDay.entries()].map(([d, items]) => `
+      <div class="t-done-day">${dayShort(d)}</div>
+      <ul class="donelist">${items.map(x =>
+        `<li class="${st.cls}"><span class="chk"></span><span>${x}</span></li>`).join("")}</ul>`).join("");
+    const isFresh = justPosted === t.key;
+    const q = AGENT_UPDATES[t.key], hasMore = q && q.length;
+    return `<div class="pcard tcard ${st.cls}${isFresh ? " cardfresh" : ""}">
+      <div class="pcard-h">
+        <span class="tnm">${s.thread}<span class="proj">${s.proj}</span></span>
+        <span class="pill">${st.pill}</span>
+      </div>
+      <div class="t-meta">active ${maxDay + 1} ${maxDay ? "days" : "day"} ·
+        ${t.evs.length} events · last ${agoLabel(t.last)}</div>
+      <div class="pcol">
+        <div class="pseg"><div class="seg-h">Done so far</div>${doneHtml}</div>
+        <div class="pseg">
+          <div class="seg-h">Days active</div>
+          <div class="daychips">${chips.join("")}</div>
+          <div class="mnow mono">${JOURNAL[t.key].length} journal ${JOURNAL[t.key].length === 1 ? "entry" : "entries"}${
+            (n => n ? ` (${n} yours)` : "")(JOURNAL[t.key].filter(e => e.who === "user").length)
+          } · latest ${agoLabel(t.entry.min)}</div>
+        </div>
+        <div class="pseg next ${st.cls}">
+          <div class="seg-h">To go further<span class="who-tag">${t.entry.who === "user" ? "your call" : "agent suggests"}</span></div>
+          <div class="nexttxt${t.entry.who === "user" ? " byyou" : ""}">${t.entry.next}</div>
+        </div>
+      </div>
+      <div class="cmd ${st.cls}">
+        <span class="cmd-run">▶ run in a clean session</span>
+        <code>${mkcmd(t.key, t.entry.next)}</code>
+        <button class="copybtn" onclick="copyCmd(this)"><span>copy</span></button>
+      </div>
+      <button class="agentbtn" ${hasMore ? "" : "disabled"} onclick="agentPost('${t.key}')">${hasMore
+        ? `▶ agent re-reads sessions &amp; appends to journal/${t.key}.jsonl`
+        : "✓ journal up to date"}</button>
+      <div class="replyrow">
+        <input id="reply-${t.key}" placeholder="Disagree? Answer the agent — appends a who:user entry, latest wins"
+          onkeydown="if(event.key==='Enter')userReply('${t.key}')" />
+        <button onclick="userReply('${t.key}')">append</button>
+      </div>
+    </div>`;
+  }).join("");
+
+  return summary + `<div class="pgrid">${cards}</div>`;
+}
+
+// ---- switcher (verbatim shape from attention-stats prototype) ------------
+const VARIANTS = {
+  E: { name: "Threads",     render: variantE },
+  D: { name: "Day board",   render: variantD },
+  A: { name: "Timeline",    render: variantA, narrow: true },
+  B: { name: "Lanes",       render: variantB },
+  C: { name: "Catch me up", render: variantC, narrow: true },
+};
+const ORDER = ["E", "D", "A", "B", "C"];
+
+function current() {
+  const v = new URLSearchParams(location.search).get("variant");
+  return VARIANTS[v] ? v : "E";
+}
+function setVariant(v) {
+  const u = new URL(location.href);
+  u.searchParams.set("variant", v);
+  history.replaceState(null, "", u);
+  render();
+}
+function render() {
+  const v = current();
+  // the 5s live re-render must not eat a half-typed reply: carry the focused
+  // reply input's value + caret across the innerHTML swap.
+  const ae = document.activeElement;
+  const keep = ae && ae.id && ae.id.startsWith("reply-")
+    ? { id: ae.id, val: ae.value, pos: ae.selectionStart } : null;
+  const narrow = VARIANTS[v].narrow;
+  document.getElementById("root").innerHTML =
+    `<div class="${narrow ? "v-narrow" : ""}">
+     <h1 class="proto-h">riku recap <span class="muted">— what did I do?</span>
+       <span class="livedot" style="margin-left:8px"><i></i>live</span></h1>
+     <p class="proto-sub">Prototype of the activity recap · synthetic live stream · variant ${v} of 5</p>` +
+    VARIANTS[v].render() + `</div>`;
+  document.getElementById("vname").innerHTML = `<b>${v}</b> — ${VARIANTS[v].name}`;
+  if (keep) {
+    const el = document.getElementById(keep.id);
+    if (el) { el.value = keep.val; el.focus(); el.setSelectionRange(keep.pos, keep.pos); }
+  }
+}
+function cycle(dir) {
+  const i = ORDER.indexOf(current());
+  setVariant(ORDER[(i + dir + ORDER.length) % ORDER.length]);
+}
+document.getElementById("prev").onclick = () => cycle(-1);
+document.getElementById("next").onclick = () => cycle(1);
+addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  if (e.key === "ArrowLeft") cycle(-1);
+  if (e.key === "ArrowRight") cycle(1);
+});
+
+// ---- real-time: age existing events, push a new one every 5s ------------
+setInterval(() => {
+  for (const e of STREAM) e.min += 0.08; // ~5s of drift so "now" keeps moving
+  if (liveIdx < LIVE.length) {
+    const next = { ...LIVE[liveIdx++], min: 0 };
+    STREAM.push(next);
+  }
+  render();
+}, 5000);
+
+render();
+</script>
+</body>
+</html>
