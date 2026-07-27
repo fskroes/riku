@@ -1328,6 +1328,7 @@ dependencies = [
  "dirs",
  "relay",
  "serde",
+ "serde_json",
  "sessions",
  "tempfile",
  "tokio",

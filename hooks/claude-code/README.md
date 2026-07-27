@@ -98,6 +98,30 @@ You should see one line of JSON with `"who":"agent"` and your session id. If
 instead `journal-missed.log` gained a line, the append was denied — recheck
 step 3 (rule present, and at user level).
 
+## Riku's side
+
+The hook writes; Riku reads, and answers back on your behalf:
+
+```sh
+riku config set journal.enabled true        # off by default — nothing is read or written until this
+riku journal note . "temps.py is NOT done - I also need Kelvin"
+riku journal --purge                        # delete every journal file on this machine
+```
+
+`journal.enabled` gates *Riku's* journal surfaces, not this hook: an installed
+hook keeps writing whether or not Riku is reading, so uninstall the hook (or
+purge) if you want nothing on disk at all. A note is appended in the same shape
+with `who:"user"` and `handoff:"needs-you"` — you are asking for something —
+answering whichever entry spoke last. The next session's stop hook feeds it back
+in the tail above, which is what makes the journal a conversation. Nothing is
+edited or deleted: your correction simply wins, being the latest word.
+
+Journal files are capped at 1 MiB and rotated to `<project>.jsonl.1`, so months
+of entries stay bounded. Both writers enforce the cap — the hook before it
+invites an append, Riku before it appends a note — since the hook writes most of
+the entries. Riku reads the live file; the rotated generation stays on disk until
+the next rotation replaces it, and `--purge` removes both.
+
 ## Record shape (v1)
 
 ```

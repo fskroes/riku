@@ -12,6 +12,7 @@ use url::{Host, Url};
 pub struct Config {
     pub relay: RelayConfig,
     pub paths: PathsConfig,
+    pub journal: JournalConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -26,6 +27,16 @@ pub struct RelayConfig {
 pub struct PathsConfig {
     pub root: Option<String>,
     pub codex_root: Option<String>,
+}
+
+/// The Project Journal toggle (ADR 0013). Off by default and deliberately its
+/// own key: the journal stores the user's and the agent's prose, which is more
+/// sensitive than anything else Riku keeps, so it is opted into on its own and
+/// never carried along by another feature's switch.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct JournalConfig {
+    pub enabled: bool,
 }
 
 impl Config {
@@ -50,9 +61,21 @@ impl Config {
             "relay.token" => self.relay.token = Some(value.to_string()),
             "paths.root" => self.paths.root = Some(value.to_string()),
             "paths.codex_root" => self.paths.codex_root = Some(value.to_string()),
-            _ => return Err(format!("unknown config key '{key}'; expected relay.url, relay.token, paths.root, or paths.codex_root")),
+            "journal.enabled" => self.journal.enabled = parse_bool(key, value)?,
+            _ => return Err(format!("unknown config key '{key}'; expected relay.url, relay.token, paths.root, paths.codex_root, or journal.enabled")),
         }
         Ok(())
+    }
+}
+
+/// A toggle reads as exactly `true` or `false`. Anything else is refused rather
+/// than folded into a default, so `journal.enabled yes` cannot leave a user
+/// believing the journal is on when it is off.
+fn parse_bool(key: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!("{key} must be true or false, not '{other}'")),
     }
 }
 
@@ -92,7 +115,18 @@ pub enum ResolvedCommand {
     Board(BoardOptions),
     Collect(CollectOptions),
     Relay(RelayOptions),
-    ConfigSet { key: String, value: String },
+    ConfigSet {
+        key: String,
+        value: String,
+    },
+    /// Append the user's own entry to a project's journal. `project` is as
+    /// typed — a directory or a slug — and is resolved against the filesystem
+    /// where the write happens, not here.
+    JournalNote {
+        project: String,
+        text: String,
+    },
+    JournalPurge,
     Help,
 }
 
@@ -113,6 +147,7 @@ pub fn resolve(
         Some("collect") => resolve_collect(&args[1..], env, &config),
         Some("relay") => resolve_relay(&args[1..], env, &config),
         Some("config") => resolve_config(&args[1..]),
+        Some("journal") => resolve_journal(&args[1..], &config),
         Some(first) if first.starts_with('-') => resolve_board(args, env, &config),
         Some(command) => Err(format!("unknown command '{command}'; run 'riku --help'")),
     }
@@ -269,8 +304,34 @@ fn resolve_config(args: &[String]) -> Result<ResolvedCommand, String> {
             })
         }
         _ => Err(
-            "usage: riku config set <relay.url|relay.token|paths.root|paths.codex_root> <value>"
+            "usage: riku config set <relay.url|relay.token|paths.root|paths.codex_root|journal.enabled> <value>"
                 .to_string(),
+        ),
+    }
+}
+
+fn resolve_journal(args: &[String], config: &Config) -> Result<ResolvedCommand, String> {
+    match args {
+        [purge] if purge == "--purge" => Ok(ResolvedCommand::JournalPurge),
+        [note, project, text] if note == "note" => {
+            // Writing is inert while the journal is off, and the refusal is the
+            // command that turns it on — the toggle is the whole opt-in (ADR 0013).
+            if !config.journal.enabled {
+                return Err(
+                    "the journal is off; run 'riku config set journal.enabled true' to turn it on"
+                        .to_string(),
+                );
+            }
+            if text.trim().is_empty() {
+                return Err("a journal note needs text to say".to_string());
+            }
+            Ok(ResolvedCommand::JournalNote {
+                project: project.clone(),
+                text: text.clone(),
+            })
+        }
+        _ => Err(
+            "usage: riku journal note <project> \"<text>\", or riku journal --purge".to_string(),
         ),
     }
 }
@@ -474,8 +535,132 @@ mod tests {
         config.set("relay.url", "https://hub").unwrap();
         config.set("relay.token", "secret").unwrap();
         config.set("paths.root", "/sessions").unwrap();
+        config.set("journal.enabled", "true").unwrap();
         let parsed = Config::parse(&config.serialize().unwrap()).unwrap();
         assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn the_journal_is_off_until_it_is_turned_on() {
+        // Off by default and separate from any other toggle: no prose is stored
+        // unless the user asks for it (ADR 0013).
+        assert!(!Config::default().journal.enabled);
+        assert!(
+            !Config::parse("[relay]\nurl = 'https://hub'\n")
+                .unwrap()
+                .journal
+                .enabled
+        );
+
+        let mut config = Config::default();
+        config.set("journal.enabled", "true").unwrap();
+        assert!(config.journal.enabled);
+        config.set("journal.enabled", "false").unwrap();
+        assert!(!config.journal.enabled);
+
+        // A value that is neither says so, rather than quietly reading as off.
+        let error = config.set("journal.enabled", "yes").unwrap_err();
+        assert!(error.contains("true or false"), "unexpected error: {error}");
+    }
+
+    /// A config with the journal turned on, as `resolve` receives it.
+    fn journal_on() -> String {
+        "[journal]\nenabled = true\n".to_string()
+    }
+
+    #[test]
+    fn a_note_names_the_project_and_carries_the_users_text() {
+        let command = resolve(
+            &[
+                "journal".into(),
+                "note".into(),
+                ".".into(),
+                "temps.py is NOT done - I also need Kelvin".into(),
+            ],
+            &env(&[]),
+            Some(&journal_on()),
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            ResolvedCommand::JournalNote {
+                project: ".".to_string(),
+                text: "temps.py is NOT done - I also need Kelvin".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_note_needs_the_journal_turned_on() {
+        // The write surface is inert while the feature is off, and the error is
+        // the one-liner that turns it on.
+        let error = resolve(
+            &[
+                "journal".into(),
+                "note".into(),
+                ".".into(),
+                "answer me".into(),
+            ],
+            &env(&[]),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("riku config set journal.enabled true"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn a_note_needs_something_to_say() {
+        let error = resolve(
+            &["journal".into(), "note".into(), ".".into(), "   ".into()],
+            &env(&[]),
+            Some(&journal_on()),
+        )
+        .unwrap_err();
+        assert!(error.contains("text"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn purge_needs_nothing_turned_on() {
+        // Deleting the prose already on disk is the user's control, not a
+        // feature of the feature; it must work with the journal off.
+        assert_eq!(
+            resolve(&["journal".into(), "--purge".into()], &env(&[]), None),
+            Ok(ResolvedCommand::JournalPurge)
+        );
+        assert_eq!(
+            resolve(
+                &["journal".into(), "--purge".into()],
+                &env(&[]),
+                Some(&journal_on())
+            ),
+            Ok(ResolvedCommand::JournalPurge)
+        );
+    }
+
+    #[test]
+    fn a_malformed_journal_command_shows_the_usage() {
+        for args in [
+            vec!["journal".to_string()],
+            vec!["journal".into(), "note".into()],
+            vec!["journal".into(), "note".into(), ".".into()],
+            vec!["journal".into(), "--wat".into()],
+            vec![
+                "journal".into(),
+                "note".into(),
+                ".".into(),
+                "text".into(),
+                "extra".into(),
+            ],
+        ] {
+            let error = resolve(&args, &env(&[]), Some(&journal_on())).unwrap_err();
+            assert!(
+                error.starts_with("usage: riku journal"),
+                "unexpected error for {args:?}: {error}"
+            );
+        }
     }
 
     /// The resolved Collector URL for a given source, or the resolution error.

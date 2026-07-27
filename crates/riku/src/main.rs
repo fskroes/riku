@@ -26,6 +26,8 @@ fn main() {
         ResolvedCommand::ConfigSet { key, value } => {
             set_config(&config_path, config_contents, &key, &value)
         }
+        ResolvedCommand::JournalNote { project, text } => journal_note(&project, &text),
+        ResolvedCommand::JournalPurge => journal_purge(),
         ResolvedCommand::Board(options) => run_with_tracing(|| run_board(options)),
         ResolvedCommand::Collect(options) => run_with_tracing(|| run_collector(options)),
         ResolvedCommand::Relay(options) => run_with_tracing(|| run_relay(options)),
@@ -58,6 +60,29 @@ fn set_config(path: &std::path::Path, contents: Option<String>, key: &str, value
         fail(&error);
     }
     println!("saved {key} to {}", path.display());
+}
+
+/// Riku as the user's pen: append their words to a project's journal, where the
+/// agent's next stop entry will read them (ADR 0013).
+fn journal_note(project: &str, text: &str) {
+    let noted = sessions::resolve_journal_project(project)
+        .and_then(|project| sessions::append_note(&project, text));
+    match noted {
+        Ok(path) => println!("noted in {}", path.display()),
+        Err(error) => fail(&error),
+    }
+}
+
+fn journal_purge() {
+    match sessions::purge_journals() {
+        Ok(removed) if removed.is_empty() => println!("no journal files to remove"),
+        Ok(removed) => println!(
+            "removed {} journal file{}",
+            removed.len(),
+            if removed.len() == 1 { "" } else { "s" }
+        ),
+        Err(error) => fail(&error),
+    }
 }
 
 fn run_board(options: BoardOptions) -> Result<(), String> {
@@ -133,7 +158,7 @@ fn open_browser(address: SocketAddr) {
 
 fn print_help() {
     println!(
-        "riku — Agent Board\n\nUSAGE:\n    riku [BOARD OPTIONS]\n    riku collect [OPTIONS]\n    riku relay [OPTIONS]\n    riku config set <KEY> <VALUE>\n\nCOMMANDS:\n    collect     Watch this Mac's Agent Sessions and push them to a Relay\n    relay       Run a loopback Relay for local development (put a real multi-machine\n                Relay behind a TLS-terminating proxy — see docs/relay-deployment.md)\n    config      Save relay.url, relay.token, paths.root, or paths.codex_root\n\nBOARD OPTIONS:\n    --port <PORT>          Board port (default: 4242)\n    --root <PATH>          Claude Code sessions root\n    --codex-root <PATH>    Codex CLI sessions root\n    --web-dist <PATH>      Serve a development UI directory instead of the embedded UI\n    --relay <URL>          Relay URL (https://…; http:// only for a loopback host)\n    --token <TOKEN>        Relay token\n\nResolution order: explicit flag, then environment, then ~/.config/riku/config.toml.\nEnvironment: RELAY_URL, RELAY_TOKEN, RIKU_ROOT, RIKU_CODEX_ROOT."
+        "riku — Agent Board\n\nUSAGE:\n    riku [BOARD OPTIONS]\n    riku collect [OPTIONS]\n    riku relay [OPTIONS]\n    riku config set <KEY> <VALUE>\n    riku journal note <PROJECT> \"<TEXT>\"\n    riku journal --purge\n\nCOMMANDS:\n    collect     Watch this Mac's Agent Sessions and push them to a Relay\n    relay       Run a loopback Relay for local development (put a real multi-machine\n                Relay behind a TLS-terminating proxy — see docs/relay-deployment.md)\n    config      Save relay.url, relay.token, paths.root, paths.codex_root, or\n                journal.enabled\n    journal     Answer your project journal in your own words, or delete it\n\nJOURNAL:\n    The project journal is off until 'riku config set journal.enabled true'. A note\n    answers the entry that spoke last, so your correction wins on the board; nothing\n    is edited or deleted, and nothing ever leaves this machine.\n\n    note <PROJECT> \"<TEXT>\"    Append your own entry, asking for something (needs-you).\n                              PROJECT is a directory (use '.' for this one), or the\n                              slug of a project that already has a journal\n    --purge                    Delete every journal file on this machine\n\nBOARD OPTIONS:\n    --port <PORT>          Board port (default: 4242)\n    --root <PATH>          Claude Code sessions root\n    --codex-root <PATH>    Codex CLI sessions root\n    --web-dist <PATH>      Serve a development UI directory instead of the embedded UI\n    --relay <URL>          Relay URL (https://…; http:// only for a loopback host)\n    --token <TOKEN>        Relay token\n\nResolution order: explicit flag, then environment, then ~/.config/riku/config.toml.\nEnvironment: RELAY_URL, RELAY_TOKEN, RIKU_ROOT, RIKU_CODEX_ROOT."
     );
 }
 

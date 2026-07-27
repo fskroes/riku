@@ -103,6 +103,35 @@ pub struct JournalEntry {
     pub resume: Resume,
 }
 
+impl JournalEntry {
+    /// The record the user's own voice writes: `riku journal note` and, later,
+    /// the card's correction box. Both go through this one constructor so the
+    /// two surfaces cannot disagree about the shape of a correction.
+    ///
+    /// A note finishes nothing, so `done` is empty and `resume` carries no
+    /// instruction; the user's text is the `next` step, which is the field
+    /// latest-wins resolution reads. `handoff` is always [`Handoff::NeedsYou`]
+    /// — a correction is the user asking for something, and it belongs at the
+    /// front of the board until an agent answers it.
+    ///
+    /// `session` is the thread the note answers, so the correction lands on
+    /// that card rather than floating free; it is empty when there is no entry
+    /// to answer yet.
+    pub fn user_note(project: &str, session: &str, at: DateTime<Utc>, text: &str) -> JournalEntry {
+        JournalEntry {
+            v: JOURNAL_VERSION,
+            project: project.to_string(),
+            session: session.to_string(),
+            at,
+            who: Voice::User,
+            handoff: Handoff::NeedsYou,
+            done: Vec::new(),
+            next: text.to_string(),
+            resume: Resume::default(),
+        }
+    }
+}
+
 /// A project's journal: every decoded entry, in the order it was appended.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Journal {
@@ -435,6 +464,75 @@ mod tests {
         assert_eq!(
             reading.latest.next,
             "temps.py is NOT done - I also need Kelvin"
+        );
+    }
+
+    #[test]
+    fn a_user_note_is_a_correction_in_the_shared_shape() {
+        let at = local_at(2026, 7, 27, 10);
+        let note = JournalEntry::user_note(PROJECT, "s1", at, "I also need Kelvin");
+        assert_eq!(note.who, Voice::User);
+        assert_eq!(note.handoff, Handoff::NeedsYou);
+        assert_eq!(note.session, "s1", "a note answers a thread");
+        assert!(note.done.is_empty(), "a note finishes nothing");
+        assert_eq!(note.next, "I also need Kelvin");
+        assert_eq!(note.resume.instruction, "");
+
+        // What the writer emits is what the reader accepts: one line, decoding
+        // back to the same entry.
+        let line = serde_json::to_string(&note).unwrap();
+        assert_eq!(&Journal::parse(PROJECT, &line).entries()[0], &note);
+    }
+
+    #[test]
+    fn a_note_written_here_wins_over_the_agents_entry() {
+        let agent = line(
+            "s1",
+            local_at(2026, 7, 27, 9),
+            "agent",
+            "on-track",
+            "Finished temps.py",
+            "Nothing pending",
+        );
+        let note = serde_json::to_string(&JournalEntry::user_note(
+            PROJECT,
+            "s1",
+            local_at(2026, 7, 27, 10),
+            "temps.py is NOT done - I also need Kelvin",
+        ))
+        .unwrap();
+
+        let reading = Journal::parse(PROJECT, &[agent, note].join("\n"))
+            .resolve(None)
+            .unwrap();
+        assert_eq!(reading.latest.who, Voice::User);
+        assert_eq!(reading.latest.handoff, Handoff::NeedsYou);
+        assert_eq!(
+            reading.latest.next,
+            "temps.py is NOT done - I also need Kelvin"
+        );
+        // The correction says nothing was finished, and must not erase the day.
+        assert_eq!(reading.days[0].done, vec!["Finished temps.py"]);
+    }
+
+    #[test]
+    fn a_note_spanning_lines_is_still_one_record() {
+        // JSONL's invariant is one record per line; a shell heredoc or a pasted
+        // paragraph must not become several half-records.
+        let note = JournalEntry::user_note(
+            PROJECT,
+            "",
+            local_at(2026, 7, 27, 10),
+            "first thing\nsecond thing",
+        );
+        let line = serde_json::to_string(&note).unwrap();
+        assert!(
+            !line.contains('\n'),
+            "note broke the JSONL invariant: {line}"
+        );
+        assert_eq!(
+            Journal::parse(PROJECT, &line).entries()[0].next,
+            "first thing\nsecond thing"
         );
     }
 

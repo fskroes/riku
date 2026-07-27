@@ -36,7 +36,9 @@ pub use journal::{
     project_slug, Handoff, Journal, JournalDay, JournalEntry, JournalReading, Resume, Voice,
     JOURNAL_VERSION,
 };
-pub use journal_store::{journal_path, read_journal};
+pub use journal_store::{
+    append_note, journal_path, purge_journals, read_journal, resolve_journal_project,
+};
 pub use liveness::{probe_alive_cwds, ProcessLiveness};
 pub use model::{Attention, AttentionCause, DiffStat, Session, Status, SubAgents, Tool};
 pub use session::{Accumulator, FileState};
