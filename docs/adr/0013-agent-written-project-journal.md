@@ -9,11 +9,12 @@ Proposed (2026-07-27).
 Riku answers "what needs my attention *now*" but not "what did I do this morning,
 what did I do yesterday, and what is the next best step per project?" The board is
 a snapshot; the day is not recorded. A UI prototype
-(`web/prototype/activity-recap.html`) explored four surfaces and settled on a
-**day board** (variant D): a day sidebar on the left, and on the right one card
-per project with three columns — **Done**, **Where I am** (a small timeline), and
-**To go further** — plus a copy-paste command to resume the work in a clean
-session.
+(`web/prototype/activity-recap.html`) explored five surfaces and settled on a
+**thread-first recap** (variant E): one card per thread of effort, sorted
+needs-you → needs-review → on-track, each carrying **Done so far** (grouped by
+day), **Where I am** (a small timeline), and **To go further** — plus a
+copy-paste command to resume the work in a clean session. The day view survives
+as a secondary lens, not the home.
 
 Two of those three columns cannot be derived from transcripts. Riku already parses
 tool calls into attention events (`crates/sessions/src/attention.rs`), so a raw
@@ -58,18 +59,40 @@ has no journal entry (the card falls back to the derived timeline).
 `~/.local/share/riku/journal/<project>.jsonl`), created mode `0600` like
 `config.toml` and the ledger. `<project>` is a stable slug of the workspace path.
 Append-only; old entries *are* the "what did I do yesterday" history. Size-capped
-and rotated, with a version tag per record for future format changes.
+and rotated, with a version tag per record for future format changes. Likely
+future consumers (standups, changelogs, audits) are read-side aggregations over
+`done`/`at`; the schema is deliberately **not** widened for them now — the
+per-record `v` tag is the evolution path, and fields are added when a consumer
+actually exists.
 
 **Records.** One entry kind:
 
 ```
-{v, project, session, at, who:"agent"|"user", status:"track"|"review"|"blocked",
- done:[string], next:string, resume:{sid, instruction}}
+{v, project, session, at, who:"agent"|"user",
+ handoff:"needs-you"|"needs-review"|"on-track",
+ done:[string], next:string, resume:{instruction}}
 ```
 
-`done` and `next` are the agent's own prose. `resume.sid` is the session id Riku
-already knows from transcripts; the card renders `claude --resume <sid>
-"<instruction>"` for the human to copy. `status` maps to the card's pill.
+`done` and `next` are the agent's own prose. `handoff` is the **Handoff Status**
+— the agent's parting assessment of where the effort stands at stop. It is
+deliberately *not* Attention: Attention is a live, source-evidence-only board
+status of a running session; Handoff Status is a judgment written at the moment
+the session ends, when Attention no longer applies. It gets its own vocabulary
+(no `blocked`, no bare `review`) so the two systems cannot be confused, and it
+maps to the card's pill and sort order (needs-you → needs-review → on-track).
+Like `done`/`next`, it is interpretation and can be miscalibrated; the
+correction path is the same as for wrong prose — the derived timeline exposes
+it, and a user correction entry overrides it, latest-wins.
+
+The record carries only the resume **instruction**, not a session id or a
+command string. `session` already identifies the session, and Riku alone builds
+the runnable form via its existing resume resolution
+(`crates/sessions/src/deeplink.rs`): `DeepLink::resume` is tool-aware
+(`claude --resume <id>` / `codex resume <id>`) and refuses to resolve without a
+known working directory. Validation falls out for free — if no known transcript
+matches the entry's `session`, no command is rendered and the instruction is
+shown alone with a "session gone" note, instead of a copy-pasteable command
+that points at a dead sid.
 
 **Read and render.** Riku reads the journal and renders the day board. The card's
 Done / next / resume command come from the **latest entry not newer than the
@@ -83,7 +106,7 @@ voices. Instead the user **appends a correction entry** (`who:"user"`), either
 from the card itself or via `riku journal note <project> "<text>"`. When Riku
 appends that entry it is acting as the user's pen — an explicit user action, not
 Riku writing state on its own, so the read-only posture survives. Resolution is
-simple recency: **the latest entry wins** for status and next step regardless of
+simple recency: **the latest entry wins** for Handoff Status and next step regardless of
 author. Closing the loop is the agent's job: the stop hook hands the agent the
 journal tail, so a correction is read before the next entry is written — the
 agent answers the user's answer, which is what makes it a conversation rather

@@ -60,6 +60,10 @@ _Avoid_: heuristic, health check, activity
 The fallback mtime rule: a transcript quiet past the 15-minute activity window counts as Finished. A heuristic, not ground truth — it decides status only for Agent Sessions without a Process Liveness verdict.
 _Avoid_: finished (as a synonym), timeout, expiry
 
+**Handoff Status**:
+The agent's parting assessment, written in its journal entry at session stop, of where the effort stands: needs-you, needs-review, or on-track. Distinct from Attention — Attention is a live, source-evidence-only status of a running Agent Session, while Handoff Status is a judgment recorded at the moment the session ends. It orders journal cards (needs-you → needs-review → on-track) and, being interpretation, is corrected by a user journal entry, latest-wins.
+_Avoid_: blocked, status (bare), attention (for stopped sessions)
+
 **Session Source**:
 An adapter that discovers and reads Agent Sessions for one agent tool (Claude Code, Codex CLI). Each supported tool has exactly one Session Source.
 _Avoid_: provider, integration, connector
