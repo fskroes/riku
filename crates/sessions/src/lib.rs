@@ -13,6 +13,8 @@ mod deeplink;
 mod diff;
 mod fold;
 mod git;
+mod journal;
+mod journal_store;
 mod liveness;
 mod model;
 mod parse;
@@ -30,6 +32,11 @@ pub use deeplink::DeepLink;
 pub use diff::DiffCache;
 pub use fold::{Fold, Projection, ACTIVITY_WINDOW};
 pub use git::diff_stat;
+pub use journal::{
+    project_slug, Handoff, Journal, JournalDay, JournalEntry, JournalReading, Resume, Voice,
+    JOURNAL_VERSION,
+};
+pub use journal_store::{journal_path, read_journal};
 pub use liveness::{probe_alive_cwds, ProcessLiveness};
 pub use model::{Attention, AttentionCause, DiffStat, Session, Status, SubAgents, Tool};
 pub use session::{Accumulator, FileState};
