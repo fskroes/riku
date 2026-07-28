@@ -9,7 +9,7 @@ Riku is a local, read-only mission-control board for Claude Code and Codex CLI
 sessions. It puts the sessions that need your attention first, so you can see what
 to respond to instead of searching through terminal windows.
 
-![The board: Needs You on top, Running below, Finished last](docs/images/board.png)
+![The board: the one session waiting on you on top, then Running in the background, Up next, and Finished](docs/images/board.png)
 
 ## At a glance
 
@@ -20,6 +20,9 @@ to respond to instead of searching through terminal windows.
 - **Context with the work.** Cards show the model, branch, tokens, live git diff,
   and an optional cost estimate. The Work Items view connects a live session to the
   work it is carrying out.
+- **The day, not just the moment.** With the opt-in project journal, the agent
+  writes what it finished and what is next before its session ends, and the Recap
+  view reads that back as threads of effort you can answer in your own words.
 
 ## Install on macOS (Apple Silicon)
 
@@ -74,6 +77,43 @@ riku config set relay.token "$RELAY_TOKEN"
 
 Explicit flags take precedence over `RELAY_URL`, `RELAY_TOKEN`, `RIKU_ROOT`, and
 `RIKU_CODEX_ROOT`, which in turn take precedence over the config file.
+
+## Recap and the project journal
+
+The **Recap** view answers "what did I do today, and what is the next best step?".
+It reads an append-only **project journal** that the agent writes — one entry per
+session, as the last thing it does before stopping — so "what is done" and "what is
+next" come from the party that actually did the work rather than from a guess.
+
+![Recap threads: Done so far by day, Where I am, To go further, and a resume command](docs/images/recap.png)
+
+The journal is off until you turn it on, and Riku neither reads nor writes it
+before then:
+
+```sh
+riku config set journal.enabled true
+```
+
+Entries are written by the agent, not by Riku, so they need a stop hook. A Claude
+Code `Stop` hook ships in [`hooks/claude-code/`](hooks/claude-code/) — its README
+covers the install and the one permission rule it needs. An installed hook keeps
+writing whether or not Riku is reading, so uninstall it if you want nothing on
+disk. A project whose agent is not wired simply has no prose, and its card falls
+back to the timeline Riku derives from transcripts.
+
+Each card ends in a copy-paste command to resume that thread in a clean session.
+When the agent's account is wrong, answer it — from the card, or from the CLI:
+
+```sh
+riku journal note . "temps.py is NOT done — I also need Kelvin"
+riku journal note . "that's fine, carry on" --handoff on-track
+riku journal --purge                    # delete every journal file on this machine
+```
+
+Nothing is edited or deleted: your entry is appended, and the last word wins
+whoever spoke it. The next session's stop hook reads your answer back, which is
+what makes the journal a conversation. Entries stay on this machine — the Relay
+never carries them ([ADR 0013](docs/adr/0013-agent-written-project-journal.md)).
 
 ## Work Items
 
@@ -133,11 +173,12 @@ Claude Code or Codex CLI. The Board watches local sessions directly; a Collector
 watches a remote machine and pushes the same session state to a Relay. The board
 merges those local and remote updates into one attention-first stream.
 
-The board exposes a snapshot at `GET /api/sessions` and live updates through
-Server-Sent Events at `GET /api/events`. See [CONTEXT.md](CONTEXT.md) for the project's
-domain language and [the architecture decisions](docs/adr/) for the rationale
-behind local-first operation, the read-only Relay, Explainable Attention, card
-stats, and distribution.
+The board exposes a snapshot at `GET /api/sessions`, live updates through
+Server-Sent Events at `GET /api/events`, and the journal-derived recap at
+`GET /api/recap`. See [CONTEXT.md](CONTEXT.md) for the project's domain language and
+[the architecture decisions](docs/adr/) for the rationale behind local-first
+operation, the read-only Relay, Explainable Attention, card stats, the project
+journal, and distribution.
 
 ## Contributing
 
