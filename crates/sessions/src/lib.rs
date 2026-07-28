@@ -37,8 +37,8 @@ pub use journal::{
     JOURNAL_VERSION,
 };
 pub use journal_store::{
-    append_note, journal_path, purge_journals, read_journal, read_journal_in,
-    resolve_journal_project, Noted,
+    append_note, journal_path, list_journals, list_journals_in, purge_journals, read_journal,
+    read_journal_in, resolve_journal_project, Noted,
 };
 pub use liveness::{probe_alive_cwds, ProcessLiveness};
 pub use model::{Attention, AttentionCause, DiffStat, Session, Status, SubAgents, Tool};

@@ -870,6 +870,19 @@ fn write_journal(dir: &Path, project_cwd: &str, lines: &[String]) {
 
 /// One agent journal record for the project rooted at `cwd`.
 fn journal_entry(cwd: &str, session: &str, at: &str, handoff: &str, done: &str) -> String {
+    journal_entry_next(cwd, session, at, handoff, done, "Review the recap endpoint")
+}
+
+/// The same, with the next step spelled out — for tests that read two projects
+/// at once and have to prove which journal a field came from.
+fn journal_entry_next(
+    cwd: &str,
+    session: &str,
+    at: &str,
+    handoff: &str,
+    done: &str,
+    next: &str,
+) -> String {
     serde_json::json!({
         "v": 1,
         "project": sessions::project_slug(Path::new(cwd)),
@@ -878,7 +891,7 @@ fn journal_entry(cwd: &str, session: &str, at: &str, handoff: &str, done: &str) 
         "who": "agent",
         "handoff": handoff,
         "done": [done],
-        "next": "Review the recap endpoint",
+        "next": next,
         "resume": { "instruction": "pick up where the endpoint left off" },
     })
     .to_string()
@@ -956,6 +969,122 @@ async fn recap_serves_the_journal_with_a_resume_command_riku_built() {
 }
 
 #[tokio::test]
+async fn recap_still_carries_a_journal_whose_sessions_the_store_has_forgotten() {
+    // The store only discovers transcripts touched in the last 24h, so a
+    // project whose last session has aged out is not a card. Its prose is still
+    // on disk, and a question asked days ago is exactly what a recap must not
+    // lose — it comes back as a line, keyed on the journal directory rather
+    // than the store. Written with no transcript at all, which is what an
+    // aged-out project looks like from in here.
+    let claude = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let live = "/Users/x/repos/foo";
+    let forgotten = "/Users/x/repos/attention-ledger";
+
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "working", 10, 1)],
+    );
+    write_journal(
+        journal.path(),
+        live,
+        &[journal_entry(
+            live,
+            "sess-1",
+            "2026-07-28T09:00:00Z",
+            "on-track",
+            "Served the recap",
+        )],
+    );
+    write_journal(
+        journal.path(),
+        forgotten,
+        &[journal_entry_next(
+            forgotten,
+            "sess-old",
+            "2026-07-25T09:00:00Z",
+            "needs-you",
+            "Drafted ADR 0012",
+            // Distinct from the live project's, so the assertion below proves
+            // which journal the line was read from.
+            "SQLite or flat JSONL?",
+        )],
+    );
+
+    let (addr, _started) = spawn_server_with_journal(
+        claude.path().to_path_buf(),
+        journal.path().to_path_buf(),
+        true,
+    )
+    .await;
+
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/recap"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // The live project is a card and is not repeated as a line.
+    let cards = body["cards"].as_array().expect("cards is a list");
+    assert_eq!(cards.len(), 1, "{body}");
+    assert_eq!(cards[0]["cwd"], live);
+
+    let older = body["older"].as_array().expect("older is a list");
+    assert_eq!(older.len(), 1, "{body}");
+    assert_eq!(body["olderTotal"], 1);
+    // The slug rides out whole: it is the entirety of what is known about this
+    // project, and its last segment ("ledger") names nothing the user has.
+    assert_eq!(older[0]["slug"], "users-x-repos-attention-ledger");
+    assert_eq!(older[0]["handoff"], "needs-you");
+    assert_eq!(older[0]["who"], "agent");
+    // The live project's journal says "Review the recap endpoint", so this
+    // proves the line was read from the forgotten project's file and not the
+    // one next to it.
+    assert_eq!(older[0]["next"], "SQLite or flat JSONL?");
+
+    // The sentence survives and nothing runnable is offered: there is no
+    // directory to run it in, which is why this is a line and not a card.
+    assert_eq!(
+        older[0]["resume"]["instruction"],
+        "pick up where the endpoint left off"
+    );
+    assert_eq!(older[0]["resume"]["sessionGone"], true);
+    // Pinned as whole key sets, because asserting one absent field passes
+    // whether or not the field could ever have been there.
+    let keys = |value: &serde_json::Value| {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort_unstable();
+        keys
+    };
+    assert_eq!(
+        keys(&older[0]),
+        vec![
+            "ageSeconds",
+            "at",
+            "handoff",
+            "next",
+            "resume",
+            "slug",
+            "who"
+        ],
+        "{body}"
+    );
+    assert_eq!(
+        keys(&older[0]["resume"]),
+        vec!["instruction", "sessionGone"],
+        "a line carries no command and no directory: {body}"
+    );
+}
+
+#[tokio::test]
 async fn recap_reads_nothing_while_the_journal_is_switched_off() {
     let claude = tempfile::tempdir().unwrap();
     let journal = tempfile::tempdir().unwrap();
@@ -1003,6 +1132,14 @@ async fn recap_reads_nothing_while_the_journal_is_switched_off() {
         cards[0]["journal"].is_null(),
         "prose leaked past the toggle: {body}"
     );
+    // Off means untouched: the directory is not even enumerated, so a project
+    // known only by its journal cannot leak out as a line either.
+    let older = body["older"].as_array().expect("older is a list");
+    assert!(
+        older.is_empty(),
+        "prose leaked past the toggle as an older line: {body}"
+    );
+    assert_eq!(body["olderTotal"], 0);
 }
 
 /// Start a Relay on an ephemeral port, returning its base URL.

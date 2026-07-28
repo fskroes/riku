@@ -59,11 +59,11 @@ pub enum Handoff {
 }
 
 impl Handoff {
-    /// Every status, in card order — the one list the CLI's `--handoff` flag
-    /// and its usage line are both built from.
+    /// Every Handoff Status, in card order — the one list the CLI's `--handoff`
+    /// flag and its usage line are both built from.
     pub const ALL: [Handoff; 3] = [Handoff::NeedsYou, Handoff::NeedsReview, Handoff::OnTrack];
 
-    /// How the status is spelled, on disk and on the command line. The two are
+    /// How a Handoff Status is spelled, on disk and on the command line. The two are
     /// deliberately the same word: what the user types into `--handoff` is what
     /// lands in the record, so there is nothing to translate and nothing to
     /// drift.
@@ -86,7 +86,7 @@ impl std::str::FromStr for Handoff {
             .ok_or_else(|| {
                 let known: Vec<&str> = Handoff::ALL.iter().map(|h| h.as_str()).collect();
                 format!(
-                    "'{text}' is not a handoff status; expected {}",
+                    "'{text}' is not a Handoff Status; expected {}",
                     known.join(", ")
                 )
             })
@@ -151,7 +151,8 @@ impl JournalEntry {
     /// [`Handoff::NeedsYou`] at the surfaces that offer no picker — a correction
     /// is usually the user asking for something. It is a parameter rather than a
     /// constant because the last word on a card belongs to whoever spoke it: a
-    /// user who says "that's fine, carry on" must be able to *lower* the status,
+    /// user who says "that's fine, carry on" must be able to *lower* the
+    /// Handoff Status,
     /// or the card stays pinned to the front of the board until an agent session
     /// happens to run again.
     ///
@@ -844,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn a_note_can_lower_the_status_as_well_as_raise_it() {
+    fn a_note_can_lower_the_handoff_status_as_well_as_raise_it() {
         // "That's fine, carry on" is a correction too, and the card must be able
         // to leave the front of the board without waiting for an agent session.
         let agent = line(
@@ -872,10 +873,11 @@ mod tests {
     }
 
     #[test]
-    fn a_status_is_spelled_the_same_on_disk_and_on_the_command_line() {
+    fn a_handoff_status_is_spelled_the_same_on_disk_and_on_the_command_line() {
         for handoff in Handoff::ALL {
             // What `--handoff` accepts is exactly what serde writes into the
-            // record, so the flag can never name a status the reader rejects.
+            // record, so the flag can never name a Handoff Status the reader
+            // rejects.
             assert_eq!(
                 serde_json::to_string(&handoff).unwrap(),
                 format!("\"{}\"", handoff.as_str())

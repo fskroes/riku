@@ -369,6 +369,10 @@ async fn recap(State(state): State<AppState>) -> Json<crate::recap::Recap> {
                 Some(dir) => sessions::read_journal_in(dir, project),
                 None => sessions::read_journal(project),
             },
+            || match &dir {
+                Some(dir) => sessions::list_journals_in(dir),
+                None => sessions::list_journals(),
+            },
             |id| engine.find_by_id(id),
             chrono::Utc::now(),
         )

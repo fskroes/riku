@@ -131,8 +131,8 @@ pub enum ResolvedCommand {
     JournalNote {
         project: String,
         text: String,
-        /// The status the user is putting the card in, `needs-you` unless they
-        /// said otherwise.
+        /// The Handoff Status the user is putting the card in, `needs-you`
+        /// unless they said otherwise.
         handoff: Handoff,
     },
     JournalPurge,
@@ -342,7 +342,7 @@ fn resolve_journal(args: &[String], config: &Config) -> Result<ResolvedCommand, 
                 project: project.clone(),
                 text: text.clone(),
                 // A correction is usually the user asking for something, so
-                // that is the default; naming a status is how they lower one.
+                // that is the default; naming a Handoff Status is how they lower one.
                 handoff: handoff.unwrap_or(Handoff::NeedsYou),
             })
         }
@@ -353,7 +353,7 @@ fn resolve_journal(args: &[String], config: &Config) -> Result<ResolvedCommand, 
     }
 }
 
-/// Pull `--handoff <status>` out wherever it was typed, leaving the positional
+/// Pull `--handoff <handoff>` out wherever it was typed, leaving the positional
 /// arguments to match on their own. A flag is not a position, and a user who
 /// writes it before the text should not be told the command does not exist.
 fn take_handoff(args: &[String]) -> Result<(Vec<String>, Option<Handoff>), String> {
@@ -368,14 +368,14 @@ fn take_handoff(args: &[String]) -> Result<(Vec<String>, Option<Handoff>), Strin
         }
         let value = args
             .get(index + 1)
-            .ok_or_else(|| format!("--handoff requires a status: {}", handoff_choices()))?;
+            .ok_or_else(|| format!("--handoff requires a Handoff Status: {}", handoff_choices()))?;
         handoff = Some(value.parse::<Handoff>()?);
         index += 2;
     }
     Ok((rest, handoff))
 }
 
-/// The statuses `--handoff` takes, spelled from the enum itself so the usage
+/// The Handoff Statuses `--handoff` takes, spelled from the enum itself so the usage
 /// text cannot promise a word the parser does not accept.
 fn handoff_choices() -> String {
     Handoff::ALL
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn a_note_may_name_the_status_it_leaves_the_card_in() {
+    fn a_note_may_name_the_handoff_status_it_leaves_the_card_in() {
         // Without this the user can only ever raise a card to the front of the
         // board; "that's fine, carry on" is a correction too.
         for args in [
@@ -699,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn a_status_that_is_not_one_names_the_ones_that_are() {
+    fn a_handoff_status_that_is_not_one_names_the_ones_that_are() {
         let error = resolve(
             &[
                 "journal".into(),
@@ -728,7 +728,10 @@ mod tests {
             Some(&journal_on()),
         )
         .unwrap_err();
-        assert!(error.contains("requires a status"), "unexpected: {error}");
+        assert!(
+            error.contains("requires a Handoff Status"),
+            "unexpected: {error}"
+        );
     }
 
     #[test]
@@ -795,7 +798,7 @@ mod tests {
                 "text".into(),
                 "extra".into(),
             ],
-            // A status is something a note carries; purge deletes files.
+            // A Handoff Status is something a note carries; purge deletes files.
             vec![
                 "journal".into(),
                 "--purge".into(),

@@ -111,16 +111,28 @@ riku journal --purge                        # delete every journal file on this 
 `journal.enabled` gates *Riku's* journal surfaces, not this hook: an installed
 hook keeps writing whether or not Riku is reading, so uninstall the hook (or
 purge) if you want nothing on disk at all. A note is appended in the same shape
-with `who:"user"` and `handoff:"needs-you"` — you are asking for something —
-answering whichever entry spoke last. The next session's stop hook feeds it back
-in the tail above, which is what makes the journal a conversation. Nothing is
-edited or deleted: your correction simply wins, being the latest word.
+with `who:"user"`, answering whichever entry spoke last. It carries
+`handoff:"needs-you"` unless you say otherwise — a correction is usually you
+asking for something — and `--handoff needs-review|on-track` is how you lower a
+card instead, so "that's fine, carry on" does not leave it pinned to the front
+of the board:
+
+```sh
+riku journal note . "that's fine, carry on" --handoff on-track
+```
+
+The next session's stop hook feeds your note back in the tail above, which is
+what makes the journal a conversation. Nothing is edited or deleted: your
+correction simply wins, being the latest word.
 
 Journal files are capped at 1 MiB and rotated to `<project>.jsonl.1`, so months
 of entries stay bounded. Both writers enforce the cap — the hook before it
 invites an append, Riku before it appends a note — since the hook writes most of
-the entries. Riku reads the live file; the rotated generation stays on disk until
-the next rotation replaces it, and `--purge` removes both.
+the entries. Riku reads **both generations**, rotated first and then the live
+file, which is the order they were written in: a rotation mid-project would
+otherwise drop every day before it off the board while it still sat on disk.
+The oldest entries leave the board only when the rotated file is itself
+replaced by the next rotation, and `--purge` removes both.
 
 ## Record shape (v1)
 

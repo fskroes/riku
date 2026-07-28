@@ -152,7 +152,7 @@ fn a_note_is_written_read_back_and_purged() {
     assert_eq!(last["handoff"], "on-track");
     assert_eq!(last["who"], "user");
 
-    // A status that does not exist is refused, and nothing is written.
+    // A Handoff Status that does not exist is refused, and nothing is written.
     let bad = riku(
         home,
         &["journal", "note", project, "hm", "--handoff", "blocked"],
@@ -166,7 +166,7 @@ fn a_note_is_written_read_back_and_purged() {
     assert_eq!(
         std::fs::read_to_string(&path).unwrap().lines().count(),
         4,
-        "a refused status still wrote a note"
+        "a refused Handoff Status still wrote a note"
     );
 
     // A project that names nothing is refused rather than quietly filed away.

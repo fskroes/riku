@@ -118,6 +118,86 @@ fn read_journal_file(project: &str, path: &Path) -> Journal {
     }
 }
 
+/// Every project with a journal on disk, as its slug and the moment that
+/// journal was last written. Unordered; the caller decides what order means.
+///
+/// This is the read that lets the recap see past the session store's discovery
+/// window: prose outlives the transcript it was written beside, and a project
+/// whose last session has aged out still has something to say. An unknown data
+/// directory reads as nothing at all.
+pub fn list_journals() -> Vec<(String, DateTime<Utc>)> {
+    match journal_dir() {
+        Some(dir) => list_journals_in(&dir),
+        None => {
+            debug!("no data directory; no journals to list");
+            Vec::new()
+        }
+    }
+}
+
+/// [`list_journals`] against a known directory, for the same reason
+/// [`read_journal_in`] is public: the board holds its journal directory in
+/// state rather than resolving it per read.
+///
+/// Both generations count, because [`read_journal_in`] reads both — a project
+/// whose live file was rotated away is still a project with prose. The pair is
+/// one entry under one slug, stamped with the newer of the two.
+///
+/// The timestamp is the file's, not any entry's. `at` is agent-supplied and
+/// nothing enforces it, so ordering a listing by it would let one entry stamped
+/// in the year 3000 hold the top of the list forever; mtime is the filesystem's
+/// word and cannot be written by the prose.
+pub fn list_journals_in(dir: &Path) -> Vec<(String, DateTime<Utc>)> {
+    let listing = match std::fs::read_dir(dir) {
+        Ok(listing) => listing,
+        // A directory nobody has written to yet is the ordinary opt-out.
+        Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            warn!(dir = %dir.display(), %error, "journal directory unreadable; ignoring it");
+            return Vec::new();
+        }
+    };
+    let mut newest: std::collections::HashMap<String, DateTime<Utc>> =
+        std::collections::HashMap::new();
+    for entry in listing.flatten() {
+        // `file_type` does not follow symlinks, so a link planted here names no
+        // project — the same rule `--purge` applies before deleting anything.
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(slug) = journal_slug(&name) else {
+            continue;
+        };
+        let Some(written) = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .map(DateTime::<Utc>::from)
+        else {
+            continue;
+        };
+        newest
+            .entry(slug)
+            .and_modify(|at| *at = (*at).max(written))
+            .or_insert(written);
+    }
+    newest.into_iter().collect()
+}
+
+/// The project a journal filename belongs to, or `None` when the file is not
+/// one — the hook's miss log is telemetry rather than prose, and anything else
+/// the user left in the directory is theirs.
+fn journal_slug(name: &str) -> Option<String> {
+    if name == MISSED_LOG {
+        return None;
+    }
+    let slug = name
+        .strip_suffix(ROTATED_SUFFIX)
+        .or_else(|| name.strip_suffix(JOURNAL_EXTENSION))?;
+    (!slug.is_empty()).then(|| slug.to_string())
+}
+
 /// Where a note landed: the file it was appended to, and the thread it answered.
 ///
 /// The session is reported rather than kept private because the caller chose it
@@ -375,6 +455,62 @@ mod tests {
         let journal = read_journal_file("riku", &dir.path().join("nothing-here.jsonl"));
         assert!(journal.is_empty());
         assert!(journal.resolve(None).is_none());
+    }
+
+    #[test]
+    fn listing_names_every_project_with_prose_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("users-x-repos-riku.jsonl"), "").unwrap();
+        std::fs::write(dir.path().join("users-x-dotfiles.jsonl"), "").unwrap();
+        // A project whose live file has rotated away is still a project with
+        // prose, because `read_journal_in` reads both generations.
+        std::fs::write(dir.path().join("users-x-old.jsonl.1"), "").unwrap();
+        // Not prose: the hook's own telemetry, and whatever else the user left.
+        std::fs::write(dir.path().join(MISSED_LOG), "").unwrap();
+        std::fs::write(dir.path().join("notes.md"), "").unwrap();
+
+        let mut slugs: Vec<String> = list_journals_in(dir.path())
+            .into_iter()
+            .map(|(slug, _)| slug)
+            .collect();
+        slugs.sort();
+        assert_eq!(
+            slugs,
+            vec!["users-x-dotfiles", "users-x-old", "users-x-repos-riku"]
+        );
+    }
+
+    #[test]
+    fn both_generations_of_one_project_are_one_entry_stamped_with_the_newer() {
+        let dir = tempfile::tempdir().unwrap();
+        let rotated = dir.path().join("riku.jsonl.1");
+        let live = dir.path().join("riku.jsonl");
+        std::fs::write(&rotated, "").unwrap();
+        std::fs::write(&live, "").unwrap();
+        // Make the rotated generation unambiguously older than the live one,
+        // rather than relying on the two writes above landing on different
+        // filesystem ticks.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&rotated)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let listed = list_journals_in(dir.path());
+        assert_eq!(listed.len(), 1, "one project, not two: {listed:?}");
+        assert_eq!(listed[0].0, "riku");
+        assert!(
+            listed[0].1 > DateTime::<Utc>::from(old),
+            "the pair is stamped with the newer file, not the rotated one"
+        );
+    }
+
+    #[test]
+    fn a_journal_directory_that_does_not_exist_lists_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(list_journals_in(&dir.path().join("never-created")).is_empty());
     }
 
     #[test]

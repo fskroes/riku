@@ -8,7 +8,7 @@
 //! store are the caller's, handed in as functions.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -19,8 +19,14 @@ use sessions::{
 
 use crate::open::is_safe_session_id;
 
-/// The recap payload: whether the journal is switched on at all, and a card per
-/// project the board knows a session for.
+/// How many older journals the recap carries. The rest are counted but not
+/// listed: the point of the list is that a question asked days ago is still
+/// visible, and a page-long tail of calm projects buries exactly that.
+pub const OLDER_LIMIT: usize = 5;
+
+/// The recap payload: whether the journal is switched on at all, a card per
+/// project the board knows a session for, and a line per project whose prose
+/// outlived its sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Recap {
@@ -29,6 +35,65 @@ pub struct Recap {
     /// yet" are different things and only one of them is the user's to fix.
     pub enabled: bool,
     pub cards: Vec<RecapCard>,
+    /// Projects with prose on disk but no session the board still knows, newest
+    /// first within a Handoff Status, capped at [`OLDER_LIMIT`].
+    ///
+    /// A card needs a working directory — to deep-link, to resume into — and a
+    /// project known only by its journal has none, because the slug it is filed
+    /// under cannot be turned back into a path. These are deliberately not
+    /// cards: a line offers nothing to click, so having nowhere to click costs
+    /// it nothing, and it can show the slug it really has rather than guess a
+    /// display name out of it.
+    pub older: Vec<OlderJournal>,
+    /// How many there are in total, so a reader can say "5 of 12" rather than
+    /// implying the list is everything. A cap nobody is told about would put
+    /// back the blind spot this list exists to close.
+    pub older_total: usize,
+}
+
+/// One project whose journal outlived the sessions that wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OlderJournal {
+    /// The slug the journal is filed under — the whole of what is known about
+    /// this project's identity, carried verbatim rather than cut down into a
+    /// display name. `project_slug` collapses every run of non-alphanumerics,
+    /// so `/Users/x/repos/attention-ledger` files under
+    /// `users-x-repos-attention-ledger` and the last segment of that is
+    /// `ledger`, which names nothing the user has. Presenting it is the
+    /// reader's problem, and it should have the truth to work from.
+    pub slug: String,
+    pub handoff: Handoff,
+    /// The single next best step, in the author's own prose. Untrusted text: it
+    /// is data in this payload and nothing more.
+    pub next: String,
+    pub who: Voice,
+    /// When the author says that last entry happened.
+    pub at: DateTime<Utc>,
+    /// How old that entry is. Never negative.
+    pub age_seconds: i64,
+    pub resume: OlderResume,
+}
+
+/// What is left of picking an older project's work back up.
+///
+/// The sentence and nothing else, because there is no directory to run a
+/// command in — which is the whole reason these are lines and not cards. That
+/// is exactly the case ADR 0013 and #57 describe: when no transcript can be
+/// resolved, the instruction stands alone and the payload says why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OlderResume {
+    /// The entry's own sentence for a fresh session, in the author's prose.
+    pub instruction: String,
+    /// The entry names a thread this machine cannot get back into. Always true
+    /// when a thread was named at all: a project reachable through the store
+    /// would have been a card, so anything reaching this list is past resuming.
+    ///
+    /// False only when the entry named no session — the first note in a journal
+    /// answers no thread and never did, so nothing about it is missing. The
+    /// same distinction the cards draw, for the same reason.
+    pub session_gone: bool,
 }
 
 /// One project's card.
@@ -90,13 +155,22 @@ pub struct CardResume {
 
 /// Build the recap.
 ///
-/// `read_journal` and `find_session` are the two reads this needs: a project's
-/// journal by slug, and a session by the id an entry names. Both are handed in
-/// so the assembly can be exercised against fixtures.
+/// `read_journal`, `list_journals` and `find_session` are the three reads this
+/// needs: a project's journal by slug, every project with a journal on disk,
+/// and a session by the id an entry names. All are handed in so the assembly
+/// can be exercised against fixtures.
+///
+/// The two halves of the payload are keyed differently on purpose. Cards come
+/// from the store, so every card has a real directory and a resumable thread.
+/// The older list comes from the filesystem, because prose outlives the
+/// transcript it was written beside: the store forgets a project 24 hours after
+/// its last session ([`sessions::DISCOVERY_WINDOW`]), and a question the agent
+/// asked three days ago is exactly the thing a recap must not lose.
 pub fn recap(
     sessions: &[Session],
     enabled: bool,
     read_journal: impl Fn(&str) -> Journal,
+    list_journals: impl Fn() -> Vec<(String, DateTime<Utc>)>,
     find_session: impl Fn(&str) -> Option<(PathBuf, Session)>,
     now: DateTime<Utc>,
 ) -> Recap {
@@ -131,11 +205,11 @@ pub fn recap(
     }
 
     // Card order is ADR 0013's: the effort that wants a human comes first, and
-    // `Handoff`'s declaration order already is that order, so the status sorts
-    // itself. A project with no prose has no status to sort by and goes last —
+    // `Handoff`'s declaration order already is that order, so the Handoff Status
+    // sorts itself. A project with no prose has none to sort by and goes last —
     // it is on the board to be complete, not because it is asking for anything.
     //
-    // Within a status the newest project comes first, measured by the store's
+    // Within a Handoff Status the newest project comes first, measured by the store's
     // `last_event_at` rather than the entry's `at`. `at` is agent-supplied and
     // nothing enforces it, so keying the order on it would let one entry stamped
     // in the year 3000 hold the top of its group forever — the same reason
@@ -144,10 +218,78 @@ pub fn recap(
         let handoff = card.journal.as_ref().map(|journal| journal.handoff);
         (handoff.is_none(), handoff, Reverse(*last_event_at))
     });
+
+    // Off means untouched here too: a board serving a recap nobody opted into
+    // has no more business enumerating the journal directory than opening the
+    // files in it.
+    let (older, older_total) = match enabled {
+        true => older_journals(&cards, &read_journal, &list_journals, now),
+        false => (Vec::new(), 0),
+    };
     Recap {
         enabled,
         cards: cards.into_iter().map(|(_, card)| card).collect(),
+        older,
+        older_total,
     }
+}
+
+/// The projects whose prose outlived their sessions: every journal on disk that
+/// no card already speaks for, ordered and capped.
+///
+/// Returns the capped list and the total, because the reader has to be able to
+/// say how many were left out.
+fn older_journals(
+    cards: &[(DateTime<Utc>, RecapCard)],
+    read_journal: &impl Fn(&str) -> Journal,
+    list_journals: &impl Fn() -> Vec<(String, DateTime<Utc>)>,
+    now: DateTime<Utc>,
+) -> (Vec<OlderJournal>, usize) {
+    // A project the board holds a session for is already a card, and a card
+    // says strictly more than a line — the same journal must not appear twice.
+    let carded: HashSet<String> = cards
+        .iter()
+        .map(|(_, card)| project_slug(std::path::Path::new(&card.cwd)))
+        .collect();
+
+    let mut older: Vec<(DateTime<Utc>, OlderJournal)> = list_journals()
+        .into_iter()
+        .filter(|(slug, _)| !carded.contains(slug))
+        .filter_map(|(slug, written)| {
+            // A journal that parses to nothing is not an older project, it is
+            // an empty file — the same "no prose" case a card falls back on.
+            let reading = read_journal(&slug).resolve(None)?;
+            Some((
+                written,
+                OlderJournal {
+                    slug,
+                    handoff: reading.latest.handoff,
+                    next: reading.latest.next.clone(),
+                    who: reading.latest.who,
+                    at: reading.latest.at,
+                    age_seconds: reading.age(now).num_seconds(),
+                    resume: OlderResume {
+                        instruction: reading.latest.resume.instruction.clone(),
+                        session_gone: !reading.latest.session.is_empty(),
+                    },
+                },
+            ))
+        })
+        .collect();
+
+    // The cards' order, for the same reasons: Handoff Status first, so the cap can
+    // never drop a question in favour of something calm; then recency by the
+    // file's own mtime rather than the entry's `at`, which is agent-supplied
+    // and would let one entry stamped in the year 3000 sit at the top of the
+    // list forever — and, now that the list is capped, push a real question off
+    // the end of it.
+    older.sort_by_key(|(written, journal)| (journal.handoff, Reverse(*written)));
+    let older_total = older.len();
+    older.truncate(OLDER_LIMIT);
+    (
+        older.into_iter().map(|(_, journal)| journal).collect(),
+        older_total,
+    )
 }
 
 /// How the card offers to pick one entry's work back up.
@@ -312,6 +454,23 @@ mod tests {
         None
     }
 
+    /// A journal directory with nothing in it: every project the recap sees is
+    /// one the store handed over.
+    fn no_journals() -> Vec<(String, DateTime<Utc>)> {
+        Vec::new()
+    }
+
+    /// A journal directory listing, keyed by project *directory* and stamped
+    /// with the moment each file was last written — which is what the store's
+    /// `last_event_at` is to a card, and what the ordering is keyed on.
+    fn listing(files: Vec<(&str, DateTime<Utc>)>) -> impl Fn() -> Vec<(String, DateTime<Utc>)> {
+        let listed: Vec<(String, DateTime<Utc>)> = files
+            .into_iter()
+            .map(|(cwd, written)| (slug(cwd), written))
+            .collect();
+        move || listed.clone()
+    }
+
     /// A store that resolves exactly these sessions by id, the way the Engine
     /// does: the transcript path comes with the session, never from the caller.
     fn store(known: Vec<Session>) -> impl Fn(&str) -> Option<(PathBuf, Session)> {
@@ -343,6 +502,7 @@ mod tests {
             &[session("sess-1", CWD, at(9))],
             true,
             journal_of(CWD, text),
+            no_journals,
             no_sessions,
             at(11),
         );
@@ -412,6 +572,7 @@ mod tests {
                     ),
                 ),
             ]),
+            no_journals,
             no_sessions,
             at(11),
         );
@@ -428,10 +589,10 @@ mod tests {
     }
 
     #[test]
-    fn cards_at_the_same_status_are_broken_by_real_activity_not_the_stamped_time() {
+    fn cards_at_the_same_handoff_status_are_broken_by_real_activity_not_the_stamped_time() {
         // Two projects equally in needs-you. `at` is agent-supplied and nothing
         // enforces it, so one entry stamped in the year 3000 must not shoulder a
-        // genuinely more recent project off the top of its own status group.
+        // genuinely more recent project off the top of its own Handoff Status group.
         // The tiebreak is the store's `last_event_at`, which the filesystem
         // enforces. Directory order would also get this wrong, the other way.
         let stale = "/Users/x/repos/aaa";
@@ -461,6 +622,7 @@ mod tests {
                     agent_line(&slug(busy), "s-busy", at(8), "needs-you", "Real", "And me"),
                 ),
             ]),
+            no_journals,
             no_sessions,
             at(12),
         );
@@ -493,6 +655,7 @@ mod tests {
                 ),
                 (corrupt, "not json at all\n{\n".to_string()),
             ]),
+            no_journals,
             no_sessions,
             at(12),
         );
@@ -521,7 +684,14 @@ mod tests {
         let mut homeless = session("s-homeless", CWD, at(9));
         homeless.cwd = None;
 
-        let recap = recap(&[homeless], true, journals(vec![]), no_sessions, at(10));
+        let recap = recap(
+            &[homeless],
+            true,
+            journals(vec![]),
+            no_journals,
+            no_sessions,
+            at(10),
+        );
         assert!(recap.cards.is_empty(), "{:?}", recap.cards);
     }
 
@@ -545,6 +715,7 @@ mod tests {
                 CWD,
                 agent_line(&slug(CWD), "sess-1", at(9), "needs-you", "Half", "Ask"),
             ),
+            no_journals,
             store(vec![live.clone()]),
             at(10),
         );
@@ -572,6 +743,7 @@ mod tests {
                 CWD,
                 agent_line(&slug(CWD), "rollout-1", at(9), "on-track", "Work", "More"),
             ),
+            no_journals,
             store(vec![live]),
             at(10),
         );
@@ -593,6 +765,7 @@ mod tests {
                 CWD,
                 agent_line(&slug(CWD), "sess-long-gone", at(9), "needs-you", "X", "Y"),
             ),
+            no_journals,
             store(vec![session("sess-now", CWD, at(9))]),
             at(10),
         );
@@ -625,6 +798,7 @@ mod tests {
             &[session("sess-1", CWD, at(9))],
             true,
             journal_of(CWD, hostile),
+            no_journals,
             store(vec![session("sess-1", CWD, at(9))]),
             at(10),
         );
@@ -656,6 +830,7 @@ mod tests {
             &[session("sess-1", CWD, at(9))],
             true,
             journal_of(CWD, note),
+            no_journals,
             store(vec![session("sess-1", CWD, at(9))]),
             at(10),
         );
@@ -683,6 +858,7 @@ mod tests {
                 CWD,
                 agent_line(&slug(CWD), "sess-1", at(9), "needs-you", "X", "Y"),
             ),
+            no_journals,
             store(vec![rootless]),
             at(10),
         );
@@ -706,6 +882,7 @@ mod tests {
                 CWD,
                 agent_line(&slug(CWD), odd, at(9), "needs-you", "X", "Y"),
             ),
+            no_journals,
             store(vec![session(odd, CWD, at(9))]),
             at(10),
         );
@@ -713,6 +890,234 @@ mod tests {
         let resume = &only_journal(&recap).resume;
         assert_eq!(resume.command, None, "nothing pasteable is offered");
         assert!(resume.session_gone);
+    }
+
+    #[test]
+    fn a_journal_that_outlived_its_sessions_is_still_on_the_board() {
+        // The store forgets a project 24h after its last session, but the prose
+        // stays on disk. A question the agent asked three days ago is exactly
+        // what a recap must not lose, so it comes back as a line — no cwd to
+        // deep-link into and none needed, because a line offers nothing to
+        // click.
+        let gone = "/Users/x/repos/attention-ledger";
+
+        let recap = recap(
+            &[session("sess-1", CWD, at(9))],
+            true,
+            journals(vec![
+                (
+                    CWD,
+                    agent_line(&slug(CWD), "sess-1", at(9), "on-track", "Work", "More"),
+                ),
+                (
+                    gone,
+                    agent_line(
+                        &slug(gone),
+                        "sess-old",
+                        at(9),
+                        "needs-you",
+                        "Drafted ADR 0012",
+                        "SQLite or flat JSONL?",
+                    ),
+                ),
+            ]),
+            listing(vec![(CWD, at(9)), (gone, at(8))]),
+            no_sessions,
+            at(11),
+        );
+
+        assert_eq!(recap.cards.len(), 1, "only the live project is a card");
+        assert_eq!(recap.cards[0].cwd, CWD);
+
+        assert_eq!(recap.older_total, 1);
+        assert_eq!(recap.older.len(), 1, "{:?}", recap.older);
+        let older = &recap.older[0];
+        // The slug rides out whole. Cut to its last segment it would read
+        // "ledger", which names nothing the user has.
+        assert_eq!(older.slug, slug(gone));
+        assert_eq!(older.handoff, Handoff::NeedsYou);
+        assert_eq!(older.next, "SQLite or flat JSONL?");
+        assert_eq!(older.who, Voice::Agent);
+        assert_eq!(older.at, at(9));
+        assert_eq!(older.age_seconds, 2 * 60 * 60);
+        // The sentence is what survives: there is no directory to run a command
+        // in, and the payload says why rather than leaving the reader to guess.
+        assert_eq!(older.resume.instruction, "pick it up where it stopped");
+        assert!(older.resume.session_gone);
+    }
+
+    #[test]
+    fn an_older_note_that_answered_no_thread_is_not_a_missing_session() {
+        // The same distinction the cards draw. The first entry in a journal can
+        // be the user's own note, which names no session because there was
+        // nothing yet to answer — that is not a thread that has gone, and a
+        // line must not claim it is just because it is old.
+        let quiet = "/Users/x/repos/quiet";
+        let note = serde_json::json!({
+            "v": 1, "project": slug(quiet), "session": "",
+            "at": at(9).to_rfc3339(), "who": "user", "handoff": "needs-you",
+            "done": [], "next": "start with the parser", "resume": { "instruction": "" },
+        })
+        .to_string();
+
+        let recap = recap(
+            &[],
+            true,
+            journals(vec![(quiet, note)]),
+            listing(vec![(quiet, at(9))]),
+            no_sessions,
+            at(10),
+        );
+
+        assert_eq!(recap.older.len(), 1, "{:?}", recap.older);
+        assert_eq!(recap.older[0].who, Voice::User);
+        assert!(
+            !recap.older[0].resume.session_gone,
+            "nothing was named, so nothing is missing"
+        );
+    }
+
+    #[test]
+    fn a_project_the_store_still_knows_is_a_card_and_never_a_line_as_well() {
+        // Its journal is on disk like any other, so the listing offers it — but
+        // a card says strictly more than a line, and the same project appearing
+        // twice would read as two pieces of work.
+        let recap = recap(
+            &[session("sess-1", CWD, at(9))],
+            true,
+            journal_of(
+                CWD,
+                agent_line(&slug(CWD), "sess-1", at(9), "needs-you", "X", "Y"),
+            ),
+            listing(vec![(CWD, at(9))]),
+            no_sessions,
+            at(10),
+        );
+
+        assert_eq!(recap.cards.len(), 1);
+        assert!(
+            recap.older.is_empty() && recap.older_total == 0,
+            "the carded project must not be listed again: {:?}",
+            recap.older
+        );
+    }
+
+    #[test]
+    fn the_older_list_is_capped_and_the_cap_drops_the_calmest_never_a_question() {
+        // Seven journals, all out of window, deliberately ordered so directory
+        // order and recency both disagree with the answer: the one question is
+        // the *oldest* file of the seven. It must survive the cap; the two that
+        // fall off must be the calm ones.
+        let asking = "/Users/x/repos/asks";
+        let reviews: Vec<String> = (0..4).map(|n| format!("/Users/x/repos/rev{n}")).collect();
+        let calm: Vec<String> = (0..2).map(|n| format!("/Users/x/repos/calm{n}")).collect();
+
+        let mut fixtures = vec![(
+            asking,
+            agent_line(&slug(asking), "s", at(9), "needs-you", "Half", "Answer me"),
+        )];
+        let mut listed = vec![(asking, at(1))]; // oldest file of the seven
+        for (n, dir) in reviews.iter().enumerate() {
+            fixtures.push((
+                dir.as_str(),
+                agent_line(&slug(dir), "s", at(9), "needs-review", "Done", "Look"),
+            ));
+            listed.push((dir.as_str(), at(10 + n as u32)));
+        }
+        for (n, dir) in calm.iter().enumerate() {
+            fixtures.push((
+                dir.as_str(),
+                agent_line(&slug(dir), "s", at(9), "on-track", "Done", "Carry on"),
+            ));
+            // The calmest are also the most recently written, so only the
+            // Handoff Status ordering can keep them out of the cap.
+            listed.push((dir.as_str(), at(20 + n as u32)));
+        }
+
+        let recap = recap(
+            &[],
+            true,
+            journals(fixtures),
+            listing(listed),
+            no_sessions,
+            at(23),
+        );
+
+        assert_eq!(recap.older_total, 7, "the total counts every journal");
+        assert_eq!(recap.older.len(), OLDER_LIMIT, "{:?}", recap.older);
+        assert_eq!(
+            recap.older[0].slug,
+            slug(asking),
+            "the question leads, though its file is the oldest of the seven"
+        );
+        let handoffs: Vec<Handoff> = recap.older.iter().map(|o| o.handoff).collect();
+        assert_eq!(
+            handoffs,
+            vec![
+                Handoff::NeedsYou,
+                Handoff::NeedsReview,
+                Handoff::NeedsReview,
+                Handoff::NeedsReview,
+                Handoff::NeedsReview
+            ],
+            "the two dropped are the calm ones, not a question"
+        );
+    }
+
+    #[test]
+    fn older_lines_at_the_same_handoff_status_are_ordered_by_the_file_not_the_stamp() {
+        // The same reason the cards use `last_event_at`, and it bites harder
+        // here: the list is capped, so an entry stamped in the year 3000 would
+        // not merely sit at the top, it would push a real question off the end.
+        let stale = "/Users/x/repos/aaa";
+        let fresh = "/Users/x/repos/bbb";
+        let year_3000 = Utc.with_ymd_and_hms(3000, 1, 1, 9, 0, 0).unwrap();
+
+        let recap = recap(
+            &[],
+            true,
+            journals(vec![
+                (
+                    stale,
+                    agent_line(&slug(stale), "s", year_3000, "needs-you", "Claimed", "Me"),
+                ),
+                (
+                    fresh,
+                    agent_line(&slug(fresh), "s", at(8), "needs-you", "Real", "And me"),
+                ),
+            ]),
+            // The filesystem's word: bbb was written last.
+            listing(vec![(stale, at(9)), (fresh, at(11))]),
+            no_sessions,
+            at(12),
+        );
+
+        let order: Vec<&str> = recap.older.iter().map(|o| o.slug.as_str()).collect();
+        assert_eq!(order, vec![slug(fresh), slug(stale)]);
+    }
+
+    #[test]
+    fn a_journal_file_with_nothing_usable_in_it_is_not_an_older_project() {
+        // An empty or corrupt file is the "no prose" case a card already falls
+        // back on, and a line has nothing to fall back to — so it is no line.
+        let empty = "/Users/x/repos/empty";
+        let corrupt = "/Users/x/repos/corrupt";
+
+        let recap = recap(
+            &[],
+            true,
+            journals(vec![(corrupt, "not json at all\n{\n".to_string())]),
+            listing(vec![(empty, at(9)), (corrupt, at(10))]),
+            no_sessions,
+            at(11),
+        );
+
+        assert!(recap.cards.is_empty());
+        assert!(
+            recap.older.is_empty() && recap.older_total == 0,
+            "{:?}",
+            recap.older
+        );
     }
 
     #[test]
@@ -724,6 +1129,7 @@ mod tests {
             &[session("sess-1", CWD, at(9))],
             false,
             |_: &str| panic!("the journal must not be read while journal.enabled is false"),
+            || panic!("the journal directory must not be listed while journal.enabled is false"),
             store(vec![session("sess-1", CWD, at(9))]),
             at(10),
         );

@@ -8,5 +8,7 @@ pub mod runtime;
 
 pub use http::{router, AppState};
 pub use open::{Launcher, TerminalLauncher};
-pub use recap::{recap, CardJournal, CardResume, Recap, RecapCard};
+pub use recap::{
+    recap, CardJournal, CardResume, OlderJournal, OlderResume, Recap, RecapCard, OLDER_LIMIT,
+};
 pub use runtime::{init, Started};
