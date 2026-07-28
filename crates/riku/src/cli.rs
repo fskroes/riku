@@ -343,7 +343,9 @@ fn resolve_journal(args: &[String], config: &Config) -> Result<ResolvedCommand, 
                 text: text.clone(),
                 // A correction is usually the user asking for something, so
                 // that is the default; naming a Handoff Status is how they lower one.
-                handoff: handoff.unwrap_or(Handoff::NeedsYou),
+                // Shared with the board's correction box, which offers the same
+                // note and must land it in the same place when nothing is named.
+                handoff: handoff.unwrap_or(Handoff::NOTE_DEFAULT),
             })
         }
         _ => Err(format!(

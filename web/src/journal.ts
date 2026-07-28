@@ -7,7 +7,16 @@
 // renders it as text, and nothing in this module ever turns it into markup, a
 // URL, or a command.
 
-import type { CardResume, Handoff, RecapCard, Session, Status, Tool, Voice } from "./types";
+import type {
+  CardResume,
+  Correction,
+  Handoff,
+  RecapCard,
+  Session,
+  Status,
+  Tool,
+  Voice,
+} from "./types";
 import { ageFromSeconds, relativeAge } from "./format";
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -24,6 +33,27 @@ const HANDOFF_LABEL: Record<Handoff, string> = {
 
 export function handoffLabel(handoff: Handoff): string {
   return HANDOFF_LABEL[handoff];
+}
+
+/** The Handoff Statuses the correction box offers, in card order. Read off the
+ *  label map so the picker and the pill cannot drift apart. */
+export const HANDOFF_CHOICES = Object.keys(HANDOFF_LABEL) as Handoff[];
+
+/** Where a correction leaves the card unless the user says otherwise — the same
+ *  default `riku journal note` takes, because a correction is usually the user
+ *  asking for something. */
+export const CORRECTION_DEFAULT: Handoff = "needs-you";
+
+/** The correction a card is about to append, or `null` when there is nothing to
+ *  say.
+ *
+ *  Whitespace is not an answer, and an empty entry would still win latest-wins —
+ *  so it is refused here, as the endpoint and the CLI refuse it. The text is the
+ *  entry's next step and nothing else: a correction is a reply appended after
+ *  the agent's word, never an edit of it (ADR 0013). */
+export function correction(cwd: string, text: string, handoff: Handoff): Correction | null {
+  const said = text.trim();
+  return said ? { cwd, text: said, handoff } : null;
 }
 
 /** Whose reading the card is showing. A `user` last word is a correction no agent
@@ -81,11 +111,14 @@ export function timelineMeta(rows: TimelineRow[], nowMs: number): string {
  *
  *  `command` is Riku's, built from the session the store resolved; `instruction`
  *  is the author's sentence. `gone` is the honest third state: the entry names a
- *  thread this machine cannot get back into, so the sentence is what is left. */
+ *  thread this machine cannot get back into, so the sentence is what is left.
+ *  `none` is the fourth: the last word was the user's own note, which finishes
+ *  nothing and carries no sentence for a fresh session. */
 export type ResumeOffer =
   | { kind: "command"; command: string; dir: string | null; instruction: string }
   | { kind: "gone"; instruction: string }
-  | { kind: "instruction"; instruction: string };
+  | { kind: "instruction"; instruction: string }
+  | { kind: "none" };
 
 export function resumeOffer(resume: CardResume): ResumeOffer {
   const { instruction, command, dir, sessionGone } = resume;
@@ -93,6 +126,10 @@ export function resumeOffer(resume: CardResume): ResumeOffer {
   // that has just said a thread is unreachable must not also offer a paste for it.
   if (sessionGone) return { kind: "gone", instruction };
   if (command) return { kind: "command", command, dir, instruction };
+  // A user note names no session and writes no instruction, so there is nothing
+  // to say about resuming — and an empty block saying it would be worse than the
+  // silence.
+  if (!instruction.trim()) return { kind: "none" };
   return { kind: "instruction", instruction };
 }
 

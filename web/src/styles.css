@@ -535,7 +535,10 @@ button.gr-node { cursor: pointer; }
 
 /* The way back in. Text to copy — Riku never runs it, here or anywhere (ADR
    0002) — and no part of it is assembled from the journal's prose. */
-.resume { padding: 11px 14px; border-top: 1px solid var(--hairline); background: var(--ghost); border-radius: 0 0 var(--r-md) var(--r-md); }
+.resume { padding: 11px 14px; border-top: 1px solid var(--hairline); background: var(--ghost); }
+/* Whichever band ends the card rounds with it: the correction box is last while
+   the journal is on, the resume block when it is off. */
+.tcard > :last-child { border-radius: 0 0 var(--r-md) var(--r-md); }
 .rcmd { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .rcmd .label-micro { flex-basis: 100%; }
 .rcmd code { flex: 1; min-width: 0; padding: 6px 9px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--hairline); color: var(--ink); overflow-x: auto; white-space: nowrap; }
@@ -546,6 +549,24 @@ button.gr-node { cursor: pointer; }
 /* No transcript, no working directory, or an id the board would not launch: one
    note, because a reader acts on all three the same way. */
 .rgone { margin: 0; color: var(--warning); font-size: 12px; }
+
+/* Answering the card in your own words. An append, never an edit: the agent's
+   entry stays where it is and the user's correction is added after it, where the
+   next stop hook will read it (ADR 0013). */
+.correction { padding: 10px 14px 12px; border-top: 1px solid var(--hairline); background: var(--surface); }
+.correction .label-micro { display: block; margin-bottom: 5px; }
+.cor-text {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--hairline); border-radius: var(--r-sm);
+  background: var(--ghost); color: var(--ink); font: 400 13px var(--font-ui);
+}
+.cor-text::placeholder { color: var(--ink-faint); }
+.cor-text:focus { outline: none; border-color: var(--ink-muted); }
+.cor-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; color: var(--ink-faint); font-size: 11px; }
+.cor-foot select { padding: 4px 6px; border: 1px solid var(--hairline); border-radius: var(--r-sm); background: var(--surface); color: var(--ink-muted); font: 400 11px var(--font-ui); }
+.cor-foot button { margin-left: auto; padding: 6px 14px; border: 1px solid var(--hairline); border-radius: var(--r-sm); background: var(--ink); color: var(--surface); font: 500 12px var(--font-ui); cursor: pointer; }
+.cor-foot button:hover:not(:disabled) { opacity: .9; }
+.cor-foot button:disabled, .cor-text:disabled, .cor-foot select:disabled { opacity: .55; cursor: default; }
+.cor-err { margin: 7px 0 0; color: var(--warning); font-size: 12px; }
 
 /* Journals whose sessions the board has forgotten. Lines, not cards: the slug a
    journal is filed under cannot be turned back into a path, so there is nowhere

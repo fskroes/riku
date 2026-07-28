@@ -268,7 +268,14 @@ fn resolve_journal_project_in(dir: &Path, argument: &str) -> Result<String, Stri
 /// live file left empty or truncated by a crash must not turn a reply into a
 /// free-floating entry while the conversation it belongs to sits in the rotated
 /// generation.
-fn append_note_in(
+///
+/// Public for the reason [`read_journal_in`] is: the board holds its journal
+/// directory in state rather than resolving it per call, which is what lets the
+/// card's correction box be exercised against a temporary directory instead of
+/// the developer's own journal. The clock is the caller's for the same reason
+/// the recap's is — a stamp the module reached for itself could not be held
+/// still by a test.
+pub fn append_note_in(
     dir: &Path,
     project: &str,
     text: &str,

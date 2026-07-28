@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { CardJournal, Handoff, OlderJournal, RecapCard, Session, Status } from "./types";
 import { useRecap } from "./useRecap";
+import { useCorrection } from "./useCorrection";
 import { relativeAge } from "./format";
 import { Branch, Tile } from "./ui";
 import {
@@ -8,6 +9,7 @@ import {
   byDay,
   dayLabel,
   handoffLabel,
+  HANDOFF_CHOICES,
   olderLine,
   resumeOffer,
   summaryLine,
@@ -142,6 +144,10 @@ function Resume({ card }: { card: CardJournal }) {
     );
   }
 
+  // The user's own note is the last word: it finishes nothing and carries no
+  // sentence for a fresh session, so the band goes rather than standing empty.
+  if (offer.kind === "none") return null;
+
   return (
     <div className="resume">
       {offer.kind === "gone" && (
@@ -151,6 +157,66 @@ function Resume({ card }: { card: CardJournal }) {
       )}
       <p className="rinstr">{offer.instruction}</p>
     </div>
+  );
+}
+
+/** Answering the card in your own words: the box appends a `who:"user"` entry
+ *  through the same path as `riku journal note`, and the entry that spoke last
+ *  wins whoever spoke it (ADR 0013).
+ *
+ *  Append-only holds for both voices — there is nothing here that edits or
+ *  deletes what the agent wrote, only something that replies to it. The
+ *  Handoff Status picker is what makes "that's fine, carry on" sayable: without
+ *  it every answer would leave the card asking for a human.
+ *
+ *  On success the recap is re-read, so the pill, the sort position and the next
+ *  step all follow the correction without a reload. */
+function Correction({ cwd, onNoted }: { cwd: string; onNoted: () => void }) {
+  const box = useCorrection(cwd, onNoted);
+  const id = useId();
+  return (
+    <form
+      className="correction"
+      onSubmit={(event) => {
+        event.preventDefault();
+        box.send();
+      }}
+    >
+      <label className="label-micro" htmlFor={`${id}-text`}>
+        Your answer
+      </label>
+      <input
+        id={`${id}-text`}
+        className="cor-text"
+        value={box.text}
+        onChange={(event) => box.setText(event.target.value)}
+        placeholder="Disagree? Answer the agent — your entry wins"
+        disabled={box.sending}
+      />
+      <div className="cor-foot">
+        <label htmlFor={`${id}-handoff`}>leaves this card</label>
+        <select
+          id={`${id}-handoff`}
+          value={box.handoff}
+          onChange={(event) => box.setHandoff(event.target.value as Handoff)}
+          disabled={box.sending}
+        >
+          {HANDOFF_CHOICES.map((handoff) => (
+            <option key={handoff} value={handoff}>
+              {handoffLabel(handoff)}
+            </option>
+          ))}
+        </select>
+        <button type="submit" disabled={box.sending || !box.ready}>
+          {box.sending ? "appending…" : "append"}
+        </button>
+      </div>
+      {box.error && (
+        <p className="cor-err" role="alert">
+          {box.error}
+        </p>
+      )}
+    </form>
   );
 }
 
@@ -176,11 +242,14 @@ function ThreadCard({
   sessions,
   now,
   enabled,
+  onNoted,
 }: {
   card: RecapCard;
   sessions: Session[];
   now: number;
   enabled: boolean;
+  /** Re-read the recap once the user has answered this card. */
+  onNoted: () => void;
 }) {
   const rows = timelineFor(sessions, card.cwd);
   const journal = card.journal;
@@ -230,6 +299,10 @@ function ThreadCard({
       </div>
 
       {journal && <Resume card={journal} />}
+      {/* Offered only while the journal is on: with it off the board writes
+          nothing, and an endpoint that would refuse the append has no business
+          being given a box to type into. */}
+      {enabled && <Correction cwd={card.cwd} onNoted={onNoted} />}
     </article>
   );
 }
@@ -398,6 +471,7 @@ export function Recap({ sessions, now }: { sessions: Session[]; now: number }) {
               sessions={sessions}
               now={now}
               enabled={data.enabled}
+              onNoted={refetch}
             />
           ))}
         </div>

@@ -63,6 +63,13 @@ impl Handoff {
     /// flag and its usage line are both built from.
     pub const ALL: [Handoff; 3] = [Handoff::NeedsYou, Handoff::NeedsReview, Handoff::OnTrack];
 
+    /// Where a user's note leaves a card when they do not say — a correction is
+    /// usually the user asking for something. Named once, because both surfaces
+    /// that offer a note (`riku journal note` and the card's correction box)
+    /// default to it and a board that disagreed with the CLI about where an
+    /// unqualified answer lands would be two features, not one.
+    pub const NOTE_DEFAULT: Handoff = Handoff::NeedsYou;
+
     /// How a Handoff Status is spelled, on disk and on the command line. The two are
     /// deliberately the same word: what the user types into `--handoff` is what
     /// lands in the record, so there is nothing to translate and nothing to

@@ -1142,6 +1142,346 @@ async fn recap_reads_nothing_while_the_journal_is_switched_off() {
     assert_eq!(body["olderTotal"], 0);
 }
 
+/// Answer a card the way the correction box does: the project's directory, the
+/// user's words, and the Handoff Status they are leaving the card in.
+async fn correct(
+    addr: SocketAddr,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/api/recap/note"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap())
+}
+
+/// The recap as the browser re-reads it after answering.
+async fn read_recap(addr: SocketAddr) -> serde_json::Value {
+    reqwest::get(format!("http://{addr}/api/recap"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_correction_from_a_card_appends_the_users_voice_and_the_recap_follows() {
+    // The user disagrees with the agent's parting assessment and answers from
+    // the card. Riku is the user's pen here: an explicit user action appends a
+    // `who:"user"` record through the same path as `riku journal note`, and the
+    // next read re-resolves latest-wins, so the pill and the next step change
+    // without a restart (ADR 0013).
+    let claude = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let cwd = "/Users/x/repos/foo";
+
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "working", 10, 1)],
+    );
+    write_journal(
+        journal.path(),
+        cwd,
+        &[journal_entry(
+            cwd,
+            "sess-1",
+            "2026-07-28T09:00:00Z",
+            "on-track",
+            "Converted the temperatures",
+        )],
+    );
+
+    let (addr, _started) = spawn_server_with_journal(
+        claude.path().to_path_buf(),
+        journal.path().to_path_buf(),
+        true,
+    )
+    .await;
+
+    let (status, body) = correct(
+        addr,
+        serde_json::json!({
+            "cwd": cwd,
+            "text": "Not done — I need Kelvin, not Celsius",
+            "handoff": "needs-you",
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["noted"], true);
+    assert_eq!(
+        body["session"], "sess-1",
+        "the note answers the thread that spoke last: {body}"
+    );
+
+    // The agent's line survives verbatim — a correction is a reply, never an
+    // edit — and the user's answer is appended after it.
+    let path = journal
+        .path()
+        .join(format!("{}.jsonl", sessions::project_slug(Path::new(cwd))));
+    let text = fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].contains("Converted the temperatures"));
+    let appended: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(appended["who"], "user");
+    assert_eq!(appended["handoff"], "needs-you");
+    assert_eq!(appended["next"], "Not done — I need Kelvin, not Celsius");
+    assert_eq!(appended["done"].as_array().unwrap().len(), 0);
+    assert_eq!(appended["session"], "sess-1");
+
+    // And the card the user was looking at now reads back their own words: the
+    // pill is re-labelled and the next step is theirs, latest-wins.
+    let recap = read_recap(addr).await;
+    let card = &recap["cards"].as_array().unwrap()[0];
+    assert_eq!(card["cwd"], cwd);
+    assert_eq!(card["journal"]["handoff"], "needs-you");
+    assert_eq!(card["journal"]["who"], "user");
+    assert_eq!(
+        card["journal"]["next"],
+        "Not done — I need Kelvin, not Celsius"
+    );
+    // The agent's day survives beside it: an append adds a voice, it does not
+    // replace the record of what was done.
+    assert_eq!(
+        card["journal"]["days"].as_array().unwrap()[0]["done"]
+            .as_array()
+            .unwrap()[0],
+        "Converted the temperatures"
+    );
+}
+
+#[tokio::test]
+async fn a_first_correction_starts_a_journal_that_is_the_users_alone() {
+    // A project whose agent was never wired with the stop hook has no journal at
+    // all, and the user can still speak first from its card. The file the board
+    // creates for them is the same file `riku journal note` would create: one
+    // record, `0600`, answering no thread because there was none to answer.
+    let claude = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let cwd = "/Users/x/repos/foo";
+
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "working", 10, 1)],
+    );
+
+    let (addr, _started) = spawn_server_with_journal(
+        claude.path().to_path_buf(),
+        journal.path().to_path_buf(),
+        true,
+    )
+    .await;
+
+    let (status, body) = correct(
+        addr,
+        serde_json::json!({ "cwd": cwd, "text": "Start with the parser" }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["session"], "", "there was no thread to answer: {body}");
+
+    let path = journal
+        .path()
+        .join(format!("{}.jsonl", sessions::project_slug(Path::new(cwd))));
+    let written: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&path).unwrap().trim()).unwrap();
+    assert_eq!(written["who"], "user");
+    // No Handoff Status was named, so it lands where `riku journal note` lands
+    // one: a correction is usually the user asking for something.
+    assert_eq!(written["handoff"], "needs-you");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the journal is prose about the user's work; it is theirs alone"
+        );
+    }
+
+    // And the card now reads back their words, with no resume offer to make:
+    // a note finishes nothing and names no thread to re-enter.
+    let recap = read_recap(addr).await;
+    let card = &recap["cards"].as_array().unwrap()[0];
+    assert_eq!(card["journal"]["next"], "Start with the parser");
+    assert_eq!(card["journal"]["resume"]["instruction"], "");
+    assert_eq!(card["journal"]["resume"]["sessionGone"], false);
+}
+
+#[tokio::test]
+async fn a_correction_lowering_the_handoff_status_moves_the_card_down_the_board() {
+    // The user's answer is not always a demand: "that's fine, carry on" has to
+    // be able to *lower* a Handoff Status, or a card the agent left in needs-you
+    // stays pinned to the top until an agent session happens to run again.
+    let claude = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let asking = "/Users/x/repos/foo";
+    let reviewing = "/Users/x/repos/bar";
+
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "working", 10, 1)],
+    );
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-bar",
+        "bbbb.jsonl",
+        &[assistant_line_in("sess-2", reviewing, "main")],
+    );
+    write_journal(
+        journal.path(),
+        asking,
+        &[journal_entry(
+            asking,
+            "sess-1",
+            "2026-07-28T09:00:00Z",
+            "needs-you",
+            "Half of the parser",
+        )],
+    );
+    write_journal(
+        journal.path(),
+        reviewing,
+        &[journal_entry(
+            reviewing,
+            "sess-2",
+            "2026-07-28T09:00:00Z",
+            "needs-review",
+            "All of the reader",
+        )],
+    );
+
+    let (addr, _started) = spawn_server_with_journal(
+        claude.path().to_path_buf(),
+        journal.path().to_path_buf(),
+        true,
+    )
+    .await;
+
+    // The asking project leads to begin with, because needs-you comes first.
+    let before = read_recap(addr).await;
+    assert_eq!(before["cards"].as_array().unwrap()[0]["cwd"], asking);
+
+    let (status, body) = correct(
+        addr,
+        serde_json::json!({ "cwd": asking, "text": "That's fine, carry on", "handoff": "on-track" }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+
+    // Answered, it drops below the project that is still waiting on a human.
+    let after = read_recap(addr).await;
+    let order: Vec<&str> = after["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|card| card["cwd"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, vec![reviewing, asking], "{after}");
+    assert_eq!(
+        after["cards"].as_array().unwrap()[1]["journal"]["handoff"],
+        "on-track"
+    );
+}
+
+#[tokio::test]
+async fn a_correction_is_refused_while_the_journal_is_switched_off() {
+    // Off is off in both directions: the board reads nothing, and it writes
+    // nothing either. A correction accepted here would create the very file the
+    // user has not opted into (ADR 0013).
+    let claude = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let cwd = "/Users/x/repos/foo";
+
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "working", 10, 1)],
+    );
+
+    let (addr, _started) = spawn_server_with_journal(
+        claude.path().to_path_buf(),
+        journal.path().to_path_buf(),
+        false,
+    )
+    .await;
+
+    let (status, body) = correct(
+        addr,
+        serde_json::json!({ "cwd": cwd, "text": "Answer me", "handoff": "needs-you" }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("journal.enabled"),
+        "the refusal names the one command that lifts it: {body}"
+    );
+    assert_eq!(
+        fs::read_dir(journal.path()).unwrap().count(),
+        0,
+        "nothing was written into a journal directory nobody opted into"
+    );
+}
+
+#[tokio::test]
+async fn a_correction_only_answers_a_project_the_board_knows() {
+    // The only project a card can be answered from is one the board is showing.
+    // Scoping the write to a known session's directory is what keeps the
+    // endpoint from being pointed at an arbitrary path, the same rule
+    // `GET /api/work` holds to.
+    let claude = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "working", 10, 1)],
+    );
+
+    let (addr, _started) = spawn_server_with_journal(
+        claude.path().to_path_buf(),
+        journal.path().to_path_buf(),
+        true,
+    )
+    .await;
+
+    let (status, _) = correct(
+        addr,
+        serde_json::json!({ "cwd": "/etc", "text": "Answer me", "handoff": "needs-you" }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+    // And an empty correction says nothing, so there is nothing to append: the
+    // same refusal `riku journal note` gives.
+    let (status, body) = correct(
+        addr,
+        serde_json::json!({ "cwd": "/Users/x/repos/foo", "text": "   ", "handoff": "needs-you" }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+
+    // Neither attempt left a file behind.
+    assert_eq!(fs::read_dir(journal.path()).unwrap().count(), 0);
+}
+
 /// Start a Relay on an ephemeral port, returning its base URL.
 async fn spawn_relay(token: &str) -> String {
     let app = relay::router(relay::RelayState::new(token));
