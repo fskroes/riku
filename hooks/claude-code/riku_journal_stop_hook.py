@@ -62,6 +62,18 @@ if stop_hook_active:
         f.write(f"{now} MISSED session={session_id} project={slug}\n")
     sys.exit(0)
 
+# Keep the journal bounded before inviting another append. Riku caps the live
+# file and keeps exactly one rotated generation (JOURNAL_SIZE_CAP in
+# crates/sessions/src/journal_store.rs); the cap has to hold here too, because
+# the agent appends far more often than Riku does. os.replace is atomic, so a
+# reader sees the old file or the new one, never a half-copied journal.
+JOURNAL_SIZE_CAP = 1 << 20
+if os.path.exists(journal_path) and os.path.getsize(journal_path) >= JOURNAL_SIZE_CAP:
+    os.replace(journal_path, journal_path + ".1")
+# The tail read above is deliberately kept across a rotation: a user correction
+# in those lines still deserves an answer, and the conversation does not restart
+# just because the file did.
+
 # Pre-create the journal file with mode 0600 so permissions never depend on
 # how the agent creates it; the append below is the agent's job.
 fd = os.open(journal_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)

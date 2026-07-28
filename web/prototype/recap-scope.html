@@ -1,0 +1,640 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Answers the #57 scope fork:
+
+    Should GET /api/recap be keyed on LIVE SESSIONS (the store's 24h
+    DISCOVERY_WINDOW, which is what the code does today) or on the JOURNALS
+    ON DISK (which is what the ticket's wording — "for each project with
+    journal entries" — asks for)?
+
+  The catch: a journal-only project is known only by its slug, and the slug is
+  lossy. `project_slug` collapses every non-alphanumeric run to `-`, so
+  /Users/x/repos/attention-ledger becomes users-x-repos-attention-ledger and
+  the path cannot be recovered. No cwd => no deep link, no resume directory.
+
+  Three variants — the SAME six projects under the three candidate policies,
+  switchable via ?variant=A|B|C and the floating bottom bar:
+
+    A — Journal-keyed, cwd null : every journal on disk gets a card. The
+        out-of-window ones are degraded: name guessed from the slug, no
+        directory, no command. Ticket-faithful, cheapest to build.
+    B — dir in the record       : bump the record so entries carry the project
+        directory; the stop hook writes it. Journal-only cards resume properly
+        — but ONLY for entries written after the change. Old entries fall back
+        to A. The migration cliff is the thing to look at.
+    C — Session-keyed (today)   : the recap is a view over sessions the board
+        knows. Out-of-window journals simply are not there; the endpoint never
+        opens the directory, so it cannot even hint at them. Reaching back in
+        time becomes #58's job, where the date picker lives.
+
+  The dashed "what this costs" bar under the header is PROTOTYPE CHROME, not
+  part of the design — it says what the policy hides or degrades, which the
+  rendered UI by definition cannot.
+
+  Synthetic data only, no backend, no persistence. Open the file directly, or
+  `cd web && npx vite` and hit /prototype/recap-scope.html.
+
+  ANSWERED — D won. Shipped in crates/board/src/recap.rs as `Recap.older` +
+  `olderTotal`, capped at OLDER_LIMIT = 5, ordered needs-you → needs-review →
+  on-track then newest-first by the journal FILE's mtime (not the entry's `at`,
+  which is agent-supplied: with a cap in play a bad stamp would not merely sort
+  to the top, it would push a real question off the end).
+
+  Two things this prototype settled that the written options had wrong:
+    - "Name it from the slug's last segment" is lossier than it sounds:
+      users-x-repos-attention-ledger → "ledger". A strip sidesteps it entirely
+      by showing the raw slug, which is lossless. Only a card TITLE had to guess.
+    - Adding `dir` to the record (variant B) does not rescue the case that
+      motivated it — journals already on disk have no `dir` and never will.
+
+  Shipped beyond what is drawn here: each line also carries
+  resume.instruction + sessionGone, per #57's session-gone wording.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE — riku recap scope (sessions or journals?)</title>
+<style>
+  :root {
+    --bg-content: #FAF6EF; --surface: #FFFFFF; --ink: #2B241A;
+    --ink-muted: rgba(43,36,26,0.72); --ink-faint: rgba(43,36,26,0.58);
+    --hairline: rgba(43,36,26,0.12); --accent: #B4552D;
+    --accent-soft: rgba(180,85,45,0.12); --positive: #2E7D51;
+    --positive-soft: rgba(46,125,81,0.13);
+    --warning: #B07514; --warning-soft: rgba(176,117,20,0.13);
+    --negative: #C24438; --info: #4A5FB5;
+    --info-soft: rgba(74,95,181,0.14); --ghost: rgba(43,36,26,0.07);
+    --shadow-float: 0 12px 32px rgba(43,36,26,0.16);
+    --card-edge: 0 0 0 1px rgba(43,36,26,0.1);
+    --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg-content); color: var(--ink);
+    font-family: var(--font-ui); font-size: 13px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased; padding: 0 0 96px;
+  }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 40px 32px 0; }
+  h1.proto-h { font-size: 15px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .proto-sub { color: var(--ink-faint); font-size: 12px; margin: 0 0 18px; }
+  .mono { font-family: var(--font-mono); }
+  .muted { color: var(--ink-faint); }
+
+  /* ---------- prototype chrome: the cost bar (NOT part of the design) ----- */
+  .costbar {
+    border: 1px dashed rgba(43,36,26,0.3); border-radius: 10px;
+    padding: 12px 15px; margin: 0 0 22px; background: rgba(43,36,26,0.025);
+  }
+  .costbar .ch { font-family: var(--font-mono); font-size: 9.5px;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint);
+    margin-bottom: 6px; }
+  .costbar p { margin: 0 0 4px; font-size: 12.5px; line-height: 1.55; }
+  .costbar p:last-child { margin-bottom: 0; }
+  .costbar b { font-weight: 600; }
+  .cost-bad { color: var(--negative); font-weight: 600; }
+  .cost-ok { color: var(--positive); font-weight: 600; }
+
+  /* ---------- the recap itself ------------------------------------------- */
+  .lead { font-size: 14.5px; line-height: 1.55; margin: 0 0 20px; }
+  .lead b { font-weight: 600; }
+
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(430px, 1fr));
+    gap: 16px; }
+  .pcard { background: var(--surface); border-radius: 12px; padding: 16px 17px;
+    box-shadow: var(--card-edge); }
+  .pcard-h { display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; margin-bottom: 3px; }
+  .tnm { font-size: 13.5px; font-weight: 600; }
+  .pill { flex: 0 0 auto; font-size: 10px; font-family: var(--font-mono);
+    text-transform: uppercase; letter-spacing: 0.06em; padding: 3px 9px;
+    border-radius: 999px; }
+  .kc-blocked .pill { background: var(--accent-soft); color: var(--accent); }
+  .kc-review .pill  { background: var(--info-soft); color: var(--info); }
+  .kc-track .pill   { background: var(--positive-soft); color: var(--positive); }
+  .kc-none .pill    { background: var(--ghost); color: var(--ink-faint); }
+
+  /* the crux line: what this card knows about where it lives */
+  .cwdline { font-family: var(--font-mono); font-size: 10.5px; margin: 0 0 12px;
+    color: var(--ink-faint); }
+  .cwdline.lost { color: var(--warning); }
+  .cwdline .tag { display: inline-block; margin-left: 7px; padding: 1px 6px;
+    border-radius: 4px; background: var(--warning-soft); color: var(--warning);
+    font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .guessed { border-bottom: 1.5px dotted var(--warning); cursor: help; }
+
+  .pcol { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 12px; }
+  .seg-h { font-family: var(--font-mono); font-size: 9.5px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--ink-faint); margin-bottom: 6px; }
+  .donelist { list-style: none; margin: 0; padding: 0; }
+  .donelist li { display: flex; gap: 7px; margin-bottom: 5px; font-size: 12px;
+    line-height: 1.4; }
+  .chk { flex: 0 0 auto; width: 11px; height: 11px; border-radius: 3px;
+    margin-top: 3px; background: var(--ghost); }
+  .kc-blocked .chk { background: var(--accent-soft); }
+  .kc-review .chk  { background: var(--info-soft); }
+  .kc-track .chk   { background: var(--positive-soft); }
+  .nexttxt { font-size: 12.5px; line-height: 1.45; }
+  .t-meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint);
+    margin: 0 0 11px; }
+
+  /* resume row — the affordance the fork actually decides */
+  .cmd { display: flex; align-items: center; gap: 9px; background: rgba(43,36,26,0.045);
+    border-radius: 8px; padding: 9px 11px; font-family: var(--font-mono);
+    font-size: 11px; }
+  .cmd code { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .cmd .cmd-run { flex: 0 0 auto; font-size: 9.5px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--ink-faint); }
+  .copybtn { flex: 0 0 auto; background: var(--ink); color: #FAF6EF; border: 0;
+    border-radius: 6px; font-family: var(--font-mono); font-size: 10px;
+    padding: 5px 10px; cursor: pointer; }
+  /* the degraded form: instruction alone, no command */
+  .gone { background: var(--warning-soft); border-radius: 8px; padding: 10px 12px; }
+  .gone .gone-h { font-family: var(--font-mono); font-size: 9.5px;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--warning);
+    margin-bottom: 4px; }
+  .gone .gone-t { font-size: 12.5px; line-height: 1.45; }
+  .fallback { color: var(--ink-faint); font-size: 12.5px; font-style: italic; }
+
+  .hidden-note { margin-top: 26px; padding-top: 16px;
+    border-top: 1px solid var(--hairline); color: var(--ink-faint); font-size: 12px; }
+
+  /* ---------- D: older journals demoted to a quiet strip ------------------ */
+  .strip { margin-top: 30px; padding-top: 14px; border-top: 1px solid var(--hairline); }
+  .strip-h { font-family: var(--font-mono); font-size: 9.5px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--ink-faint); margin-bottom: 9px; }
+  .striprow { display: flex; align-items: baseline; gap: 11px; padding: 5px 0;
+    font-size: 12px; }
+  .striprow + .striprow { border-top: 1px solid rgba(43,36,26,0.06); }
+  .strip-pill { flex: 0 0 auto; width: 88px; font-family: var(--font-mono);
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--ink-faint); }
+  .striprow.needs .strip-pill { color: var(--accent); font-weight: 600; }
+  .strip-slug { flex: 0 0 auto; font-family: var(--font-mono); font-size: 11px;
+    color: var(--ink-muted); }
+  .strip-age { flex: 0 0 auto; font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--ink-faint); margin-left: auto; }
+  .strip-next { flex: 1 1 100%; font-size: 12px; color: var(--ink-muted);
+    padding-left: 99px; margin-top: 1px; }
+  .strip-more { font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--ink-faint); padding: 8px 0 0; border-top: 1px solid rgba(43,36,26,0.06); }
+
+  @media (max-width: 720px) { .pcol { grid-template-columns: 1fr; gap: 12px; } }
+
+  /* ---------- switcher (verbatim from the activity-recap prototype) ------- */
+  .switcher {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #211C15; color: #EDE6D8; border-radius: 999px;
+    box-shadow: var(--shadow-float); display: flex; align-items: center;
+    gap: 4px; padding: 6px 8px; z-index: 100; user-select: none;
+  }
+  .switcher button {
+    background: transparent; border: 0; color: #EDE6D8; cursor: pointer;
+    font-size: 16px; width: 30px; height: 30px; border-radius: 999px;
+    display: grid; place-items: center;
+  }
+  .switcher button:hover { background: rgba(255,255,255,0.12); }
+  .switcher .name { font-size: 12px; font-family: var(--font-mono); padding: 0 12px;
+    min-width: 210px; text-align: center; }
+  .switcher .name b { color: #C9A15A; }
+  .proto-flag { position: fixed; top: 10px; right: 12px; font-size: 10px;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint);
+    font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+  <div class="proto-flag">prototype · throwaway</div>
+  <div class="wrap" id="root"></div>
+
+  <div class="switcher" role="group" aria-label="Prototype variant switcher">
+    <button id="prev" aria-label="Previous variant">‹</button>
+    <span class="name" id="vname"></span>
+    <button id="next" aria-label="Next variant">›</button>
+  </div>
+
+<script>
+// ---------------------------------------------------------------------------
+// The world: six projects, identical under all three variants. Ages in hours.
+// The window is the store's real DISCOVERY_WINDOW.
+// ---------------------------------------------------------------------------
+const WINDOW_H = 24;
+
+// The real slug rule, ported from crates/sessions/src/journal.rs.
+function projectSlug(dir) {
+  let slug = "";
+  for (const ch of dir.replace(/^\/+|\/+$/g, "")) {
+    if (/[a-zA-Z0-9]/.test(ch)) slug += ch.toLowerCase();
+    else if (!slug.endsWith("-")) slug += "-";
+  }
+  return slug.replace(/^-+|-+$/g, "");
+}
+
+const PROJECTS = [
+  {
+    dir: "/Users/x/repos/riku", sessionH: 0.7, sid: "rk-a19f", tool: "claude",
+    journal: {
+      status: "blocked", atH: 0.8, who: "agent", dirInRecord: true,
+      done: ["Wrote the recap endpoint and its assembly tests",
+             "Rebased onto main, dropped seven already-merged commits"],
+      next: "Settle the recap scope fork before the PR — sessions or journals?",
+      instruction: "pick up the #57 review fixes where they stopped",
+    },
+  },
+  {
+    dir: "/Users/x/dev/relay", sessionH: 6, sid: "rk-relay-8f2", tool: "claude",
+    journal: {
+      status: "review", atH: 6.2, who: "agent", dirInRecord: true,
+      done: ["Uniform machine-stamped Engine read interface"],
+      next: "Review the store.rs replay change, then re-run cargo test -p sessions",
+      instruction: "walk the replay diff with me",
+    },
+  },
+  {
+    // THE CRUX. Three days old, and it is the one asking the user a question.
+    // Its entries predate any `dir` field, so even variant B cannot resume it.
+    dir: "/Users/x/repos/attention-ledger", sessionH: 74, sid: "rk-ledger-4c1",
+    tool: "claude",
+    journal: {
+      status: "blocked", atH: 74, who: "agent", dirInRecord: false,
+      done: ["Drafted ADR 0012 (attention ledger, local metrics)",
+             "Built the attention-stats prototype, 3 variants"],
+      next: "Answer the storage trade-off: SQLite or flat JSONL? ADR 0012 is stalled on it.",
+      instruction: "resume the ADR 0012 discussion at the storage section",
+    },
+  },
+  {
+    // Written AFTER the record bump, so variant B can resume it and A cannot.
+    dir: "/Users/x/repos/vanmoof-scraper", sessionH: 122, sid: "rk-vm-77c",
+    tool: "codex",
+    journal: {
+      status: "review", atH: 122, who: "agent", dirInRecord: true,
+      done: ["Scraper handles the 429 backoff without dropping pages"],
+      next: "Look over the retry logic before I widen it to the listings endpoint",
+      instruction: "review the backoff change",
+    },
+  },
+  {
+    // Eleven days old and calm. The noise a journal-keyed board takes on.
+    dir: "/Users/x/dotfiles", sessionH: 268, sid: "rk-dot-3e1", tool: "claude",
+    journal: {
+      status: "track", atH: 268, who: "agent", dirInRecord: false,
+      done: ["Split .zshrc into modules"],
+      next: "Carry on with the zsh prompt cleanup",
+      instruction: "continue the prompt cleanup",
+    },
+  },
+  {
+    // In-window, but never wired to the hook: the derived-timeline fallback.
+    dir: "/Users/x/repos/scratch-api", sessionH: 3, sid: "rk-scr-5d9",
+    tool: "claude", journal: null,
+  },
+  // Four more older journals, so the strip's cap of 5 actually fires and the
+  // ordering inside it is visible. Two of these must fall off the end.
+  {
+    dir: "/Users/x/repos/old-blog", sessionH: 216, sid: "rk-blog-1a2",
+    tool: "claude",
+    journal: { status: "review", atH: 216, who: "agent", dirInRecord: false,
+      done: ["Migrated the post front-matter"], next: "Check the RSS output",
+      instruction: "look over the feed change" },
+  },
+  {
+    dir: "/Users/x/work/invoices", sessionH: 336, sid: "rk-inv-6b3",
+    tool: "claude",
+    journal: { status: "track", atH: 336, who: "agent", dirInRecord: false,
+      done: ["Q2 export script"], next: "Carry on with the CSV column mapping",
+      instruction: "continue the export work" },
+  },
+  {
+    dir: "/Users/x/repos/gstack-fork", sessionH: 480, sid: "rk-gs-9f4",
+    tool: "codex",
+    journal: { status: "review", atH: 480, who: "agent", dirInRecord: false,
+      done: ["Rebased the fork onto upstream"], next: "Review the conflict resolutions",
+      instruction: "walk the rebase with me" },
+  },
+  {
+    dir: "/Users/x/scratch/ml-notes", sessionH: 720, sid: "rk-ml-2c8",
+    tool: "claude",
+    journal: { status: "track", atH: 720, who: "agent", dirInRecord: false,
+      done: ["Notes on the embedding comparison"], next: "Carry on when it matters",
+      instruction: "pick the notes back up" },
+  },
+];
+
+/// How many older journals the quiet strip will show. Beyond this the strip
+/// says how many it left out — a silent cap would recreate the blind spot the
+/// strip exists to close.
+const OLDER_LIMIT = 5;
+
+const STATUS = {
+  blocked: { pill: "needs you",    cls: "kc-blocked", w: 0 },
+  review:  { pill: "needs review", cls: "kc-review",  w: 1 },
+  track:   { pill: "on track",     cls: "kc-track",   w: 2 },
+};
+
+const inWindow = (p) => p.sessionH <= WINDOW_H;
+const lastSeg  = (dir) => dir.split("/").filter(Boolean).pop();
+
+function ago(h) {
+  if (h < 1) return `${Math.round(h * 60)}m ago`;
+  if (h < 48) return `${Math.round(h)}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function cmdFor(p) {
+  return p.tool === "codex" ? `codex resume ${p.sid}` : `claude --resume ${p.sid}`;
+}
+
+// ---------------------------------------------------------------------------
+// One card. `know` says what this policy managed to recover about the project:
+//   { name, cwd|null, guessedName: bool, resumable: bool, whyNot: string|null }
+// ---------------------------------------------------------------------------
+function card(p, know) {
+  const j = p.journal;
+  const st = j ? STATUS[j.status] : { pill: "no prose", cls: "kc-none" };
+
+  const nameHtml = know.guessedName
+    ? `<span class="guessed" title="derived from the slug's last segment — the real directory name was ${esc(lastSeg(p.dir))}">${esc(know.name)}</span>`
+    : esc(know.name);
+
+  const cwdHtml = know.cwd
+    ? `<div class="cwdline">${esc(know.cwd)}</div>`
+    : `<div class="cwdline lost">${esc(projectSlug(p.dir))}<span class="tag">slug only — no directory</span></div>`;
+
+  if (!j) {
+    return `<div class="pcard ${st.cls}">
+      <div class="pcard-h"><span class="tnm">${nameHtml}</span>
+        <span class="pill">${st.pill}</span></div>
+      ${cwdHtml}
+      <div class="t-meta">last active ${ago(p.sessionH)} · no journal entries</div>
+      <p class="fallback">No prose for this project — the card falls back to the
+        derived timeline. Nothing is fabricated.</p>
+    </div>`;
+  }
+
+  const doneHtml = j.done.map((d) =>
+    `<li><span class="chk"></span><span>${esc(d)}</span></li>`).join("");
+
+  const resumeHtml = know.resumable
+    ? `<div class="cmd">
+         <span class="cmd-run">▶ run in ${esc(know.cwd)}</span>
+         <code>${esc(cmdFor(p))}</code>
+         <button class="copybtn">copy</button>
+       </div>`
+    : `<div class="gone">
+         <div class="gone-h">no command — ${esc(know.whyNot)}</div>
+         <div class="gone-t">“${esc(j.instruction)}”</div>
+       </div>`;
+
+  return `<div class="pcard ${st.cls}">
+    <div class="pcard-h"><span class="tnm">${nameHtml}</span>
+      <span class="pill">${st.pill}</span></div>
+    ${cwdHtml}
+    <div class="t-meta">latest entry ${ago(j.atH)} · last session ${ago(p.sessionH)}${
+      inWindow(p) ? "" : " · outside the 24h window"}</div>
+    <div class="pcol">
+      <div><div class="seg-h">Done so far</div>
+        <ul class="donelist">${doneHtml}</ul></div>
+      <div><div class="seg-h">To go further</div>
+        <div class="nexttxt">${esc(j.next)}</div></div>
+    </div>
+    ${resumeHtml}
+  </div>`;
+}
+
+function sortCards(list) {
+  const w = (p) => (p.journal ? STATUS[p.journal.status].w : 3);
+  return [...list].sort((a, b) => w(a) - w(b) || a.sessionH - b.sessionH);
+}
+
+// ---------------------------------------------------------------------------
+// A — journal-keyed, cwd null. Every journal on disk gets a card; the ones the
+// store cannot match to a session are known by slug alone.
+// ---------------------------------------------------------------------------
+function variantA() {
+  const shown = sortCards(PROJECTS.filter((p) => p.journal || inWindow(p)));
+  const cards = shown.map((p) => {
+    if (inWindow(p)) {
+      return card(p, { name: lastSeg(p.dir), cwd: p.dir, guessedName: false,
+                       resumable: !!p.journal, whyNot: null });
+    }
+    const slug = projectSlug(p.dir);
+    return card(p, {
+      name: slug.split("-").pop(),          // the option as written: last segment
+      cwd: null, guessedName: true, resumable: false,
+      whyNot: "no directory to run it in",
+    });
+  }).join("");
+
+  const degraded = shown.filter((p) => !inWindow(p)).length;
+  return {
+    cost: `<p><span class="cost-ok">Nothing is hidden.</span> All
+      <b>${shown.length}</b> journals on disk get a card, which is what #57's
+      wording asks for — including the three-day-old <b>needs&#8209;you</b>
+      question.</p>
+      <p>The price: <b>${degraded}</b> cards are degraded — no directory, no
+      resume command, and a <span class="cost-bad">guessed name</span>. Look at
+      what the slug's last segment actually produces:
+      <span class="mono">users-x-repos-attention-ledger</span> →
+      <span class="mono cost-bad">“ledger”</span>, and
+      <span class="mono">users-x-repos-vanmoof-scraper</span> →
+      <span class="mono cost-bad">“scraper”</span>. The dotted names above are
+      the guesses; hover one to see the real directory name.</p>`,
+    body: `<p class="lead">You have <b>${shown.length} projects</b> with
+      something to say. <b>2</b> need you.</p><div class="pgrid">${cards}</div>`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// B — the project directory moves into the record. Journal-only cards resume
+// properly, but only for entries written after the bump.
+// ---------------------------------------------------------------------------
+function variantB() {
+  const shown = sortCards(PROJECTS.filter((p) => p.journal || inWindow(p)));
+  const cards = shown.map((p) => {
+    if (inWindow(p)) {
+      return card(p, { name: lastSeg(p.dir), cwd: p.dir, guessedName: false,
+                       resumable: !!p.journal, whyNot: null });
+    }
+    if (p.journal.dirInRecord) {
+      // The record carried its directory, so the card is whole.
+      return card(p, { name: lastSeg(p.dir), cwd: p.dir, guessedName: false,
+                       resumable: true, whyNot: null });
+    }
+    const slug = projectSlug(p.dir);
+    return card(p, {
+      name: slug.split("-").pop(), cwd: null, guessedName: true,
+      resumable: false, whyNot: "this entry predates the dir field",
+    });
+  }).join("");
+
+  const old = shown.filter((p) => !inWindow(p) && !p.journal.dirInRecord).length;
+  const fixed = shown.filter((p) => !inWindow(p) && p.journal.dirInRecord).length;
+  return {
+    cost: `<p><span class="cost-ok">${fixed} of the out-of-window cards are
+      whole</span> — real directory, real resume command — because their entries
+      were written after the record carried <span class="mono">dir</span>.</p>
+      <p>But <span class="cost-bad">${old} still look exactly like variant A</span>.
+      Journals already on disk have no <span class="mono">dir</span> and never
+      will, so the degraded card does not go away — it just gets rarer over
+      time. Note which one is stuck: the <b>needs&#8209;you</b> ADR 0012 card,
+      the one this policy was meant to rescue.</p>
+      <p>Cost on top of A: a record-shape change ADR 0013 fixed at
+      <span class="mono">v1</span>, plus the stop hook writing the new field.</p>`,
+    body: `<p class="lead">You have <b>${shown.length} projects</b> with
+      something to say. <b>2</b> need you.</p><div class="pgrid">${cards}</div>`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// C — session-keyed: what the code does today. The endpoint never opens the
+// journal directory, so it cannot even know the other three exist.
+// ---------------------------------------------------------------------------
+function variantC() {
+  const shown = sortCards(PROJECTS.filter(inWindow));
+  const cards = shown.map((p) =>
+    card(p, { name: lastSeg(p.dir), cwd: p.dir, guessedName: false,
+              resumable: !!p.journal, whyNot: null })).join("");
+
+  const hidden = PROJECTS.filter((p) => !inWindow(p) && p.journal);
+  const hiddenList = hidden.map((p) =>
+    `<b>${esc(lastSeg(p.dir))}</b> (${STATUS[p.journal.status].pill},
+     ${ago(p.journal.atH)})`).join(", ");
+  return {
+    cost: `<p><span class="cost-ok">Every card is whole.</span> Every project
+      shown has a live session behind it, so every name is real and every
+      resumable thread has a command. Nothing is degraded, and no record change
+      is needed.</p>
+      <p>The price: <span class="cost-bad">${hidden.length} journals on disk are
+      not here</span> — ${hiddenList}. The <b>needs&#8209;you</b> one is a
+      question the agent asked you three days ago and it has gone quiet.</p>
+      <p>And the recap cannot tell you that: it never enumerates the journal
+      directory, so it does not know they exist. If this is the answer, the
+      reaching-back belongs to <b>#58</b>'s date picker — and #57's ticket
+      wording needs correcting.</p>`,
+    body: `<p class="lead">You have <b>${shown.length} projects</b> active
+      today. <b>1</b> needs you.</p><div class="pgrid">${cards}</div>
+      <p class="hidden-note">This is the whole recap. Three journals sit on disk
+      unread — but nothing on this screen could have told you so, which is the
+      point of the variant.</p>`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// D — C's cards, plus the older journals demoted to a quiet strip. Same first
+// glance as C; nothing silently dropped.
+//
+// The strip can afford what a card cannot: it shows the RAW SLUG, which is
+// lossless, instead of guessing a display name from it. It offers no resume
+// affordance, so having no cwd costs it nothing — it is a pointer, not a card.
+// ---------------------------------------------------------------------------
+function variantD() {
+  const shown = sortCards(PROJECTS.filter(inWindow));
+  const cards = shown.map((p) =>
+    card(p, { name: lastSeg(p.dir), cwd: p.dir, guessedName: false,
+              resumable: !!p.journal, whyNot: null })).join("");
+
+  const allOlder = sortCards(PROJECTS.filter((p) => !inWindow(p) && p.journal));
+  // Capped in the same order the cards use, so the cap can never drop a
+  // question in favour of something calm.
+  const older = allOlder.slice(0, OLDER_LIMIT);
+  const dropped = allOlder.length - older.length;
+  const rows = older.map((p) => {
+    const st = STATUS[p.journal.status];
+    const needs = p.journal.status === "blocked";
+    return `<div class="striprow${needs ? " needs" : ""}">
+      <span class="strip-pill">${st.pill}</span>
+      <span class="strip-slug">${esc(projectSlug(p.dir))}</span>
+      <span class="strip-age">${ago(p.journal.atH)}</span>
+      ${needs ? `<div class="strip-next">${esc(p.journal.next)}</div>` : ""}
+    </div>`;
+  }).join("");
+
+  const needing = older.filter((p) => p.journal.status === "blocked").length;
+  return {
+    cost: `<p><span class="cost-ok">C's first glance, without C's blind spot.</span>
+      The three whole cards are the page; the older journals are one quiet line
+      each, below the fold of attention. Nothing is degraded, because a line
+      offers no resume affordance and so loses nothing by having no directory.</p>
+      <p>The slug problem <span class="cost-ok">disappears</span>: a strip can
+      show the raw <span class="mono">users-x-repos-attention-ledger</span>,
+      which is lossless. Only a card title had to guess a name.</p>
+      <p>The ${needing} <b>needs&#8209;you</b> journal is still visible — it is
+      the only strip row that gets to show its question. Cost over C: the
+      endpoint enumerates the journal directory and resolves the latest entry
+      per file. No record change, no v-bump.</p>
+      <p>The strip is capped at <b>${OLDER_LIMIT}</b>, sorted the way the cards
+      are, so ${dropped ? `the <b>${dropped}</b> it drops are the calmest and
+      oldest — never a question. It says so rather than trimming in silence`
+      : "a cap can never drop a question in favour of something calm"}.</p>`,
+    body: `<p class="lead">You have <b>${shown.length} projects</b> active
+      today. <b>1</b> needs you.</p><div class="pgrid">${cards}</div>
+      <div class="strip"><div class="strip-h">older journals · not active in
+        the last ${WINDOW_H}h${dropped
+          ? ` · showing ${older.length} of ${allOlder.length}` : ""}</div>
+        ${rows}
+        ${dropped ? `<div class="strip-more">${dropped} older journal${
+          dropped === 1 ? "" : "s"} not shown</div>` : ""}</div>`,
+  };
+}
+
+// ---- switcher (verbatim shape from the activity-recap prototype) ----------
+const VARIANTS = {
+  A: { name: "Journal-keyed", render: variantA },
+  B: { name: "dir in record", render: variantB },
+  C: { name: "Sessions (today)", render: variantC },
+  D: { name: "C + quiet strip", render: variantD },
+};
+const ORDER = ["A", "B", "C", "D"];
+
+function current() {
+  const v = new URLSearchParams(location.search).get("variant");
+  return VARIANTS[v] ? v : "A";
+}
+function setVariant(v) {
+  const u = new URL(location.href);
+  u.searchParams.set("variant", v);
+  history.replaceState(null, "", u);
+  render();
+}
+function render() {
+  const v = current();
+  const { cost, body } = VARIANTS[v].render();
+  document.getElementById("root").innerHTML =
+    `<h1 class="proto-h">riku recap <span class="muted">— #57 scope fork:
+       key on sessions, or on journals?</span></h1>
+     <p class="proto-sub">Same six projects, three policies · synthetic data ·
+       variant ${v} of 3 · the 24h window is the store's real DISCOVERY_WINDOW</p>
+     <div class="costbar"><div class="ch">what this policy costs — prototype note, not part of the design</div>${cost}</div>
+     ${body}`;
+  document.getElementById("vname").innerHTML = `<b>${v}</b> — ${VARIANTS[v].name}`;
+}
+function cycle(dir) {
+  const i = ORDER.indexOf(current());
+  setVariant(ORDER[(i + dir + ORDER.length) % ORDER.length]);
+}
+document.getElementById("prev").onclick = () => cycle(-1);
+document.getElementById("next").onclick = () => cycle(1);
+addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  if (e.key === "ArrowLeft") cycle(-1);
+  if (e.key === "ArrowRight") cycle(1);
+});
+document.addEventListener("click", (e) => {
+  const b = e.target.closest(".copybtn");
+  if (!b) return;
+  navigator.clipboard?.writeText(b.parentElement.querySelector("code").textContent);
+  b.textContent = "copied";
+  setTimeout(() => { b.textContent = "copy"; }, 1200);
+});
+
+render();
+</script>
+</body>
+</html>

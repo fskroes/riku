@@ -17,6 +17,10 @@ struct Config {
     codex_root: Option<PathBuf>,
     web_dist: PathBuf,
     relay: Option<RelayConfig>,
+    /// The Project Journal toggle (ADR 0013). This binary is the development
+    /// entry point and reads no user config, so it takes the switch as a flag;
+    /// `riku` resolves the same thing from `journal.enabled`.
+    journal: bool,
 }
 
 fn parse_config() -> Config {
@@ -30,6 +34,8 @@ fn parse_config() -> Config {
     // may also come from the environment, matching the Collector and Relay.
     let mut relay_url: Option<String> = None;
     let mut token = std::env::var("RELAY_TOKEN").ok();
+    // Off unless asked for, like the config key it stands in for.
+    let mut journal = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -59,6 +65,7 @@ fn parse_config() -> Config {
             }
             "--relay" => relay_url = args.next(),
             "--token" => token = args.next(),
+            "--journal" => journal = true,
             other => eprintln!("ignoring unknown argument '{other}'"),
         }
     }
@@ -74,7 +81,14 @@ fn parse_config() -> Config {
         _ => None,
     };
 
-    Config { port, root, codex_root, web_dist, relay }
+    Config {
+        port,
+        root,
+        codex_root,
+        web_dist,
+        relay,
+        journal,
+    }
 }
 
 #[tokio::main]
@@ -86,7 +100,13 @@ async fn main() {
         .init();
 
     let config = parse_config();
-    let started = runtime::init(config.root, config.codex_root, config.web_dist, config.relay);
+    let started = runtime::init(
+        config.root,
+        config.codex_root,
+        config.web_dist,
+        config.relay,
+        config.journal,
+    );
     let app = http::router(started.state.clone());
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port);
