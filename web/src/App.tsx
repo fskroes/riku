@@ -5,9 +5,17 @@ import { useRelay } from "./useRelay";
 import { useOpen } from "./useOpen";
 import { useNow } from "./ui";
 import { Board } from "./Board";
+import { Recap } from "./Recap";
 import { WorkItems } from "./WorkItems";
 
-type View = "board" | "work";
+type View = "board" | "recap" | "work";
+
+/** The stage class each view is styled under. */
+const VIEW_CLASS: Record<View, string> = {
+  board: "view-board",
+  recap: "view-recap",
+  work: "view-work",
+};
 
 /** The number of distinct machines with a session on the board (C7) — the count the
  *  Relay pill shows. Local cards carry this host; remote cards their own. */
@@ -141,6 +149,13 @@ export default function App() {
           </button>
           <button
             type="button"
+            aria-current={view === "recap" ? "page" : undefined}
+            onClick={() => go("recap")}
+          >
+            Recap
+          </button>
+          <button
+            type="button"
             aria-current={view === "work" ? "page" : undefined}
             onClick={() => go("work")}
           >
@@ -172,7 +187,7 @@ export default function App() {
         </div>
       </aside>
 
-      <main className={`stage ${view === "work" ? "view-work" : "view-board"}`}>
+      <main className={`stage ${VIEW_CLASS[view]}`}>
         {reconnecting && (
           <div className="reconnecting" role="status">
             <span className="dot" aria-hidden="true" />
@@ -189,6 +204,10 @@ export default function App() {
             open={open}
             onOpenPlan={openPlan}
           />
+        ) : view === "recap" ? (
+          // The live sessions come along for the ride: they are the derived
+          // timeline each card sets its journal prose against (ADR 0013).
+          <Recap sessions={sessions} now={now} />
         ) : (
           <WorkItems
             project={project}

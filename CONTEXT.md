@@ -68,6 +68,10 @@ _Avoid_: blocked, status (bare), attention (for stopped sessions)
 An append-only, opt-in log of one project's handoffs, in prose: the coding agent appends an entry as its session stops, and the user answers with correction entries of their own. Riku reads and renders it but never writes it on its own behalf, and it annotates the derived timeline rather than replacing it. Both voices are equal — the latest entry wins for Handoff Status and next step whoever wrote it. One file per project, named by a stable slug of the project's directory path: the filename contract the writing hook and Riku both hold to (ADR 0013).
 _Avoid_: log, history, notes, agent summary
 
+**Recap**:
+The board's reading of the Project Journal: one card per thread of effort — a project's journal and the Agent Sessions behind it — ordered by Handoff Status, carrying what the authors say was done (grouped by day), the next step, the entry's age, and the resume command Riku builds itself. The derived transcript timeline stays beside the prose, since the journal annotates ground truth rather than replacing it; the day view is a lens over the same cards, not the home. All journal prose is rendered as text and never executed (ADR 0013).
+_Avoid_: activity feed, digest, standup, summary view
+
 **Session Source**:
 An adapter that discovers and reads Agent Sessions for one agent tool (Claude Code, Codex CLI). Each supported tool has exactly one Session Source.
 _Avoid_: provider, integration, connector

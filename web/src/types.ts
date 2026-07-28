@@ -124,3 +124,84 @@ export interface WorkResponse {
   source: WorkSource;
   items: WorkItem[];
 }
+
+// Mirror of the journal-derived recap (ADR 0013). Keep in sync with
+// crates/board/src/recap.rs and crates/sessions/src/journal.rs.
+
+// The agent's parting assessment of where an effort stands, written at session
+// stop. Not Attention: Attention is a live status of a running session. Card
+// order is this order — needs-you → needs-review → on-track.
+export type Handoff = "needs-you" | "needs-review" | "on-track";
+
+// Who wrote a journal entry. Both voices are equal; the latest entry wins.
+export type Voice = "agent" | "user";
+
+// One local day's finished work, as the authors reported it.
+export interface JournalDay {
+  date: string; // local YYYY-MM-DD
+  done: string[];
+}
+
+// How a card offers to pick the work back up. `command` is built by Riku from
+// the session the store resolved — display-only text for the user to copy, never
+// something the board runs (ADR 0002 / 0013).
+export interface CardResume {
+  instruction: string;
+  command: string | null;
+  dir: string | null;
+  // The entry names a session this machine cannot get back into, so the
+  // instruction stands alone. Distinct from an entry that named no session.
+  sessionGone: boolean;
+}
+
+// What the journal says about one project: the entry that had the last word,
+// plus the days it finished work on. All prose here is untrusted input — it is
+// rendered as text and never as markup or a command.
+export interface CardJournal {
+  handoff: Handoff;
+  next: string;
+  days: JournalDay[];
+  session: string;
+  who: Voice;
+  at: string; // ISO 8601
+  // How old the latest entry is — the card's "latest 2h ago" label.
+  ageSeconds: number;
+  resume: CardResume;
+}
+
+// One thread of effort. `journal === null` is the derived-timeline fallback: the
+// project has sessions but no prose (no wired stop hook, or nothing written yet).
+export interface RecapCard {
+  project: string;
+  cwd: string;
+  journal: CardJournal | null;
+}
+
+export interface OlderResume {
+  instruction: string;
+  sessionGone: boolean;
+}
+
+// A project whose journal outlived the sessions that wrote it: a line, not a
+// card, because the slug it is filed under cannot be turned back into a path —
+// there is nowhere to deep-link and nothing to resume into.
+export interface OlderJournal {
+  slug: string;
+  handoff: Handoff;
+  next: string;
+  who: Voice;
+  at: string; // ISO 8601
+  ageSeconds: number;
+  resume: OlderResume;
+}
+
+export interface RecapResponse {
+  // The `journal.enabled` toggle. False means untouched, not merely unrendered —
+  // "you have not turned this on" and "nothing written yet" are different states.
+  enabled: boolean;
+  // Ordered by the server: Handoff Status first, then newest.
+  cards: RecapCard[];
+  older: OlderJournal[];
+  // The true count behind a capped `older`, so the view can say "5 of 12".
+  olderTotal: number;
+}

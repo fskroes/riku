@@ -24,7 +24,13 @@ export function waitingFor(sinceIso: string, nowMs: number): string {
 
 /** Relative age like `5s`, `3m`, `2h`, `1d` from an ISO timestamp. */
 export function relativeAge(iso: string, nowMs: number): string {
-  const seconds = Math.max(0, Math.floor((nowMs - Date.parse(iso)) / 1000));
+  return ageFromSeconds((nowMs - Date.parse(iso)) / 1000);
+}
+
+/** The same relative age from a count of seconds, for a payload that carries an
+ *  age rather than an instant (the recap's `ageSeconds`). Never negative. */
+export function ageFromSeconds(rawSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(rawSeconds));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
