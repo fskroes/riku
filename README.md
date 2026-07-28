@@ -85,7 +85,7 @@ It reads an append-only **project journal** that the agent writes — one entry 
 session, as the last thing it does before stopping — so "what is done" and "what is
 next" come from the party that actually did the work rather than from a guess.
 
-![Recap threads: Done so far by day, Where I am, To go further, and a resume command](docs/images/recap.png)
+![One Recap thread: Done so far grouped by day, Where I am, To go further, a resume command, and the answer box](docs/images/recap.png)
 
 The journal is off until you turn it on, and Riku neither reads nor writes it
 before then:
