@@ -1,0 +1,369 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Visualizes the "Attention Ledger" / `riku stats` concept
+  discussed in chat: wait-time segmented by Attention Cause, keyed vs superseded
+  resolution, rank-at-resolution, and the unresolved tail.
+
+  Question: what should the metrics surface look like — and should it exist as a
+  view at all, or stay a CLI command one keystroke off the board?
+
+  Three variants, switchable via ?variant=A|B|C and the floating bottom bar:
+    A — Terminal    : what `riku stats` prints. The "one command away" surface.
+    B — Analyst     : dense full dashboard, every metric at once.
+    C — One question: single giant number (resolved-from-top %), rest demoted.
+
+  Synthetic data only. No backend, no persistence. Open the file directly, or
+  `cd web && npx vite` and hit /prototype/attention-stats.html.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE — riku stats (attention ledger)</title>
+<style>
+  :root {
+    --bg-content: #FAF6EF; --surface: #FFFFFF; --ink: #2B241A;
+    --ink-muted: rgba(43,36,26,0.72); --ink-faint: rgba(43,36,26,0.58);
+    --hairline: rgba(43,36,26,0.12); --accent: #B4552D;
+    --accent-soft: rgba(180,85,45,0.12); --positive: #2E7D51;
+    --warning: #B07514; --negative: #C24438; --info: #4A5FB5;
+    --info-soft: rgba(74,95,181,0.14); --ghost: rgba(43,36,26,0.07);
+    --shadow-float: 0 12px 32px rgba(43,36,26,0.16);
+    --card-edge: 0 0 0 1px rgba(43,36,26,0.1);
+    --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg-content); color: var(--ink);
+    font-family: var(--font-ui); font-size: 13px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased; padding: 0 0 96px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 40px 24px 0; }
+  h1.proto-h { font-size: 15px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .proto-sub { color: var(--ink-faint); font-size: 12px; margin: 0 0 28px; }
+  .cause-approval { color: var(--negative); }
+  .cause-answer   { color: var(--info); }
+  .cause-review   { color: var(--accent); }
+  .cause-error    { color: var(--warning); }
+  .cause-input    { color: var(--ink-faint); }
+  .mono { font-family: var(--font-mono); }
+  .muted { color: var(--ink-faint); }
+
+  /* ---------- A: Terminal ---------- */
+  .term {
+    background: #211C15; color: #EDE6D8; border-radius: 12px;
+    font-family: var(--font-mono); font-size: 12.5px; line-height: 1.7;
+    padding: 22px 24px; box-shadow: var(--shadow-float); overflow-x: auto;
+    white-space: pre; tab-size: 2;
+  }
+  .term .prompt { color: #8FB98F; } .term .flag { color: #C9A15A; }
+  .term .hd { color: #C99A6A; } .term .dim { color: rgba(237,230,216,0.5); }
+  .term .ok { color: #7FBE8A; } .term .warn { color: #D8B45A; }
+  .term .bad { color: #E08877; } .term .info { color: #8FA5E0; }
+  .term .bar { color: #6E6152; }
+
+  /* ---------- B: Analyst ---------- */
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .card {
+    background: var(--surface); border-radius: 12px; box-shadow: var(--card-edge);
+    padding: 18px 20px;
+  }
+  .card.span2 { grid-column: 1 / -1; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--ink-faint); margin: 0 0 14px; font-weight: 600; }
+  .row { display: grid; grid-template-columns: 78px 1fr 92px; align-items: center;
+    gap: 10px; margin-bottom: 9px; }
+  .row .lbl { font-size: 12px; font-weight: 600; }
+  .track { height: 20px; background: var(--ghost); border-radius: 5px; position: relative; overflow: hidden; }
+  .fill { height: 100%; border-radius: 5px; }
+  .fill.approval { background: var(--negative); }
+  .fill.answer { background: var(--info); }
+  .fill.review { background: var(--accent); }
+  .fill.error { background: var(--warning); }
+  .fill.input { background: rgba(43,36,26,0.22); }
+  .num { text-align: right; font-family: var(--font-mono); font-size: 12px; }
+  .num .p90 { color: var(--ink-faint); }
+  .split { display: flex; height: 30px; border-radius: 6px; overflow: hidden; margin-bottom: 10px; }
+  .split .keyed { background: var(--positive); }
+  .split .sup { background: rgba(43,36,26,0.18); }
+  .split span { display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 11px; font-weight: 600; }
+  .split .sup { color: var(--ink-muted); }
+  .hist { display: flex; align-items: flex-end; gap: 8px; height: 120px; padding-top: 8px; }
+  .hbar { flex: 1; background: var(--accent-soft); border-radius: 5px 5px 0 0;
+    position: relative; display: flex; flex-direction: column; justify-content: flex-end; }
+  .hbar .cap { position: absolute; top: -18px; left: 0; right: 0; text-align: center;
+    font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+  .hbar .base { background: var(--accent); border-radius: 5px 5px 0 0; width: 100%; }
+  .hbar .rk { text-align: center; font-size: 11px; color: var(--ink-faint); padding: 4px 0; }
+  .tail-item { display: flex; justify-content: space-between; padding: 8px 0;
+    border-bottom: 1px solid var(--hairline); font-size: 12px; }
+  .tail-item:last-child { border-bottom: 0; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; }
+  .pill.approval { background: rgba(194,68,56,0.14); color: var(--negative); }
+  .pill.answer { background: var(--info-soft); color: var(--info); }
+  .pill.review { background: var(--accent-soft); color: var(--accent); }
+  .stat-big { font-family: var(--font-mono); font-size: 30px; font-weight: 600; line-height: 1; }
+  .stat-cap { font-size: 11px; color: var(--ink-faint); margin-top: 6px; }
+  .statrow { display: flex; gap: 28px; }
+
+  /* ---------- C: One question ---------- */
+  .hero { text-align: center; padding: 48px 0 24px; }
+  .hero .q { font-size: 15px; color: var(--ink-muted); margin-bottom: 22px; }
+  .hero .big { font-family: var(--font-mono); font-size: 128px; font-weight: 600;
+    line-height: 0.9; letter-spacing: -0.04em; color: var(--positive); }
+  .hero .big .pct { font-size: 56px; color: var(--ink-faint); }
+  .hero .verdict { font-size: 20px; margin-top: 18px; font-weight: 600; }
+  .hero .denom { color: var(--ink-faint); font-size: 13px; margin-top: 8px; }
+  .foot {
+    max-width: 620px; margin: 40px auto 0; border-top: 1px solid var(--hairline);
+    padding-top: 18px; display: flex; justify-content: center; gap: 30px;
+    flex-wrap: wrap; color: var(--ink-faint); font-size: 12px;
+  }
+  .foot b { color: var(--ink); font-family: var(--font-mono); font-weight: 600; }
+  .caveat {
+    margin-top: 26px; padding: 12px 14px; background: var(--accent-soft);
+    border-radius: 8px; font-size: 11.5px; color: var(--ink-muted);
+    display: flex; gap: 8px; align-items: flex-start;
+  }
+  .caveat .b2 { grid-column: 1/-1; }
+
+  /* ---------- switcher ---------- */
+  .switcher {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #211C15; color: #EDE6D8; border-radius: 999px;
+    box-shadow: var(--shadow-float); display: flex; align-items: center;
+    gap: 4px; padding: 6px 8px; z-index: 100; user-select: none;
+  }
+  .switcher button {
+    background: transparent; border: 0; color: #EDE6D8; cursor: pointer;
+    font-size: 16px; width: 30px; height: 30px; border-radius: 999px;
+    display: grid; place-items: center;
+  }
+  .switcher button:hover { background: rgba(255,255,255,0.12); }
+  .switcher .name { font-size: 12px; font-family: var(--font-mono); padding: 0 12px;
+    min-width: 160px; text-align: center; }
+  .switcher .name b { color: #C9A15A; }
+  .proto-flag { position: fixed; top: 10px; right: 12px; font-size: 10px;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint);
+    font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+  <div class="proto-flag">prototype · throwaway</div>
+  <div class="wrap" id="root"></div>
+
+  <div class="switcher" role="group" aria-label="Prototype variant switcher">
+    <button id="prev" aria-label="Previous variant">‹</button>
+    <span class="name" id="vname"></span>
+    <button id="next" aria-label="Next variant">›</button>
+  </div>
+
+<script>
+// ---- synthetic data (embodies the chat's corrections) --------------------
+// Window: last 7 days, one solo user. Numbers chosen to make the *shape* of the
+// insight visible, not to be realistic to the decimal.
+const DATA = {
+  window: "7d",
+  causes: [
+    // real human-latency causes
+    { key: "approval", label: "Approval", n: 18, median: "4m",  p90: "41m",   real: true,  wpct: 12 },
+    { key: "answer",   label: "Answer",   n: 7,  median: "12m", p90: "2h 06m", real: true,  wpct: 34 },
+    { key: "review",   label: "Review",   n: 4,  median: "31m", p90: "3h 12m", real: true,  wpct: 62 },
+    { key: "error",    label: "Error",    n: 5,  median: "8m",  p90: "1h 20m", real: true,  wpct: 22 },
+    // mechanical throughput — dominates by count, near-zero latency. NOISE.
+    { key: "input",    label: "Input",    n: 612,median: "3s",  p90: "22s",    real: false, wpct: 2 },
+  ],
+  // of the 34 real (non-Input) attentions, how did they end?
+  resolution: { keyed: 27, superseded: 7 },
+  // rank on the board when a real attention was resolved (1 = top card)
+  rankHist: [
+    { rank: 1, n: 28 }, { rank: 2, n: 4 }, { rank: 3, n: 1 }, { rank: "4+", n: 1 },
+  ],
+  resolvedFromTop: 82, // % — the one number that validates attention-first ordering
+  tail: [
+    { cause: "review",   label: "Review",   age: "2d 4h", synth: false },
+    { cause: "answer",   label: "Answer",   age: "18h",   synth: true },
+    { cause: "approval", label: "Approval", age: "6h",    synth: false },
+  ],
+  synthSinceShare: 22, // % of real attentions whose `since` came from file mtime, not a source timestamp
+};
+
+const REAL = DATA.causes.filter(c => c.real);
+const realN = REAL.reduce((a, c) => a + c.n, 0);
+const inputN = DATA.causes.find(c => c.key === "input").n;
+
+// ---- variant A: terminal -------------------------------------------------
+function variantA() {
+  const line = (c) => {
+    const bars = "█".repeat(Math.max(1, Math.round(c.wpct / 4))).padEnd(16, "░");
+    const cls = c.real ? (c.key === "review" || c.key === "approval" ? "warn" : c.key === "error" ? "warn" : "info") : "dim";
+    return `  <span class="${cls}">${c.label.padEnd(9)}</span>` +
+           `<span class="bar">${bars}</span>  median <b>${c.median.padEnd(5)}</b>  p90 ${c.p90.padEnd(6)} <span class="dim">n=${c.n}</span>`;
+  };
+  const k = DATA.resolution.keyed, s = DATA.resolution.superseded;
+  const kpct = Math.round(k / (k + s) * 100);
+  return `<div class="term"><span class="prompt">$</span> riku stats <span class="flag">--since 7d</span>
+
+<span class="hd">ATTENTION WAIT · by cause</span> <span class="dim">(real human needs)</span>
+${REAL.map(line).join("\n")}
+
+<span class="dim">  ──────────────────────────────────────────────────────────</span>
+${line(DATA.causes.find(c => c.key === "input"))}
+  <span class="dim">Input is mechanical tool-permission throughput — ${inputN} events,
+  reported apart so it can't flatter the medians above.</span>
+
+<span class="hd">RESOLUTION</span> <span class="dim">(of ${realN} real attentions)</span>
+  <span class="ok">keyed  ${k}</span>  <span class="dim">— a human answered this exact need (trustworthy)</span>
+  <span class="dim">superseded ${s}  — need dissolved; no direct human reply</span>
+  <span class="dim">→ ${kpct}% of real waits have a trustworthy end-timestamp</span>
+
+<span class="hd">ATTENTION-FIRST · did the ranking hold?</span>
+  <span class="ok">resolved from the top card   ${DATA.resolvedFromTop}%</span>
+  rank 1 ████████████████████████ 28
+  rank 2 ███ 4    rank 3 ▏1    rank 4+ ▏1
+
+<span class="hd">STILL WAITING</span> <span class="bad">${DATA.tail.length}</span>
+${DATA.tail.map(t => `  <span class="bad">•</span> ${t.label.padEnd(9)} ${t.age}${t.synth ? '  <span class="dim">(since≈mtime)</span>' : ''}`).join("\n")}
+
+<span class="dim">  ${DATA.synthSinceShare}% of waits derived 'since' from file mtime, not a source
+  timestamp — those durations are approximate. metrics stay on this
+  machine; nothing crosses the Relay. 'riku stats --purge' to wipe.</span>
+</div>`;
+}
+
+// ---- variant B: analyst dashboard ---------------------------------------
+function variantB() {
+  const k = DATA.resolution.keyed, s = DATA.resolution.superseded;
+  const kpct = Math.round(k / (k + s) * 100);
+  const maxRank = Math.max(...DATA.rankHist.map(r => r.n));
+  return `
+  <div class="statrow" style="margin-bottom:20px">
+    <div><div class="stat-big" style="color:var(--positive)">${DATA.resolvedFromTop}%</div><div class="stat-cap">resolved from top card</div></div>
+    <div><div class="stat-big">${realN}</div><div class="stat-cap">real attentions</div></div>
+    <div><div class="stat-big" style="color:var(--negative)">${DATA.tail.length}</div><div class="stat-cap">still waiting</div></div>
+    <div><div class="stat-big muted">${inputN}</div><div class="stat-cap">input events (noise)</div></div>
+  </div>
+  <div class="grid">
+    <div class="card span2">
+      <h2>Wait time by cause — real human needs</h2>
+      ${REAL.map(c => `
+        <div class="row">
+          <span class="lbl cause-${c.key}">${c.label}</span>
+          <span class="track"><span class="fill ${c.key}" style="width:${c.wpct}%"></span></span>
+          <span class="num">${c.median} <span class="p90">/ ${c.p90}</span></span>
+        </div>`).join("")}
+      <div class="row" style="opacity:0.6;margin-top:6px;border-top:1px dashed var(--hairline);padding-top:10px">
+        <span class="lbl cause-input">Input</span>
+        <span class="track"><span class="fill input" style="width:2%"></span></span>
+        <span class="num">3s <span class="p90">/ 22s · n=${inputN}</span></span>
+      </div>
+      <p class="muted" style="font-size:11px;margin:8px 0 0">bars = median · label = median / p90. Input is mechanical permission throughput, kept out of the totals.</p>
+    </div>
+
+    <div class="card">
+      <h2>Resolution — is the end trustworthy?</h2>
+      <div class="split">
+        <span class="keyed" style="flex:${k}">keyed ${k}</span>
+        <span class="sup" style="flex:${s}">superseded ${s}</span>
+      </div>
+      <p class="muted" style="font-size:11.5px;margin:2px 0 0">
+        <b style="color:var(--positive)">Keyed</b> = a human answered this exact need — a real reply timestamp.
+        <b>Superseded</b> = the need dissolved (session moved on); latency is censored, not measured.
+        Only <b>${kpct}%</b> of waits end with a trustworthy timestamp.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Rank at resolution</h2>
+      <div class="hist">
+        ${DATA.rankHist.map(r => `
+          <div class="hbar" style="height:${18 + (r.n / maxRank) * 82}%">
+            <span class="cap">${r.n}</span>
+            <div class="base" style="height:100%"></div>
+            <div class="rk">#${r.rank}</div>
+          </div>`).join("")}
+      </div>
+      <p class="muted" style="font-size:11.5px;margin:10px 0 0">Where the card sat when it was resolved. Mass at #1 = the sort is right. Mass lower = miscalibrated.</p>
+    </div>
+
+    <div class="card span2">
+      <h2>Still waiting — the unresolved tail</h2>
+      ${DATA.tail.map(t => `
+        <div class="tail-item">
+          <span><span class="pill ${t.cause}">${t.label}</span> ${t.synth ? '<span class="muted">· since≈mtime</span>' : ''}</span>
+          <span class="mono" style="color:var(--negative)">${t.age}</span>
+        </div>`).join("")}
+      <div class="caveat">
+        <span>⚠</span>
+        <span><b>Read the tail before the medians.</b> Dropping unresolved waits biases wait-time downward — you'd only be averaging the ones you happened to handle. ${DATA.synthSinceShare}% of durations derive <span class="mono">since</span> from file mtime, so they're approximate. Local-only; never crosses the Relay.</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ---- variant C: one question --------------------------------------------
+function variantC() {
+  return `
+  <div class="hero">
+    <div class="q">Of the times an agent needed you, how often was the one you handled<br>the one Riku put on top?</div>
+    <div class="big">${DATA.resolvedFromTop}<span class="pct">%</span></div>
+    <div class="verdict" style="color:var(--positive)">Attention-first is earning its place.</div>
+    <div class="denom">${DATA.resolution.keyed} of ${realN} real attentions · last ${DATA.window} · keyed resolutions only</div>
+  </div>
+  <div class="foot">
+    <span>real waits <b>${realN}</b></span>
+    <span>still waiting <b style="color:var(--negative)">${DATA.tail.length}</b></span>
+    <span>slowest cause <b>Review · 31m med</b></span>
+    <span>input noise <b class="muted">${inputN}</b></span>
+  </div>
+  <div class="caveat" style="max-width:620px;margin:26px auto 0">
+    <span>⚠</span>
+    <span>Counts <b>keyed</b> resolutions only — the ${DATA.resolution.superseded} superseded waits have no human-reply timestamp to trust. ${DATA.synthSinceShare}% of durations approximate <span class="mono">since</span> from file mtime. If this number falls toward 40%, the sort is the bug — this is the one metric worth watching. Metrics stay on this machine.</span>
+  </div>`;
+}
+
+// ---- switcher ------------------------------------------------------------
+const VARIANTS = {
+  A: { name: "Terminal", render: variantA },
+  B: { name: "Analyst",  render: variantB },
+  C: { name: "One question", render: variantC },
+};
+const ORDER = ["A", "B", "C"];
+
+function current() {
+  const v = new URLSearchParams(location.search).get("variant");
+  return VARIANTS[v] ? v : "A";
+}
+function setVariant(v) {
+  const u = new URL(location.href);
+  u.searchParams.set("variant", v);
+  history.replaceState(null, "", u);
+  render();
+}
+function render() {
+  const v = current();
+  document.getElementById("root").innerHTML =
+    `<h1 class="proto-h">riku stats <span class="muted">— attention ledger</span></h1>
+     <p class="proto-sub">Prototype of the metrics surface · synthetic data · variant ${v} of 3</p>` +
+    VARIANTS[v].render();
+  document.getElementById("vname").innerHTML = `<b>${v}</b> — ${VARIANTS[v].name}`;
+}
+function cycle(dir) {
+  const i = ORDER.indexOf(current());
+  setVariant(ORDER[(i + dir + ORDER.length) % ORDER.length]);
+}
+document.getElementById("prev").onclick = () => cycle(-1);
+document.getElementById("next").onclick = () => cycle(1);
+addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  if (e.key === "ArrowLeft") cycle(-1);
+  if (e.key === "ArrowRight") cycle(1);
+});
+render();
+</script>
+</body>
+</html>
