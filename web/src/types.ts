@@ -195,6 +195,16 @@ export interface OlderJournal {
   resume: OlderResume;
 }
 
+// The user's answer to a card, as `POST /api/recap/note` takes it. Riku appends
+// it as a `who:"user"` entry — acting as the user's pen on an explicit user
+// action — and the latest entry wins whoever wrote it (ADR 0013). `cwd` is the
+// card's own directory: the endpoint only writes for a project it is showing.
+export interface Correction {
+  cwd: string;
+  text: string;
+  handoff: Handoff;
+}
+
 export interface RecapResponse {
   // The `journal.enabled` toggle. False means untouched, not merely unrendered —
   // "you have not turned this on" and "nothing written yet" are different states.

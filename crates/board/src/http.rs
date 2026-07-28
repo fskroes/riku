@@ -21,7 +21,7 @@ use futures::StreamExt;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sessions::{DeepLink, Event, Session, Status, Tool, WorkItem, WorkSourceKind};
+use sessions::{DeepLink, Event, Handoff, Session, Status, Tool, WorkItem, WorkSourceKind};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::open::{is_safe_session_id, Launcher};
@@ -75,6 +75,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(events))
         .route("/api/work", get(work))
         .route("/api/recap", get(recap))
+        .route("/api/recap/note", post(note))
         .route("/api/relay", get(relay_status))
         .with_state(state.clone());
 
@@ -380,6 +381,90 @@ async fn recap(State(state): State<AppState>) -> Json<crate::recap::Recap> {
     .await
     .expect("recap assembly does not panic");
     Json(recap)
+}
+
+/// The user's answer to a card, as the correction box sends it.
+#[derive(Deserialize)]
+struct NoteRequest {
+    /// The project directory the card is keyed on — the card's own `cwd`, never
+    /// a path the caller thought up, because the endpoint only writes for a
+    /// project the board is showing.
+    cwd: String,
+    /// The user's words. They become the entry's next step, which is the field
+    /// latest-wins resolution reads.
+    text: String,
+    /// Where the user is leaving the card. Optional, falling back to the one
+    /// [`Handoff::NOTE_DEFAULT`] `riku journal note` falls back to; a user who
+    /// says "that's fine, carry on" says so by naming a calmer one.
+    handoff: Option<Handoff>,
+}
+
+/// `POST /api/recap/note` — append the user's answer to a card's journal (ADR
+/// 0013).
+///
+/// The one write on the board's surface, and it is the user's own voice: Riku is
+/// acting as the user's pen on an explicit user action, never narrating state of
+/// its own, so its read-only posture survives. It goes through the same append
+/// path as `riku journal note` — one line, appended, file created `0600`,
+/// rotated at the cap — because a correction from the card and a correction from
+/// the terminal are the same correction.
+///
+/// Three refusals, in the order they matter. `409` while `journal.enabled` is
+/// false: off is off in both directions, and accepting a note would create the
+/// very file nobody opted into. `404` for a directory no session on the board is
+/// in, which scopes the write to cards the user can actually see, the way
+/// `GET /api/work` scopes its read. `400` for a note with nothing in it, the
+/// same refusal the CLI gives.
+async fn note(
+    State(state): State<AppState>,
+    Json(request): Json<NoteRequest>,
+) -> impl IntoResponse {
+    if !state.journal_enabled {
+        return error(
+            StatusCode::CONFLICT,
+            "the journal is off; run 'riku config set journal.enabled true' to turn it on",
+        );
+    }
+    if state.engine.sessions_in(&request.cwd).is_empty() {
+        return error(
+            StatusCode::NOT_FOUND,
+            "no project on the board has that working directory",
+        );
+    }
+    // Trimmed, because the box submits whatever was typed into it and a note of
+    // blank space would win latest-wins while saying nothing.
+    let text = request.text.trim().to_string();
+    if text.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "a journal note needs text to say");
+    }
+
+    // The slug the hook writes under and Riku reads back, derived from the
+    // card's directory — the record is never filed under anything the request
+    // named directly.
+    let project = sessions::project_slug(std::path::Path::new(&request.cwd));
+    let handoff = request.handoff.unwrap_or(Handoff::NOTE_DEFAULT);
+    let dir = state.journal_dir.clone();
+    let now = chrono::Utc::now();
+    let noted = tokio::task::spawn_blocking(move || match &dir {
+        Some(dir) => sessions::append_note_in(dir, &project, &text, handoff, now),
+        None => sessions::append_note(&project, &text, handoff),
+    })
+    .await
+    .expect("the journal append does not panic");
+
+    match noted {
+        // The thread the note answered rides back with the acknowledgement: the
+        // append picks it by implication — whoever spoke last — and an endpoint
+        // that reports which thread it wrote to is one a caller can check,
+        // rather than one that has to be trusted. The card does not need it (it
+        // is the thread), which is why it is reported and not required.
+        Ok(noted) => (
+            StatusCode::OK,
+            Json(json!({ "noted": true, "session": noted.session })),
+        )
+            .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    }
 }
 
 /// `GET /api/events` — SSE. `session` events carry a full Session; `removed`

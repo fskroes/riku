@@ -7,8 +7,11 @@ import type { CardJournal, CardResume, RecapCard, Session } from "./types";
 import {
   ageLabel,
   byDay,
+  correction,
+  CORRECTION_DEFAULT,
   dayLabel,
   handoffLabel,
+  HANDOFF_CHOICES,
   olderLine,
   resumeOffer,
   summaryLine,
@@ -150,6 +153,17 @@ describe("resumeOffer", () => {
     expect(resumeOffer(resume())).toEqual({ kind: "instruction", instruction: "Pick the parser back up" });
   });
 
+  it("offers nothing at all when the last word was the user's own note", () => {
+    // A note finishes nothing and writes no instruction, so there is no way
+    // back in to offer — and an empty resume block saying so would be worse
+    // than the silence. The card the user has just answered is exactly this
+    // case, so it is one click away.
+    expect(resumeOffer(resume({ instruction: "" }))).toEqual({ kind: "none" });
+    expect(resumeOffer(resume({ instruction: "  " }))).toEqual({ kind: "none" });
+    // A thread that is gone still says so, even with nothing else to say.
+    expect(resumeOffer(resume({ instruction: "", sessionGone: true })).kind).toBe("gone");
+  });
+
   it("withholds a command that arrives beside a session-gone marker", () => {
     // Belt and braces: the endpoint never sends both, and a card must not paste
     // a command for a thread it has just called unreachable.
@@ -244,6 +258,35 @@ describe("olderLine", () => {
     expect(olderLine(5, 12)).toBe("5 of 12 journals with no recent session");
     expect(olderLine(3, 3)).toBe("3 journals with no recent session");
     expect(olderLine(1, 1)).toBe("1 journal with no recent session");
+  });
+});
+
+describe("correction", () => {
+  it("carries the user's words to the card they answer", () => {
+    expect(correction("/Users/x/riku", "Not done — I need Kelvin", "needs-you")).toEqual({
+      cwd: "/Users/x/riku",
+      text: "Not done — I need Kelvin",
+      handoff: "needs-you",
+    });
+  });
+
+  it("refuses an answer that says nothing", () => {
+    // An empty entry would still win latest-wins, blanking the next step the
+    // card had. The box refuses it here, as the endpoint and the CLI do.
+    expect(correction("/Users/x/riku", "", "needs-you")).toBeNull();
+    expect(correction("/Users/x/riku", "   \n ", "needs-you")).toBeNull();
+  });
+
+  it("trims what was typed rather than filing the whitespace around it", () => {
+    expect(correction("/Users/x/riku", "  carry on  ", "on-track")?.text).toBe("carry on");
+  });
+
+  it("lets the user lower a Handoff Status, not only raise one", () => {
+    // "That's fine, carry on" has to be sayable, or a card the agent left in
+    // needs-you stays pinned to the top until an agent session runs again.
+    expect(HANDOFF_CHOICES).toEqual(["needs-you", "needs-review", "on-track"]);
+    expect(CORRECTION_DEFAULT).toBe("needs-you");
+    expect(correction("/Users/x/riku", "Fine by me", "on-track")?.handoff).toBe("on-track");
   });
 });
 
