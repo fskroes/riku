@@ -115,7 +115,13 @@ fn run_board(options: BoardOptions) -> Result<(), String> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| format!("could not start runtime: {error}"))?;
     runtime.block_on(async move {
-        let started = board::runtime::init(root, codex_root, options.web_dist, relay);
+        let started = board::runtime::init(
+            root,
+            codex_root,
+            options.web_dist,
+            relay,
+            options.journal_enabled,
+        );
         let app = board::http::router(started.state.clone());
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), options.port);
         let listener = tokio::net::TcpListener::bind(address)

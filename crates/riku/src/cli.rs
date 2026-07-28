@@ -94,6 +94,11 @@ pub struct BoardOptions {
     pub web_dist: Option<PathBuf>,
     pub relay: Option<Connection>,
     pub relay_missing_token: bool,
+    /// Whether the Board may read the Project Journal (ADR 0013). Config only,
+    /// with no flag beside it: the journal is the user's prose, and opting into
+    /// it is a decision worth writing down once rather than one that rides along
+    /// on however the Board happened to be started this time.
+    pub journal_enabled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -213,6 +218,7 @@ fn resolve_board(
         web_dist: web_dist.map(PathBuf::from),
         relay,
         relay_missing_token,
+        journal_enabled: config.journal.enabled,
     }))
 }
 
@@ -609,6 +615,28 @@ mod tests {
     /// A config with the journal turned on, as `resolve` receives it.
     fn journal_on() -> String {
         "[journal]\nenabled = true\n".to_string()
+    }
+
+    #[test]
+    fn the_board_learns_the_journal_toggle_from_the_config_alone() {
+        // The Board crate has no config of its own, so whether it may read the
+        // journal has to travel with the options. Config only, and no flag
+        // beside it: opting into storing prose is worth writing down once, not
+        // something that rides along on how the Board was started this time.
+        let ResolvedCommand::Board(off) = resolve(&[], &env(&[]), None).unwrap() else {
+            panic!("expected the board")
+        };
+        assert!(!off.journal_enabled, "off unless the config says otherwise");
+
+        let ResolvedCommand::Board(on) = resolve(&[], &env(&[]), Some(&journal_on())).unwrap()
+        else {
+            panic!("expected the board")
+        };
+        assert!(on.journal_enabled);
+
+        // There is no flag for it, so asking for one is an error rather than a
+        // silently ignored word that leaves the user thinking it is on.
+        assert!(resolve(&["--journal".into()], &env(&[]), None).is_err());
     }
 
     #[test]

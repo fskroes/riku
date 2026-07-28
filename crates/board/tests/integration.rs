@@ -187,7 +187,7 @@ async fn spawn_server_with(
     claude_root: PathBuf,
     codex_root: Option<PathBuf>,
 ) -> (SocketAddr, Started) {
-    let started = runtime::init(claude_root, codex_root, None, None);
+    let started = runtime::init(claude_root, codex_root, None, None, false);
     let app = http::router(started.state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -200,7 +200,7 @@ async fn spawn_server_with(
 /// Start the server with a [`RecordingLauncher`] wired in, returning the recorder
 /// so a test can assert which deep link `POST …/open` resolved.
 async fn spawn_server_recording(root: PathBuf) -> (SocketAddr, Started, Arc<Mutex<Vec<DeepLink>>>) {
-    let mut started = runtime::init(root, None, None, None);
+    let mut started = runtime::init(root, None, None, None, false);
     let recorder = RecordingLauncher::default();
     let opened = recorder.opened.clone();
     started.state.launcher = Arc::new(recorder);
@@ -841,6 +841,170 @@ async fn open_404s_for_an_unknown_session() {
     );
 }
 
+/// Start a board with the Project Journal switched on and served out of
+/// `journal_dir` — never `$XDG_DATA_HOME`, which this in-process server shares
+/// with every other test in this binary and with the developer's own journal.
+async fn spawn_server_with_journal(
+    root: PathBuf,
+    journal_dir: PathBuf,
+    enabled: bool,
+) -> (SocketAddr, Started) {
+    let mut started = runtime::init(root, None, None, None, enabled);
+    started.state.journal_dir = Some(journal_dir);
+    let app = http::router(started.state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, started)
+}
+
+/// Write one project's journal into `dir`, the way the agent's stop hook does:
+/// a file named for the slug of the project directory, one JSON record per line.
+fn write_journal(dir: &Path, project_cwd: &str, lines: &[String]) {
+    let slug = sessions::project_slug(Path::new(project_cwd));
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join(format!("{slug}.jsonl")), lines.join("\n") + "\n").unwrap();
+}
+
+/// One agent journal record for the project rooted at `cwd`.
+fn journal_entry(cwd: &str, session: &str, at: &str, handoff: &str, done: &str) -> String {
+    serde_json::json!({
+        "v": 1,
+        "project": sessions::project_slug(Path::new(cwd)),
+        "session": session,
+        "at": at,
+        "who": "agent",
+        "handoff": handoff,
+        "done": [done],
+        "next": "Review the recap endpoint",
+        "resume": { "instruction": "pick up where the endpoint left off" },
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn recap_serves_the_journal_with_a_resume_command_riku_built() {
+    let claude = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let cwd = "/Users/x/repos/foo";
+
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "working", 10, 1)],
+    );
+    write_journal(
+        journal.path(),
+        cwd,
+        &[
+            journal_entry(
+                cwd,
+                "sess-1",
+                "2026-07-27T09:00:00Z",
+                "on-track",
+                "Read the journal",
+            ),
+            // The last word, and a different day's work: both have to survive
+            // the trip through the endpoint.
+            journal_entry(
+                cwd,
+                "sess-1",
+                "2026-07-28T09:00:00Z",
+                "needs-review",
+                "Served the recap",
+            ),
+        ],
+    );
+
+    let (addr, _started) = spawn_server_with_journal(
+        claude.path().to_path_buf(),
+        journal.path().to_path_buf(),
+        true,
+    )
+    .await;
+
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/recap"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(body["enabled"], true);
+    let cards = body["cards"].as_array().expect("cards is a list");
+    assert_eq!(cards.len(), 1, "{body}");
+    let card = &cards[0];
+    assert_eq!(card["project"], "foo");
+    assert_eq!(card["cwd"], cwd);
+
+    // Latest-wins across the two entries, and both days are on the board.
+    let journal = &card["journal"];
+    assert_eq!(journal["handoff"], "needs-review");
+    assert_eq!(journal["next"], "Review the recap endpoint");
+    assert_eq!(journal["days"].as_array().unwrap().len(), 2);
+
+    // The record carried an instruction and no command; the command in the
+    // payload was assembled here from the session the store resolved.
+    let resume = &journal["resume"];
+    assert_eq!(resume["instruction"], "pick up where the endpoint left off");
+    assert_eq!(resume["command"], "claude --resume sess-1");
+    assert_eq!(resume["dir"], cwd);
+    assert_eq!(resume["sessionGone"], false);
+}
+
+#[tokio::test]
+async fn recap_reads_nothing_while_the_journal_is_switched_off() {
+    let claude = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let cwd = "/Users/x/repos/foo";
+
+    write_transcript(
+        claude.path(),
+        "-Users-x-repos-foo",
+        "aaaa.jsonl",
+        &[assistant_line("sess-1", "working", 10, 1)],
+    );
+    write_journal(
+        journal.path(),
+        cwd,
+        &[journal_entry(
+            cwd,
+            "sess-1",
+            "2026-07-28T09:00:00Z",
+            "needs-you",
+            "Wrote prose nobody opted into",
+        )],
+    );
+
+    let (addr, _started) = spawn_server_with_journal(
+        claude.path().to_path_buf(),
+        journal.path().to_path_buf(),
+        false,
+    )
+    .await;
+
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/recap"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // The project is still on the board; its prose is not, and the payload says
+    // which of the two reasons that is.
+    assert_eq!(body["enabled"], false);
+    let cards = body["cards"].as_array().expect("cards is a list");
+    assert_eq!(cards.len(), 1, "{body}");
+    assert_eq!(cards[0]["cwd"], cwd);
+    assert!(
+        cards[0]["journal"].is_null(),
+        "prose leaked past the toggle: {body}"
+    );
+}
+
 /// Start a Relay on an ephemeral port, returning its base URL.
 async fn spawn_relay(token: &str) -> String {
     let app = relay::router(relay::RelayState::new(token));
@@ -864,6 +1028,7 @@ async fn spawn_board_subscribed(relay_url: String, token: String) -> (SocketAddr
             url: relay_url,
             token,
         }),
+        false,
     );
     // Keep the empty root alive for the board's lifetime.
     std::mem::forget(empty);

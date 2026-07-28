@@ -3,8 +3,10 @@
 
 pub mod http;
 pub mod open;
+pub mod recap;
 pub mod runtime;
 
 pub use http::{router, AppState};
 pub use open::{Launcher, TerminalLauncher};
+pub use recap::{recap, CardJournal, CardResume, Recap, RecapCard};
 pub use runtime::{init, Started};

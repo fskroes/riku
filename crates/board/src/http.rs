@@ -48,6 +48,16 @@ pub struct AppState {
     pub remote: RemoteSessions,
     /// The board's Relay-subscription state, for the topbar pill.
     pub relay_status: Arc<RelayStatus>,
+    /// Whether the Project Journal is switched on (`journal.enabled`, ADR 0013).
+    /// Off by default and resolved by `riku` from the user's config, because the
+    /// board crate has no config of its own to read. While off, no journal file
+    /// is opened at all.
+    pub journal_enabled: bool,
+    /// Where the journal files live. When absent, the directory Riku owns —
+    /// injectable so a fixture journal can be served from a temporary directory
+    /// without the process-wide `$XDG_DATA_HOME` an in-process test cannot
+    /// isolate.
+    pub journal_dir: Option<PathBuf>,
 }
 
 /// The plain-text message shown when the UI has not been built yet.
@@ -64,6 +74,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/:id/open", post(open_session))
         .route("/api/events", get(events))
         .route("/api/work", get(work))
+        .route("/api/recap", get(recap))
         .route("/api/relay", get(relay_status))
         .with_state(state.clone());
 
@@ -332,6 +343,39 @@ fn contains_token(hay: &str, needle: &str) -> bool {
         from = start + 1;
     }
     false
+}
+
+/// `GET /api/recap` — the journal-derived recap: one card per project the board
+/// knows a session for, ordered needs-you → needs-review → on-track (ADR 0013).
+///
+/// Everything the payload says in prose was written by somebody else — the agent
+/// at its stop hook, or the user answering it — so it rides out as inert data and
+/// is never interpreted here. The resume command is the exception that proves it:
+/// it is not carried by the record at all but assembled from the session the
+/// store resolved, and shown for a human to copy rather than run (ADR 0002).
+///
+/// Reading a journal is filesystem work and `snapshot` can invoke git, so the
+/// whole assembly runs on a blocking worker.
+async fn recap(State(state): State<AppState>) -> Json<crate::recap::Recap> {
+    let engine = state.engine.clone();
+    let enabled = state.journal_enabled;
+    let dir = state.journal_dir.clone();
+    let recap = tokio::task::spawn_blocking(move || {
+        let sessions = engine.snapshot();
+        crate::recap::recap(
+            &sessions,
+            enabled,
+            |project| match &dir {
+                Some(dir) => sessions::read_journal_in(dir, project),
+                None => sessions::read_journal(project),
+            },
+            |id| engine.find_by_id(id),
+            chrono::Utc::now(),
+        )
+    })
+    .await
+    .expect("recap assembly does not panic");
+    Json(recap)
 }
 
 /// `GET /api/events` — SSE. `session` events carry a full Session; `removed`

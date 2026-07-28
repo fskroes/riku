@@ -86,7 +86,14 @@ pub fn read_journal(project: &str) -> Journal {
 /// were written in, and append order is the only recency the journal enforces.
 /// Reading only the live file would be cheaper by half, and would quietly drop
 /// every day before the last rotation off the recap while it still sat on disk.
-fn read_journal_in(dir: &Path, project: &str) -> Journal {
+///
+/// Public because the directory is a caller's choice as often as it is this
+/// module's: the board's recap holds its journal directory in state rather than
+/// resolving it per read, which is what lets a fixture journal be served from a
+/// temporary directory without the process-wide `$XDG_DATA_HOME` that an
+/// in-process test cannot isolate. [`read_journal`] is the same read against the
+/// one directory Riku owns.
+pub fn read_journal_in(dir: &Path, project: &str) -> Journal {
     read_journal_file(project, &rotated_file(dir, project))
         .followed_by(read_journal_file(project, &journal_file(dir, project)))
 }

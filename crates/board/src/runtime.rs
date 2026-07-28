@@ -53,11 +53,17 @@ pub struct Started {
 /// Start the local Engine, then add only Board concerns: HTTP dependencies and an
 /// optional Relay subscription. The Engine owns discovery, watch, refresh, diff
 /// enrichment, machine stamping, and the local event stream.
+///
+/// `journal_enabled` is the `journal.enabled` toggle (ADR 0013), passed in rather
+/// than read: the board crate has no config of its own, and `riku` is what knows
+/// the user's. The journal *directory* is not a parameter — it has a real default
+/// and is overridden on [`Started::state`] the way the launcher is.
 pub fn init(
     claude_root: PathBuf,
     codex_root: Option<PathBuf>,
     web_dist: Option<PathBuf>,
     relay: Option<RelayConfig>,
+    journal_enabled: bool,
 ) -> Started {
     // Machine identity is the Engine's to stamp; the HTTP adapter no longer needs it.
     let engine = Arc::new(Engine::start(claude_root, codex_root, local_hostname()));
@@ -78,6 +84,8 @@ pub fn init(
             launcher: Arc::new(TerminalLauncher),
             remote,
             relay_status,
+            journal_enabled,
+            journal_dir: None,
         },
     }
 }
