@@ -404,7 +404,7 @@ button.gr-node { cursor: pointer; }
   100% { box-shadow: 0 1px 6px rgba(43, 36, 26, 0.06); }
 }
 
-.board-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 8px 2px 18px; border-bottom: 1px solid var(--hairline); }
+.board-heading, .recap-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 8px 2px 18px; border-bottom: 1px solid var(--hairline); }
 .board-heading h1 { margin: 4px 0 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(25px, 3vw, 38px); line-height: 1.05; font-weight: 500; text-wrap: balance; }
 .board-heading p { margin: 0; color: var(--ink-muted); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; text-wrap: pretty; }
 
@@ -450,3 +450,122 @@ button.gr-node { cursor: pointer; }
   .focus-board { grid-template-columns: 1fr; }
   .focus-board > aside { padding-left: 0; border-left: 0; border-top: 1px solid var(--hairline); }
 }
+
+/* RECAP — the thread-first day board (ADR 0013, prototype variant E). One card
+   per thread of effort, ordered by Handoff Status; the day view is a lens over
+   the same cards, not a second reading. Every piece of prose on this surface was
+   written by an agent or by the user: it is rendered as text, and the resume
+   command is a thing to copy, never a control. */
+.recap { max-width: 1480px; margin: 0 auto; }
+/* The heading is the Board's, one size down: the recap's summary line is a
+   sentence, not a three-word verdict. */
+.recap-head h1 { margin: 4px 0 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(22px, 2.4vw, 31px); line-height: 1.1; font-weight: 500; text-wrap: balance; }
+
+/* Handoff Status accent, set once per surface and inherited by the pill, the
+   card's edge and the next-step block. Shape and word carry the status too —
+   the hue is never the only cue (audit H3). */
+.view-recap .needs-you { --handoff: var(--warning); }
+.view-recap .needs-review { --handoff: var(--info); }
+.view-recap .on-track { --handoff: var(--positive); }
+.view-recap .nojournal, .view-recap .hpill.none { --handoff: var(--ink-faint); }
+.hpill {
+  flex: none; padding: 2px 10px; border-radius: var(--r-pill);
+  border: 1px solid var(--handoff); color: var(--handoff);
+  background: color-mix(in srgb, var(--handoff) 10%, transparent);
+  font: 500 11px var(--font-ui); white-space: nowrap;
+}
+
+/* A quiet note that the journal is off: what is missing, and the one command
+   that turns it on. Off means untouched — no file is read while it is. */
+.journaloff {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+  margin: 14px 0 0; padding: 10px 14px;
+  border: 1px solid var(--hairline); border-radius: var(--r-md); background: var(--surface);
+  color: var(--ink-muted); font-size: 12px;
+}
+.journaloff p { margin: 0; }
+.journaloff code, .rcmd code, .or-slug { font-family: var(--font-mono); font-size: 12px; }
+.journaloff code { padding: 3px 8px; border-radius: var(--r-sm); background: var(--ghost); color: var(--ink); }
+/* A failed refresh reuses the Work Items cue (`.stale-refresh`) and a failed
+   first read its error panel (`.state-block`) — one wording and one shape for
+   "couldn't refresh" across the board. */
+.recap .stale-refresh, .recap .state-block { margin-top: 12px; }
+
+.tgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr)); gap: 12px; margin-top: 18px; }
+.tcard {
+  display: flex; flex-direction: column; min-width: 0;
+  background: var(--surface); border: 1px solid var(--hairline);
+  border-left: 3px solid var(--handoff); border-radius: var(--r-md);
+  box-shadow: 0 1px 6px rgba(43, 36, 26, 0.06);
+}
+.tcard-h { display: flex; align-items: center; gap: 10px; padding: 12px 14px 0; }
+.tcard-h .tnm, .dgr-h .tnm { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 17px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tcard-h .hpill { margin-left: auto; }
+/* Entry age and voice: a next step written by a session that died hours ago is
+   stale, and the card says so rather than hiding it. */
+.tcard-meta { margin: 4px 14px 0; color: var(--ink-faint); font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.pcol { display: flex; flex-direction: column; padding: 0 14px; }
+.pseg { padding: 12px 0; border-bottom: 1px solid var(--hairline); min-width: 0; }
+.pseg:first-child { padding-top: 10px; }
+.seg-h { display: flex; align-items: baseline; gap: 8px; margin: 0 0 7px; font: 500 var(--fs-micro) var(--font-ui); text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); }
+.who-tag { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--ink-faint); font-size: 11px; }
+.segfoot { margin: 7px 0 0; color: var(--ink-faint); font-family: var(--font-mono); font-size: 11px; }
+.tl-empty { margin: 0; color: var(--ink-faint); font-size: 12px; font-style: italic; }
+
+.doneday + .doneday { margin-top: 9px; }
+.dd-h { margin: 0 0 4px; color: var(--ink-faint); font-family: var(--font-mono); font-size: 11px; }
+.donelist { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.donelist li { display: flex; gap: 8px; align-items: baseline; font-size: 13px; overflow-wrap: anywhere; }
+.donelist .chk { width: 6px; height: 6px; flex: none; border-radius: 2px; background: var(--positive); transform: translateY(-1px); }
+
+/* "Where I am": Riku's own reading of the transcripts, standing beside prose it
+   did not write, so a wrong summary is caught against ground truth. */
+.tl { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
+.tl-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tl-row .tl-act { flex: 1; min-width: 0; font-size: 12px; color: var(--ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-row.attention .tl-act { color: var(--warning); }
+.tl-row.finished { opacity: .7; }
+.tl-quiet { font-style: italic; color: var(--ink-faint); }
+.tl-branch { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); white-space: nowrap; max-width: 30%; overflow: hidden; text-overflow: ellipsis; }
+
+.pseg.next { border-bottom: 0; }
+.nexttxt { margin: 0; padding: 9px 11px; border-radius: var(--r-sm); background: color-mix(in srgb, var(--handoff) 8%, transparent); border-left: 2px solid var(--handoff); font-size: 13px; overflow-wrap: anywhere; }
+.nexttxt.byyou { font-style: italic; }
+
+/* The way back in. Text to copy — Riku never runs it, here or anywhere (ADR
+   0002) — and no part of it is assembled from the journal's prose. */
+.resume { padding: 11px 14px; border-top: 1px solid var(--hairline); background: var(--ghost); border-radius: 0 0 var(--r-md) var(--r-md); }
+.rcmd { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.rcmd .label-micro { flex-basis: 100%; }
+.rcmd code { flex: 1; min-width: 0; padding: 6px 9px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--hairline); color: var(--ink); overflow-x: auto; white-space: nowrap; }
+.copybtn { flex: none; padding: 6px 12px; border: 1px solid var(--hairline); border-radius: var(--r-sm); background: var(--surface); color: var(--ink); font: 500 12px var(--font-ui); cursor: pointer; }
+.copybtn:hover { background: var(--ghost); }
+.rdir { margin: 5px 0 0; color: var(--ink-faint); font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
+.rinstr { margin: 6px 0 0; color: var(--ink-muted); font-size: 12px; overflow-wrap: anywhere; }
+/* No transcript, no working directory, or an id the board would not launch: one
+   note, because a reader acts on all three the same way. */
+.rgone { margin: 0; color: var(--warning); font-size: 12px; }
+
+/* Journals whose sessions the board has forgotten. Lines, not cards: the slug a
+   journal is filed under cannot be turned back into a path, so there is nowhere
+   to go — but a question asked days ago must not drop off the recap. */
+.older { margin-top: 24px; }
+.older .band { display: flex; align-items: center; gap: 10px; margin: 0 2px 8px; }
+.older .band .n { font-family: var(--font-mono); color: var(--ink-faint); font-size: 12px; }
+.oldlist { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.oldrow { padding: 9px 12px; border: 1px solid var(--hairline); border-left: 3px solid var(--handoff); border-radius: var(--r-sm); background: var(--surface); }
+.or-h { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.or-slug { color: var(--ink-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.or-h .age { margin-left: auto; }
+.or-next { margin: 5px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+.or-instr { margin: 3px 0 0; color: var(--ink-muted); font-size: 12px; overflow-wrap: anywhere; }
+.or-instr .rgone { display: inline; }
+
+/* The day lens: the same entries, laid out by the day they were reported. */
+.daylens { display: flex; flex-direction: column; gap: 22px; margin-top: 18px; }
+.dg-h { display: flex; align-items: baseline; gap: 10px; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--hairline); font-family: Georgia, "Times New Roman", serif; font-size: 20px; font-weight: 500; }
+.dg-date { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); }
+.dgrow { padding: 10px 12px; margin-bottom: 8px; border: 1px solid var(--hairline); border-left: 3px solid var(--handoff); border-radius: var(--r-sm); background: var(--surface); }
+.dgr-h { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.dgr-h .hpill { margin-left: auto; }
