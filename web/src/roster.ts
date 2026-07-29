@@ -22,6 +22,10 @@ export interface RosterBadge {
 
 /** One row of the badge's panel. */
 export interface RosterRow {
+  /** The row's stable identity for rendering. This is the *spawn key*, not the
+   *  Sub-agent's own id: a row the parent alone established carries the spawn key as
+   *  its id and adopts the Sub-agent's own once its file is discovered, so keying on
+   *  `id` would remount the row the moment its spend arrived. */
   id: string;
   /** The Errand, verbatim, or `null` for a Sub-agent whose source named no purpose.
    *  A blank, never a placeholder: a label must not look like content when the
@@ -63,7 +67,7 @@ export function rosterBadge(roster: SubAgent[]): RosterBadge | null {
  *  rather than re-sorted by state or recency. */
 export function rosterRows(roster: SubAgent[]): RosterRow[] {
   return roster.map((a) => ({
-    id: a.id,
+    id: a.spawnKey,
     errand: a.errand,
     state: rowState(a),
     running: a.state === "running",

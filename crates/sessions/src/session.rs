@@ -7,21 +7,35 @@
 //! [`SubAgentProjection`], which is never a card. Which of the two a file gets is
 //! the Session Source's decision, taken from the path (see `source.rs`).
 //! [`FileState`] is source-agnostic: it owns the byte-offset bookkeeping,
-//! truncation reset, malformed-line handling, and the final [`Session`] assembly
-//! (status via [`status_for`]) for whatever [`Fold`] it holds.
+//! truncation reset, malformed-line handling, and exposing what its [`Fold`] has
+//! produced ([`FileState::folded`]). It does *not* own the final card: a Sub-agent's
+//! spend lives in a different file, so the store joins the roster on and calls
+//! [`assemble`] (see `store::build`). [`FileState::build`] assembles without that
+//! join — the shape a session that never fanned out has, and the seam a fold's own
+//! tests build against.
+
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use tracing::warn;
 
 use crate::attention::{AttentionReducer, NeedEvidence, Observation};
-use crate::fold::{assemble, project_from_cwd, Fold, Folded, Projection, SubAgentProjection};
+use crate::fold::{
+    assemble, first_line, project_from_cwd, Fold, Folded, Projection, SubAgentProjection,
+};
 use crate::liveness::ProcessLiveness;
 use crate::model::{AttentionCause, Session, SubAgent, SubAgentState, Tool};
 use crate::parse::{parse_entry, Entry, ToolUseInfo};
 
-/// The Claude Code `Task` tool spawns a Sub-agent; its tool-use `id` correlates the
-/// matching `tool_result` that ends it, and its input `description` names the work.
-const TASK_TOOL: &str = "Task";
+/// The Claude Code tool that spawns a Sub-agent. Its tool-use `id` is the key the
+/// Sub-agent's own metadata sidecar joins back on, and its input `description` is
+/// the Errand.
+///
+/// It was once called `Task`. Zero transcripts in the corpus contain a `Task`
+/// tool-use; 30 parent transcripts contain `Agent`. That rename is the first of the
+/// four independent breakages that kept the badge from ever rendering (ADR 0014).
+const AGENT_TOOL: &str = "Agent";
 
 /// The Claude Code fold: a running projection of a single transcript. Fold entries
 /// in file order via [`Accumulator::apply`]; token counts and "latest" fields
@@ -40,18 +54,12 @@ pub struct Accumulator {
     activity: Option<String>,
     tokens_in: u64,
     tokens_out: u64,
-    /// Sub-agent (sidechain) assistant usage, summed apart from the main counts so
-    /// its cost can be priced per the Sub-agent's own (possibly cheaper) model.
-    sub_tokens_in: u64,
-    sub_tokens_out: u64,
-    /// Running cost of Sub-agent usage, priced per each sidechain assistant entry's
-    /// own model as it is folded in (not deferred to a single session-model price).
-    sub_agent_cost_usd: f64,
-    /// Sub-agents currently running, in spawn order: each a `Task` tool-use `id` and
-    /// the short description from its input. An entry is pushed when the `Task` spawns
-    /// and removed when its matching `tool_result` arrives, so this is always the
-    /// *active* set.
-    active_sub_agents: Vec<(String, Option<String>)>,
+    /// Every Sub-agent this session has spawned, in spawn order: each an `Agent`
+    /// tool-use `id` and the `description` from its input. Entries are never
+    /// retired here — the roster carries running and finished alike, and a spawn's
+    /// `tool_result` is a launch acknowledgement rather than a completion (see
+    /// [`Accumulator::apply`]).
+    spawns: Vec<(String, Option<String>)>,
     attention: AttentionReducer,
 }
 
@@ -59,44 +67,17 @@ impl Accumulator {
     /// Fold one already-parsed relevant entry into the projection.
     pub fn apply(&mut self, entry: Entry) {
         if let Some(ts) = entry.timestamp {
-            // Entries arrive in file (chronological) order, but guard anyway. Every
-            // entry — including Sub-agent (sidechain) traffic — bumps recency, so a
-            // parent whose own loop is quiet while Sub-agents grind still looks alive.
+            // Entries arrive in file (chronological) order, but guard anyway.
             if self.latest_timestamp.is_none_or(|cur| ts >= cur) {
                 self.latest_timestamp = Some(ts);
             }
         }
 
-        // Sub-agent (sidechain) traffic folds into the parent, never a card of its
-        // own: its assistant usage adds to the parent's tokens and to cost — priced
-        // per *this* entry's model, since a Sub-agent may run a cheaper one. Its
-        // model, activity, id, and attention lifecycle never touch the parent (the
-        // activity line stays the orchestrator's own words).
-        //
-        // This covers only the older inline layout. Claude Code now writes each
-        // Sub-agent to its own file, folded by `ClaudeSubAgentFold`, and ADR 0014
-        // measured zero `isSidechain` entries left in any parent transcript — so
-        // this branch has not fired since the layout changed. Retiring it (and the
-        // parent's own sub-token accounting with it) is the roster ticket's job,
-        // not this seam's.
-        if entry.is_sidechain {
-            if entry.is_assistant {
-                self.sub_tokens_in += entry.input_tokens;
-                self.sub_tokens_out += entry.output_tokens;
-                if let Some(cost) = crate::pricing::estimate_cost_usd(
-                    entry.model.as_deref(),
-                    entry.input_tokens,
-                    entry.output_tokens,
-                ) {
-                    self.sub_agent_cost_usd += cost;
-                }
-            }
-            return;
-        }
-
-        self.tokens_in += entry.input_tokens;
-        self.tokens_out += entry.output_tokens;
-
+        // Identity first, and unconditionally — whatever else this entry is, it says
+        // which session's file this is. ADR 0014's second breakage was an early
+        // return positioned *above* this assignment, which left `projection()`
+        // returning `None` and discarded every fold that took the branch. Nothing
+        // below may return before this point.
         if let Some(id) = entry.session_id {
             self.id = Some(id);
         }
@@ -107,6 +88,25 @@ impl Accumulator {
         if entry.git_branch.is_some() {
             self.branch = entry.git_branch;
         }
+
+        // Sub-agent turns left the parent transcript: they live in the Sub-agent's
+        // own file, folded by `ClaudeSubAgentFold`, and parent-side sidechain entries
+        // number zero across the whole corpus. What ADR 0014 retired is the *folding*
+        // that used to happen here — the parallel sub-token counters whose output
+        // reached the bin, and that early return's position.
+        //
+        // Ignoring such an entry is not that. A legacy transcript still inside the
+        // discovery window would otherwise have its Sub-agent's turns folded as the
+        // parent's *own*: priced at the parent's model, and — the part that matters —
+        // its activity line and its Attention lifecycle reaching the parent's card,
+        // inferring a human need from an agent-level event, which ADR 0010 rules out.
+        // This entry belongs to a Sub-agent, and the Sub-agent's own file counts it.
+        if entry.is_sidechain {
+            return;
+        }
+
+        self.tokens_in += entry.input_tokens;
+        self.tokens_out += entry.output_tokens;
 
         // Attention Since prefers the entry's own timestamp, falling back to the
         // latest one seen so far (set just above) when a record carries none.
@@ -130,23 +130,23 @@ impl Accumulator {
             if entry.activity.is_some() {
                 self.activity = entry.activity;
             }
-            // A `Task` tool-use spawns a Sub-agent: register it as active fan-out. It
-            // is *not* a human-input wait (the Sub-agent runs on its own), so it is
+            // An `Agent` tool-use spawns a Sub-agent: record the spawn and its Errand.
+            // It is *not* a human-input wait (the Sub-agent runs on its own), so it is
             // kept out of the awaiting decision below — otherwise a fanning-out turn
             // would masquerade as needing attention, the exact false pull we remove.
             let mut human_waits: Vec<ToolUseInfo> = Vec::new();
             for tool in entry.tool_uses {
-                if tool.name.as_deref() == Some(TASK_TOOL) {
+                if tool.name.as_deref() == Some(AGENT_TOOL) {
                     if let Some(id) = tool.id {
-                        if !self.active_sub_agents.iter().any(|(sid, _)| *sid == id) {
-                            self.active_sub_agents.push((id, tool.detail));
+                        if !self.spawns.iter().any(|(sid, _)| *sid == id) {
+                            self.spawns.push((id, tool.detail));
                         }
                     }
                 } else {
                     human_waits.push(tool);
                 }
             }
-            // Waiting-on-human = the turn ended to call a (non-`Task`) tool. Prefer the
+            // Waiting-on-human = the turn ended to call a (non-`Agent`) tool. Prefer the
             // explicit `stop_reason`; fall back to the presence of a `tool_use` block
             // only when `stop_reason` is absent. This stops a mid-run tool_use or a
             // cleanly-ended (`end_turn`) turn from masquerading as a wait.
@@ -179,11 +179,15 @@ impl Accumulator {
             // A plain user turn resuming after an error/approval is forward progress.
             self.attention.apply(Observation::Superseded);
         } else {
-            // A tool_result answers its tool_use by id — a correlated resolution. If
-            // that id spawned a Sub-agent (a `Task`), the Sub-agent is now done, so it
-            // leaves the active set and the parent's badge count drops.
+            // A tool_result answers its tool_use by id — a correlated resolution.
+            //
+            // It does *not* end a Sub-agent. An `Agent` spawn's tool_result is a launch
+            // acknowledgement — "Async agent launched successfully… you will be
+            // notified automatically when it completes" — arriving ~2s after the spawn
+            // against children that run up to 20 minutes. Retiring the roster entry
+            // here (as the old rule did) would empty the badge two seconds after every
+            // spawn. Completion arrives separately, as a notification (#75).
             for id in entry.tool_result_ids {
-                self.active_sub_agents.retain(|(sid, _)| *sid != id);
                 self.attention.apply(Observation::Resolved { key: id });
             }
         }
@@ -223,17 +227,17 @@ impl Fold for Accumulator {
             cwd: self.cwd.clone(),
             tokens_in: self.tokens_in,
             tokens_out: self.tokens_out,
-            sub_tokens_in: self.sub_tokens_in,
-            sub_tokens_out: self.sub_tokens_out,
-            sub_agent_cost_usd: self.sub_agent_cost_usd,
-            // The legacy `Task`-derived set, carried through the new roster shape
-            // unchanged. It is empty for every transcript either tool writes today —
-            // zero `Task` tool-uses exist in the corpus — so no real card gains a
-            // badge here. Reading the spawns Claude and Codex actually record, with
-            // each Sub-agent's own spend and outcome, is the work of #74 and #76,
-            // which replace this mapping outright.
+            // This side of the roster: what the parent recorded about each Sub-agent
+            // it sent out. It exists from the instant of the spawn, before any child
+            // file does, and says what the Sub-agent was sent to do. What each one
+            // *spent* comes from its own file, joined onto these rows by the spawn's
+            // tool-use id in the store. Neither side alone is required for a row.
+            //
+            // Until that join runs, a row's identity is the spawn key — the only id
+            // the parent's own transcript names. The child file supplies the
+            // Sub-agent's own `agentId`, and its depth, when it is discovered.
             sub_agent_roster: self
-                .active_sub_agents
+                .spawns
                 .iter()
                 .map(|(id, description)| SubAgent {
                     id: id.clone(),
@@ -245,7 +249,11 @@ impl Fold for Accumulator {
                     tokens_out: 0,
                     cost_usd: None,
                     model: None,
-                    depth: 0,
+                    // A spawn recorded in an Agent Session's own transcript is by
+                    // definition one level down. Emitting 0 here and 1 from the
+                    // sidecar would flip the same row's depth the moment its child
+                    // file was discovered.
+                    depth: 1,
                     last_event_at: None,
                 })
                 .collect(),
@@ -256,22 +264,108 @@ impl Fold for Accumulator {
     }
 }
 
+/// What a Sub-agent's metadata sidecar states about it: the Errand it was sent on,
+/// the tool-use id of the spawn that created it, and how deep it was spawned.
+///
+/// Claude writes the sidecar beside the child transcript, at **spawn** rather than
+/// completion — verified across 58 of 58 children that ran over 30 seconds. So the
+/// Errand and the link back to the parent both exist the instant a Sub-agent does,
+/// and no roster field is missing while one runs.
+///
+/// Every field is optional: a sidecar that is absent, unreadable, or drifted in
+/// shape costs the roster row its label, never the row.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubAgentMeta {
+    /// The Errand, verbatim — the same string the spawning `Agent` tool-use carries.
+    pub description: Option<String>,
+    /// The spawning tool-use id: the key this Sub-agent's row joins its parent's
+    /// spawn record on.
+    pub tool_use_id: Option<String>,
+    /// 1 for a Sub-agent of an Agent Session, 2 for one a Sub-agent spawned itself.
+    ///
+    /// Tolerant of a drifted type, unlike the rest of the struct: serde is
+    /// all-or-nothing per struct, so a `spawnDepth` that arrives as a string would
+    /// otherwise discard the Errand and the join key with it — losing the row's
+    /// label *and* its link to the parent's spawn over the least important field.
+    #[serde(default, deserialize_with = "lenient_depth")]
+    pub spawn_depth: u32,
+}
+
+/// A `spawnDepth` of any other JSON shape reads as 0 rather than failing the parse.
+fn lenient_depth<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(serde_json::Value::deserialize(d)
+        .ok()
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or_default())
+}
+
+/// A sidecar larger than this is not one Claude Code wrote — real ones are ~120
+/// bytes. Read no further rather than pulling an arbitrary file into memory.
+const MAX_SIDECAR_BYTES: u64 = 64 * 1024;
+
+impl SubAgentMeta {
+    /// Read the sidecar at `path`, or an empty one when it is missing, unreadable,
+    /// oversized, or not the shape we expect. Never an error: a Sub-agent whose
+    /// sidecar cannot be read still folds, and its row still shows what it spent.
+    ///
+    /// The Errand is bounded here, at the one point it enters the projection, so it
+    /// is bounded *before* retention and transport. Every other string the card
+    /// carries already is — the activity line and the parent's own copy of this same
+    /// Errand both run through [`first_line`], and Attention Evidence is bounded by
+    /// design (ADR 0010). Without this the two sides of the roster's union would
+    /// disagree: the same Errand capped at 80 chars when the parent recorded it,
+    /// unbounded when the sidecar supplied it.
+    pub fn read(path: &std::path::Path) -> Self {
+        let mut meta: SubAgentMeta = read_capped(path, MAX_SIDECAR_BYTES)
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        meta.description = meta.description.as_deref().and_then(first_line);
+        meta
+    }
+}
+
+/// Read at most `cap` bytes of `path` as UTF-8, or `None` if it cannot be read or
+/// runs past the cap.
+fn read_capped(path: &std::path::Path, cap: u64) -> Option<String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(cap + 1)
+        .read_to_string(&mut buf)
+        .ok()?;
+    (buf.len() as u64 <= cap).then_some(buf)
+}
+
 /// The Claude Code Sub-agent fold: one child transcript at
 /// `<project>/<root-uuid>/subagents/agent-<agentId>.jsonl`.
 ///
 /// It folds the child in full — every assistant turn's usage, priced at the child's
 /// own (possibly cheaper) model — and produces a [`SubAgentProjection`], which is
-/// not a card. Both ids come from the path, so a Sub-agent has an identity from the
-/// moment its file is discovered; a child entry's `sessionId`, which Claude stamps
-/// with the *root* session's id at any spawn depth, supersedes the path's root id
-/// once one arrives.
+/// not a card. Both ids come from the path and the Errand from the sidecar, so a
+/// Sub-agent has an identity and a purpose from the moment its file is discovered.
+///
+/// **The path is authoritative for the root.** A child entry's `sessionId` carries
+/// the root's id too — Claude stamps it at any spawn depth, and it agreed with the
+/// containing directory across all 70 child transcripts in the corpus — so reading
+/// it would decide nothing that the directory has not already decided. It is
+/// therefore only *checked*, never preferred: file content is not allowed to steer a
+/// roster row onto another session's card, which is the one input to the cross-file
+/// join an attacker-influenced file could otherwise control.
 #[derive(Debug)]
 pub struct ClaudeSubAgentFold {
     id: String,
-    /// The root session id the path states — the containing directory's name.
+    /// The root session id, from the containing directory's name.
     root_from_path: String,
-    /// The root session id a child entry stated, which wins over the path's.
-    root_from_entry: Option<String>,
+    /// What the sidecar beside this transcript said at spawn time.
+    meta: SubAgentMeta,
+    /// Where that sidecar lives, so it can be re-read if it had not landed yet.
+    meta_path: PathBuf,
     /// Model of the latest assistant entry in this child's own transcript.
     model: Option<String>,
     tokens_in: u64,
@@ -283,17 +377,33 @@ pub struct ClaudeSubAgentFold {
 
 impl ClaudeSubAgentFold {
     /// A fold for the Sub-agent `id`, rooted at `root_session_id` (both read from
-    /// the path by the Session Source).
-    pub fn new(id: String, root_session_id: String) -> Self {
+    /// the path by the Session Source), reading its sidecar at `meta_path`.
+    pub fn new(id: String, root_session_id: String, meta_path: PathBuf) -> Self {
         ClaudeSubAgentFold {
             id,
             root_from_path: root_session_id,
-            root_from_entry: None,
+            meta: SubAgentMeta::read(&meta_path),
+            meta_path,
             model: None,
             tokens_in: 0,
             tokens_out: 0,
             cost_usd: 0.0,
             latest_timestamp: None,
+        }
+    }
+
+    /// Re-read the sidecar while it has still told us nothing.
+    ///
+    /// Claude writes it at spawn, before the Sub-agent's first turn — verified across
+    /// 58 of 58 children that ran over 30 seconds — but nothing *enforces* that the
+    /// watcher sights the two files in that order. Sighting the transcript first
+    /// would otherwise leave this Sub-agent unlabelled and unjoined for the life of
+    /// the process, and an unjoined child shows up as a *second* row beside its own
+    /// spawn record: one Sub-agent, counted twice on the badge. Retrying until the
+    /// sidecar answers makes the order not matter.
+    fn refresh_meta(&mut self) {
+        if self.meta == SubAgentMeta::default() {
+            self.meta = SubAgentMeta::read(&self.meta_path);
         }
     }
 }
@@ -308,6 +418,12 @@ impl Fold for ClaudeSubAgentFold {
             Ok(None) => return true,
             Err(_) => return false,
         };
+        // A turn arriving is the cue to look for a sidecar we have not seen yet: it
+        // means this Sub-agent is running, so its sidecar was written. This is the
+        // one file read reachable from line handling, and it is bounded — it stops
+        // the first time the sidecar answers, and never runs at all in the ordinary
+        // case where the sidecar was already there when the fold was built.
+        self.refresh_meta();
         if let Some(ts) = entry.timestamp {
             if self.latest_timestamp.is_none_or(|cur| ts >= cur) {
                 self.latest_timestamp = Some(ts);
@@ -315,8 +431,18 @@ impl Fold for ClaudeSubAgentFold {
         }
         // Every entry in this file is the Sub-agent's own traffic (Claude marks it
         // `isSidechain`), so the flag decides nothing here — the path already did.
+        // The entry's `sessionId` is the root's too, but the path already stated it
+        // and is authoritative; a disagreement is a file that is not what its
+        // location says it is, and it is ignored rather than followed.
         if let Some(id) = entry.session_id {
-            self.root_from_entry = Some(id);
+            if id != self.root_from_path {
+                warn!(
+                    sub_agent = %self.id,
+                    stated = %id,
+                    path_says = %self.root_from_path,
+                    "ignoring a Sub-agent entry naming a different root than its directory"
+                );
+            }
         }
         if entry.is_assistant {
             self.tokens_in += entry.input_tokens;
@@ -336,19 +462,22 @@ impl Fold for ClaudeSubAgentFold {
     }
 
     /// Throw away what was folded, but not the identity the path stated — a rewrite
-    /// re-reads the same Sub-agent's file.
+    /// re-reads the same Sub-agent's file, and its sidecar is re-read with it.
     fn reset(&mut self) {
-        *self = ClaudeSubAgentFold::new(self.id.clone(), self.root_from_path.clone());
+        *self = ClaudeSubAgentFold::new(
+            self.id.clone(),
+            self.root_from_path.clone(),
+            self.meta_path.clone(),
+        );
     }
 
     fn projection(&self) -> Option<Folded> {
         Some(Folded::SubAgent(SubAgentProjection {
             id: self.id.clone(),
-            root_session_id: Some(
-                self.root_from_entry
-                    .clone()
-                    .unwrap_or_else(|| self.root_from_path.clone()),
-            ),
+            root_session_id: Some(self.root_from_path.clone()),
+            spawn_key: self.meta.tool_use_id.clone(),
+            errand: self.meta.description.clone(),
+            depth: self.meta.spawn_depth,
             tool: Tool::Claude,
             model: self.model.clone(),
             tokens_in: self.tokens_in,
@@ -423,6 +552,12 @@ impl FileState {
     /// verdict (together they drive status — see [`status_for`]). Returns `None`
     /// if the fold has no projection yet, or produced a Sub-agent — which is folded
     /// in full but is not a card.
+    ///
+    /// This is the **no-roster** build: it sees only what this one file's fold
+    /// produced, so a card built here carries the spawns its own transcript recorded
+    /// and nothing of what its Sub-agents spent — that lives in other files. The
+    /// store joins those on before assembling; this is the seam a fold's own tests
+    /// build against.
     pub fn build_with_liveness(
         &self,
         mtime: DateTime<Utc>,
@@ -436,6 +571,13 @@ impl FileState {
             Folded::SubAgent(_) => None,
         }
     }
+
+    /// What this file's fold has produced — an Agent Session projection or a
+    /// Sub-agent one. The store reads this to index Sub-agents by their root before
+    /// building any card.
+    pub fn folded(&self) -> Option<Folded> {
+        self.fold.projection()
+    }
 }
 
 /// Minimal byte search; avoids pulling in the `memchr` crate for one call site.
@@ -445,6 +587,8 @@ fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
     use crate::model::{AttentionCause, Status};
     use crate::source::SessionSource;
@@ -458,74 +602,307 @@ mod tests {
         FileState::new(Box::new(Accumulator::default()))
     }
 
+    /// The root Agent Session id Claude stamps on every Sub-agent entry, at any
+    /// spawn depth — and names the directory holding that session's `subagents/`.
+    const ROOT: &str = "11111111-2222-3333-4444-555555555555";
+
     /// A Claude Sub-agent's own transcript, at the path Claude Code writes it to:
-    /// `<project>/<root-uuid>/subagents/agent-<agentId>.jsonl`.
-    const SUB_AGENT_PATH: &str =
-        "/r/-Users-x-repos-foo/11111111-2222-3333-4444-555555555555/subagents/agent-a1b2c3.jsonl";
+    /// `<project>/<root-uuid>/subagents/agent-<agentId>.jsonl`. The directory is
+    /// flat — a depth-2 child sits beside its depth-1 spawner.
+    fn sub_agent_path(root: &Path, agent_id: &str) -> PathBuf {
+        root.join("-Users-x-repos-foo")
+            .join(ROOT)
+            .join("subagents")
+            .join(format!("agent-{agent_id}.jsonl"))
+    }
+
+    /// Write a Sub-agent's transcript and the metadata sidecar Claude writes beside
+    /// it **at spawn**, returning the transcript's path.
+    ///
+    /// The sidecar's four fields are the ones present on 70 of 70 real sidecars:
+    /// what the Sub-agent was sent to do, the agent type, the tool-use id of the
+    /// spawn it joins back to, and how deep it was spawned.
+    fn write_sub_agent(
+        root: &Path,
+        agent_id: &str,
+        meta: serde_json::Value,
+        lines: &[String],
+    ) -> PathBuf {
+        let path = sub_agent_path(root, agent_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path.with_file_name(format!("agent-{agent_id}.meta.json")),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        let mut body = lines.join("\n");
+        body.push('\n');
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// The four-field sidecar, as Claude writes it.
+    fn meta(errand: &str, tool_use_id: &str, depth: u32) -> serde_json::Value {
+        serde_json::json!({
+            "agentType": "Explore",
+            "description": errand,
+            "toolUseId": tool_use_id,
+            "spawnDepth": depth,
+        })
+    }
 
     /// An Agent Session transcript, flat under its project directory.
     const SESSION_PATH: &str = "/r/-Users-x-repos-foo/deadbeef.jsonl";
 
     /// The fold the Claude Session Source hands back for `path` — the seam where a
-    /// source decides which of the two things it is about to read.
+    /// source decides which of the two things it is about to read, and reads the
+    /// sidecar beside a Sub-agent's transcript.
+    fn claude_fold_at(root: &Path, path: &Path) -> Box<dyn Fold> {
+        crate::source::ClaudeSource::new(root.to_path_buf()).new_fold(path)
+    }
+
     fn claude_fold(path: &str) -> Box<dyn Fold> {
         crate::source::ClaudeSource::new("/r".into()).new_fold(std::path::Path::new(path))
     }
 
-    /// One entry from a Sub-agent's own transcript file: `isSidechain`, the *root*
-    /// session's id (Claude stamps it on every child entry, at any depth), and the
-    /// child's own model — which may be cheaper than the orchestrator's.
-    fn sub_agent_assistant(root: &str, model: &str, tin: u64, tout: u64) -> String {
-        format!(
-            r#"{{"type":"assistant","isSidechain":true,"agentId":"a1b2c3","sessionId":"{root}","cwd":"/Users/x/repos/foo","gitBranch":"main","timestamp":"2026-07-19T10:00:10Z","message":{{"model":"{model}","usage":{{"input_tokens":{tin},"output_tokens":{tout}}},"content":[{{"type":"text","text":"sub work"}}]}}}}"#
-        )
+    /// One assistant entry from a Sub-agent's own transcript file, in the shape
+    /// Claude writes it: `isSidechain`, its own `agentId`, the **root** session's id
+    /// on `sessionId` (at any depth), the parent's `cwd` and `gitBranch` verbatim,
+    /// and the child's own model — which may be cheaper than the orchestrator's.
+    fn sub_agent_assistant(agent_id: &str, model: &str, tin: u64, tout: u64) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "isSidechain": true,
+            "agentId": agent_id,
+            "sessionId": ROOT,
+            "cwd": "/Users/x/repos/foo",
+            "gitBranch": "main",
+            "timestamp": "2026-07-19T10:00:10Z",
+            "message": {
+                "model": model,
+                "usage": { "input_tokens": tin, "output_tokens": tout },
+                "content": [{ "type": "text", "text": "sub work" }]
+            }
+        })
+        .to_string()
     }
 
     #[test]
     fn a_sub_agent_transcript_folds_in_full_and_states_a_sub_agent_projection() {
-        // Folded in full — identity assigned, spend counted — and *stated* as a
-        // Sub-agent rather than coming back empty (ADR 0014).
-        let mut fold = claude_fold(SUB_AGENT_PATH);
-        assert!(fold.apply_line(&sub_agent_assistant("root-1", "claude-haiku-4-5", 200, 20)));
-        assert!(fold.apply_line(&sub_agent_assistant("root-1", "claude-haiku-4-5", 100, 10)));
+        // Folded in full — identity assigned, Errand and join key read from the
+        // sidecar, spend counted and priced at the child's own model — and *stated*
+        // as a Sub-agent rather than coming back empty (ADR 0014).
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sub_agent(
+            dir.path(),
+            "a1b2c3",
+            meta("map the parser", "toolu_a", 1),
+            &[
+                sub_agent_assistant("a1b2c3", "claude-haiku-4-5", 200, 20),
+                sub_agent_assistant("a1b2c3", "claude-haiku-4-5", 800, 80),
+            ],
+        );
+        let mut fs = FileState::new(claude_fold_at(dir.path(), &path));
+        fs.feed(&std::fs::read(&path).unwrap());
 
-        let Some(Folded::SubAgent(sub)) = fold.projection() else {
+        let Some(Folded::SubAgent(sub)) = fs.folded() else {
             panic!("a Sub-agent transcript states a Sub-agent projection");
         };
         assert_eq!(sub.id, "a1b2c3");
-        assert_eq!(sub.root_session_id.as_deref(), Some("root-1"));
+        assert_eq!(sub.root_session_id.as_deref(), Some(ROOT));
+        assert_eq!(sub.spawn_key.as_deref(), Some("toolu_a"));
+        assert_eq!(sub.errand.as_deref(), Some("map the parser"));
+        assert_eq!(sub.depth, 1);
         assert_eq!(sub.tool, Tool::Claude);
         assert_eq!(sub.model.as_deref(), Some("claude-haiku-4-5"));
-        assert_eq!(sub.tokens_in, 300);
-        assert_eq!(sub.tokens_out, 30);
+        assert_eq!(sub.tokens_in, 1_000);
+        assert_eq!(sub.tokens_out, 100);
         assert_eq!(sub.last_event_at, Some(ts("2026-07-19T10:00:10Z")));
+        // Priced at Haiku, the model it actually ran — 1k in + 100 out.
+        assert!((sub.cost_usd - (0.001 * 0.80 + 0.0001 * 4.00)).abs() < 1e-12);
     }
 
     #[test]
     fn a_sub_agent_transcript_yields_no_card() {
         // Not because the fold came back empty, but because a Sub-agent projection
         // is not a card.
-        let mut fs = FileState::new(claude_fold(SUB_AGENT_PATH));
-        let entry = sub_agent_assistant("root-1", "claude-haiku-4-5", 200, 20);
-        fs.feed(format!("{entry}\n").as_bytes());
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sub_agent(
+            dir.path(),
+            "a1b2c3",
+            meta("map the parser", "toolu_a", 1),
+            &[sub_agent_assistant("a1b2c3", "claude-haiku-4-5", 200, 20)],
+        );
+        let mut fs = FileState::new(claude_fold_at(dir.path(), &path));
+        fs.feed(&std::fs::read(&path).unwrap());
         assert!(fs
             .build(ts("2026-07-19T10:00:20Z"), ts("2026-07-19T10:00:30Z"))
             .is_none());
     }
 
     #[test]
-    fn a_sub_agent_identity_comes_from_the_path_before_a_line_arrives() {
-        // The path states both ids, so a Sub-agent has an identity from the moment
-        // its file is discovered — the containing directory is the root's id.
-        let fold = claude_fold(SUB_AGENT_PATH);
-        let Some(Folded::SubAgent(sub)) = fold.projection() else {
+    fn a_sub_agent_has_an_errand_and_a_parent_before_a_line_arrives() {
+        // The sidecar is written at spawn, not completion — verified across 58 of 58
+        // children that ran over 30 seconds — so a Sub-agent has an identity, an
+        // Errand, and a link back to its spawn from the moment its file exists. No
+        // roster field is missing while one runs.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sub_agent(
+            dir.path(),
+            "a1b2c3",
+            meta("map the parser", "toolu_a", 1),
+            &[],
+        );
+        let Some(Folded::SubAgent(sub)) = claude_fold_at(dir.path(), &path).projection() else {
             panic!("a Sub-agent transcript states a Sub-agent projection");
         };
         assert_eq!(sub.id, "a1b2c3");
-        assert_eq!(
-            sub.root_session_id.as_deref(),
-            Some("11111111-2222-3333-4444-555555555555")
+        // Before any entry, the root is the containing directory's name.
+        assert_eq!(sub.root_session_id.as_deref(), Some(ROOT));
+        assert_eq!(sub.errand.as_deref(), Some("map the parser"));
+        assert_eq!(sub.spawn_key.as_deref(), Some("toolu_a"));
+        assert_eq!(sub.tokens_in, 0);
+    }
+
+    #[test]
+    fn a_sidecar_that_lands_after_the_transcript_is_still_read() {
+        // Claude writes the sidecar at spawn, but nothing enforces which of the two
+        // files the watcher sights first. Sighting the transcript first must not cost
+        // this Sub-agent its Errand and its join key for the life of the process —
+        // which would also split it into two roster rows beside its own spawn record.
+        let dir = tempfile::tempdir().unwrap();
+        let path = sub_agent_path(dir.path(), "a1b2c3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                sub_agent_assistant("a1b2c3", "claude-haiku-4-5", 40, 4)
+            ),
+        )
+        .unwrap();
+
+        // The fold is built while only the transcript exists.
+        let mut fs = FileState::new(claude_fold_at(dir.path(), &path));
+        let Some(Folded::SubAgent(sub)) = fs.folded() else {
+            panic!("a Sub-agent projection");
+        };
+        assert_eq!(sub.errand, None, "nothing to read yet");
+
+        // The sidecar lands, and the next turn is the cue to look again.
+        std::fs::write(
+            path.with_file_name("agent-a1b2c3.meta.json"),
+            meta("map the parser", "toolu_a", 1).to_string(),
+        )
+        .unwrap();
+        fs.feed(&std::fs::read(&path).unwrap());
+
+        let Some(Folded::SubAgent(sub)) = fs.folded() else {
+            panic!("a Sub-agent projection");
+        };
+        assert_eq!(sub.errand.as_deref(), Some("map the parser"));
+        assert_eq!(sub.spawn_key.as_deref(), Some("toolu_a"));
+    }
+
+    #[test]
+    fn a_drifted_sidecar_costs_the_label_not_the_join() {
+        // Drift must not be all-or-nothing. `spawnDepth` arriving as a string is the
+        // least important field on the sidecar; losing the join key with it would
+        // split one Sub-agent into two roster rows over it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sub_agent(
+            dir.path(),
+            "a1b2c3",
+            serde_json::json!({
+                "description": "map the parser",
+                "toolUseId": "toolu_a",
+                "spawnDepth": "1",
+            }),
+            &[sub_agent_assistant("a1b2c3", "claude-haiku-4-5", 40, 4)],
         );
+        let mut fs = FileState::new(claude_fold_at(dir.path(), &path));
+        fs.feed(&std::fs::read(&path).unwrap());
+
+        let Some(Folded::SubAgent(sub)) = fs.folded() else {
+            panic!("a Sub-agent projection");
+        };
+        assert_eq!(sub.spawn_key.as_deref(), Some("toolu_a"));
+        assert_eq!(sub.errand.as_deref(), Some("map the parser"));
+        assert_eq!(sub.depth, 0, "the drifted field alone is lost");
+    }
+
+    #[test]
+    fn a_sidecar_errand_is_bounded_like_every_other_string_on_the_card() {
+        // The same Errand reaches the roster from two places. The parent's copy runs
+        // through the same 80-char bound as the activity line; the sidecar's must
+        // too, or a row's label length would depend on which side supplied it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sub_agent(
+            dir.path(),
+            "a1b2c3",
+            meta(&"x".repeat(500), "toolu_a", 1),
+            &[sub_agent_assistant("a1b2c3", "claude-haiku-4-5", 1, 1)],
+        );
+        let fold = claude_fold_at(dir.path(), &path);
+        let Some(Folded::SubAgent(sub)) = fold.projection() else {
+            panic!("a Sub-agent projection");
+        };
+        assert_eq!(sub.errand.unwrap().chars().count(), 80);
+    }
+
+    #[test]
+    fn the_directory_decides_the_root_not_the_files_contents() {
+        // A child entry names the root too, and across all 70 real child transcripts
+        // it agreed with the containing directory. Reading it therefore decides
+        // nothing — but preferring it would let a file's contents move its row onto
+        // another session's card, so a disagreement is ignored.
+        let dir = tempfile::tempdir().unwrap();
+        let path = sub_agent_path(dir.path(), "a1b2c3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let liar = serde_json::json!({
+            "type": "assistant", "isSidechain": true, "agentId": "a1b2c3",
+            "sessionId": "some-other-session", "cwd": "/Users/x/repos/foo",
+            "timestamp": "2026-07-19T10:00:10Z",
+            "message": { "model": "claude-haiku-4-5",
+                "usage": { "input_tokens": 5, "output_tokens": 1 },
+                "content": [{ "type": "text", "text": "sub work" }] }
+        });
+        std::fs::write(&path, format!("{liar}\n")).unwrap();
+        let mut fs = FileState::new(claude_fold_at(dir.path(), &path));
+        fs.feed(&std::fs::read(&path).unwrap());
+
+        let Some(Folded::SubAgent(sub)) = fs.folded() else {
+            panic!("a Sub-agent projection");
+        };
+        assert_eq!(sub.root_session_id.as_deref(), Some(ROOT));
+    }
+
+    #[test]
+    fn a_sub_agent_without_a_readable_sidecar_still_folds() {
+        // A sidecar that is missing or drifted costs the row its label, never the
+        // row: the Sub-agent still folds, still attaches to its root, and still shows
+        // what it spent — unlabelled rather than absent.
+        let dir = tempfile::tempdir().unwrap();
+        let path = sub_agent_path(dir.path(), "a1b2c3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                sub_agent_assistant("a1b2c3", "claude-haiku-4-5", 40, 4)
+            ),
+        )
+        .unwrap();
+        let mut fs = FileState::new(claude_fold_at(dir.path(), &path));
+        fs.feed(&std::fs::read(&path).unwrap());
+
+        let Some(Folded::SubAgent(sub)) = fs.folded() else {
+            panic!("a Sub-agent transcript states a Sub-agent projection");
+        };
+        assert_eq!(sub.root_session_id.as_deref(), Some(ROOT));
+        assert_eq!(sub.errand, None);
+        assert_eq!(sub.spawn_key, None);
+        assert_eq!(sub.tokens_in, 40);
     }
 
     #[test]
@@ -573,45 +950,59 @@ mod tests {
         assert_eq!(s.status, Status::Active);
     }
 
-    /// A main-chain assistant turn that spawns a Sub-agent via a `Task` tool-use,
-    /// carrying its correlation id and a short description.
-    fn task_spawn(tuid: &str, description: &str) -> String {
-        format!(
-            r#"{{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{{"model":"claude-opus-4-8","stop_reason":"tool_use","content":[{{"type":"tool_use","id":"{tuid}","name":"Task","input":{{"description":"{description}","subagent_type":"Explore"}}}}]}}}}"#
-        )
+    /// A main-chain assistant turn that spawns a Sub-agent, in the shape Claude Code
+    /// writes today: an `Agent` tool-use carrying the correlation id the Sub-agent's
+    /// sidecar joins back on, and a `description` that is the Errand.
+    fn agent_spawn(tuid: &str, description: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "sessionId": "s1",
+            "cwd": "/a/foo",
+            "timestamp": "2026-07-19T10:00:00Z",
+            "message": {
+                "model": "claude-opus-4-8",
+                "stop_reason": "tool_use",
+                "content": [{
+                    "type": "tool_use", "id": tuid, "name": "Agent",
+                    "input": {
+                        "description": description,
+                        "subagent_type": "Explore",
+                        "prompt": "the long brief the Sub-agent actually receives",
+                    }
+                }]
+            }
+        })
+        .to_string()
     }
 
-    /// A `tool_result` (main chain) answering the `Task` with id `tuid` — the
-    /// Sub-agent has finished.
-    fn task_result(tuid: &str) -> String {
-        format!(
-            r#"{{"type":"user","sessionId":"s1","cwd":"/a/foo","message":{{"content":[{{"type":"tool_result","tool_use_id":"{tuid}","content":"done"}}]}}}}"#
-        )
-    }
-
-    /// One Sub-agent's own (sidechain) assistant turn, on an arbitrary model.
-    fn sidechain(model: &str, text: &str, tin: u64, tout: u64) -> String {
-        format!(
-            r#"{{"type":"assistant","isSidechain":true,"sessionId":"sub","cwd":"/a/b","timestamp":"2026-07-19T10:00:10Z","message":{{"model":"{model}","usage":{{"input_tokens":{tin},"output_tokens":{tout}}},"content":[{{"type":"text","text":"{text}"}}]}}}}"#
-        )
+    /// The `tool_result` that answers an `Agent` spawn: a **launch acknowledgement**,
+    /// arriving ~2s after the spawn against children that run up to 20 minutes.
+    fn agent_launch_ack(tuid: &str) -> String {
+        serde_json::json!({
+            "type": "user",
+            "sessionId": "s1",
+            "cwd": "/a/foo",
+            "message": { "content": [{
+                "type": "tool_result", "tool_use_id": tuid,
+                "content": "Async agent launched successfully. You will be notified automatically when it completes.",
+            }] }
+        })
+        .to_string()
     }
 
     #[test]
     fn the_roster_carries_each_spawn_with_its_errand() {
-        // The legacy `Task` path, read through the roster shape. The rules it encodes
-        // — a spawn is a roster entry, a `tool_result` retires it — are the ones #74
-        // replaces against the records Claude Code actually writes; what this asserts
-        // is the pipe, not the population.
+        // What the parent's own transcript establishes: that a Sub-agent exists and
+        // what it was sent to do, in spawn order, from the instant of the spawn.
         let mut fs = claude();
-        let mut data = task_spawn("toolu_a", "map the parser");
+        let mut data = agent_spawn("toolu_a", "map the parser");
         data.push('\n');
-        data.push_str(&task_spawn("toolu_b", "audit the tests"));
+        data.push_str(&agent_spawn("toolu_b", "audit the tests"));
         data.push('\n');
         fs.feed(data.as_bytes());
         let s = fs
             .build(ts("2026-07-19T10:00:20Z"), ts("2026-07-19T10:00:30Z"))
             .unwrap();
-        // In spawn order, each Running, each carrying the Errand verbatim.
         assert_eq!(
             s.sub_agent_roster
                 .iter()
@@ -622,23 +1013,33 @@ mod tests {
                 (Some("audit the tests"), SubAgentState::Running),
             ]
         );
-        // The join key back to the spawn travels with the entry.
+        // The join key back to the spawn travels with the entry — it is what the
+        // Sub-agent's own file joins onto.
         assert_eq!(s.sub_agent_roster[0].spawn_key, "toolu_a");
-        // Depth is carried on every entry (and drawn nowhere).
-        assert!(s.sub_agent_roster.iter().all(|a| a.depth == 0));
+        assert_eq!(s.sub_agent_roster[1].spawn_key, "toolu_b");
+    }
 
-        fs.feed(format!("{}\n", task_result("toolu_a")).as_bytes());
+    #[test]
+    fn a_launch_acknowledgement_does_not_end_a_sub_agent() {
+        // The fourth breakage, stated as a test. An `Agent` spawn's `tool_result` is
+        // the launcher saying it launched — not the Sub-agent saying it finished. The
+        // old rule retired the entry here, which would have emptied the badge two
+        // seconds after every spawn even with the tool rename fixed.
+        let mut fs = claude();
+        let mut data = agent_spawn("toolu_a", "map the parser");
+        data.push('\n');
+        data.push_str(&agent_launch_ack("toolu_a"));
+        data.push('\n');
+        fs.feed(data.as_bytes());
         let s = fs
-            .build(ts("2026-07-19T10:00:40Z"), ts("2026-07-19T10:00:50Z"))
+            .build(ts("2026-07-19T10:00:20Z"), ts("2026-07-19T10:00:30Z"))
             .unwrap();
         assert_eq!(s.sub_agent_roster.len(), 1);
-        assert_eq!(s.sub_agent_roster[0].errand.as_deref(), Some("audit the tests"));
-
-        fs.feed(format!("{}\n", task_result("toolu_b")).as_bytes());
-        let s = fs
-            .build(ts("2026-07-19T10:00:55Z"), ts("2026-07-19T10:01:00Z"))
-            .unwrap();
-        assert!(s.sub_agent_roster.is_empty());
+        assert_eq!(s.sub_agent_roster[0].state, SubAgentState::Running);
+        assert_eq!(
+            s.sub_agent_roster[0].errand.as_deref(),
+            Some("map the parser")
+        );
     }
 
     #[test]
@@ -647,7 +1048,20 @@ mod tests {
         // purpose is shown unlabelled, never labelled with something that merely
         // looks like one.
         let mut fs = claude();
-        let line = r#"{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{"model":"claude-opus-4-8","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_x","name":"Task","input":{"subagent_type":"Explore"}}]}}"#;
+        let line = serde_json::json!({
+            "type": "assistant",
+            "sessionId": "s1",
+            "cwd": "/a/foo",
+            "timestamp": "2026-07-19T10:00:00Z",
+            "message": {
+                "model": "claude-opus-4-8",
+                "stop_reason": "tool_use",
+                "content": [{
+                    "type": "tool_use", "id": "toolu_x", "name": "Agent",
+                    "input": { "subagent_type": "Explore" }
+                }]
+            }
+        });
         fs.feed(format!("{line}\n").as_bytes());
         let s = fs
             .build(ts("2026-07-19T10:00:20Z"), ts("2026-07-19T10:00:30Z"))
@@ -658,12 +1072,13 @@ mod tests {
 
     #[test]
     fn spawning_a_sub_agent_is_working_not_attention_or_stale() {
-        // A `Task` spawn ends the turn with stop_reason tool_use, but it is the agent
-        // fanning out — not a human-input wait — so the card must not enter Attention.
-        // And with a Sub-agent still Running the parent stays Active even when its own
-        // transcript has been quiet well past the staleness window.
+        // An `Agent` spawn ends the turn with stop_reason tool_use, but it is the
+        // agent fanning out — not a human-input wait — so the card must not enter
+        // Attention. And with a Sub-agent still Running the parent stays Active even
+        // when its own transcript has been quiet well past the staleness window: the
+        // observed quiet spans reach 963 seconds.
         let mut fs = claude();
-        fs.feed(format!("{}\n", task_spawn("toolu_a", "grind on it")).as_bytes());
+        fs.feed(format!("{}\n", agent_spawn("toolu_a", "grind on it")).as_bytes());
         let s = fs
             .build(ts("2026-07-19T10:00:00Z"), ts("2026-07-19T10:30:00Z"))
             .unwrap();
@@ -674,47 +1089,62 @@ mod tests {
     }
 
     #[test]
-    fn sidechain_usage_folds_into_tokens_and_cost_priced_per_entry_model() {
-        // Orchestrator on Opus; its Sub-agent runs the cheaper Haiku. Both usages
-        // count toward the card, but the Sub-agent's cost is priced at Haiku's rate,
-        // not the parent's Opus rate.
+    fn a_sidechain_turn_in_a_parent_transcript_is_ignored_not_folded() {
+        // Today's Claude Code writes zero of these into a parent transcript — the
+        // traffic moved into the Sub-agent's own file. A legacy transcript still
+        // inside the discovery window must not have that turn folded as the parent's
+        // own: not its tokens, not its words as the activity line, and above all not
+        // its tool call as a human wait (ADR 0010).
         let mut fs = claude();
-        let mut data = assistant("s1", "orchestrating", 1_000_000, 1_000_000);
+        let mut data = assistant("s1", "orchestrating", 100, 10);
         data.push('\n');
-        data.push_str(&sidechain("claude-haiku-4-5", "sub work", 1_000_000, 0));
+        data.push_str(
+            &serde_json::json!({
+                "type": "assistant", "isSidechain": true, "sessionId": "s1",
+                "cwd": "/a/foo", "timestamp": "2026-07-19T10:00:10Z",
+                "message": { "model": "claude-haiku-4-5", "stop_reason": "tool_use",
+                    "usage": { "input_tokens": 999, "output_tokens": 99 },
+                    "content": [
+                        { "type": "text", "text": "a Sub-agent's own words" },
+                        { "type": "tool_use", "id": "toolu_sub", "name": "Bash" }
+                    ] }
+            })
+            .to_string(),
+        );
         data.push('\n');
         fs.feed(data.as_bytes());
 
         let s = fs
             .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
             .unwrap();
-        // Tokens include the Sub-agent's usage (story 5).
-        assert_eq!(s.tokens_in, 2_000_000);
-        assert_eq!(s.tokens_out, 1_000_000);
-        // Cost = Opus main (15 + 75 = 90) + Haiku sub (0.80), NOT Opus-priced sub (15).
-        let cost = s.cost_usd.unwrap();
-        assert!((cost - 90.80).abs() < 1e-9, "cost was {cost}");
-        // Model stays the orchestrator's, never the Sub-agent's.
+        assert_eq!(
+            s.tokens_in, 100,
+            "the Sub-agent's spend is not the parent's"
+        );
+        assert_eq!(s.activity.as_deref(), Some("orchestrating"));
         assert_eq!(s.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(s.status, Status::Active);
+        assert!(
+            s.attention.is_none(),
+            "a Sub-agent's tool call is not a human wait"
+        );
+        // Identity is still assigned: the guard sits after it, never above it.
+        assert_eq!(s.id, "s1");
     }
 
     #[test]
-    fn sidechain_text_and_timestamp_bump_recency_but_not_activity() {
-        // The activity line stays the orchestrator's own words (story 7), while the
-        // later sidechain timestamp still bumps the parent's recency (story 4/9).
+    fn a_parent_transcript_carries_no_sub_agent_spend_of_its_own() {
+        // Sub-agent turns left the parent transcript — parent-side sidechain entries
+        // number zero across the whole corpus. A parent's own counts are its own; its
+        // Sub-agents' spend arrives from their files, joined by the store.
         let mut fs = claude();
-        let mut data = assistant("s1", "orchestrating", 10, 1);
-        data.push('\n');
-        data.push_str(&sidechain("claude-haiku-4-5", "noisy sub chatter", 5, 1));
-        data.push('\n');
-        fs.feed(data.as_bytes());
-
+        fs.feed(format!("{}\n", assistant("s1", "orchestrating", 100, 10)).as_bytes());
         let s = fs
             .build(ts("2026-07-19T10:00:30Z"), ts("2026-07-19T10:00:40Z"))
             .unwrap();
+        assert_eq!(s.tokens_in, 100);
+        assert_eq!(s.tokens_out, 10);
         assert_eq!(s.activity.as_deref(), Some("orchestrating"));
-        // last_event_at is the sidechain entry's timestamp, the latest seen.
-        assert_eq!(s.last_event_at, ts("2026-07-19T10:00:10Z"));
     }
 
     #[test]

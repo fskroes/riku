@@ -28,8 +28,8 @@ changelog, blog, or docs site** (`/changelog`, `/blog`, `/docs`, `/sitemap.xml` 
 | Navigation | The **prompt** is the index: `<nav aria-label="Prompts">`, a table of contents of every user turn, a `N/M` prompt pager with `j`/`k` keys, and a permalink per message that deep-links even into collapsed and not-yet-loaded pages ([pager source](https://yaplog.dev/assets/controllers/transcript_pager_controller-b5f50346.js), [ToC frame](https://yaplog.dev/transcripts/tr_u8pZjnFy/toc)). | The Recap's "Where I am" is a derived timeline of attention events (`web/src/Recap.tsx`); there is no prompt index. |
 | Noise control | Everything between two prompts folds into one row summarised as "Thought 3 times. Used 3 tool calls. +0 -0 [Expand]"; system prompts collapsed by default, at the author's explicit request ("Make system prompts hidden by default", [`tr_itG3svUq`](https://yaplog.dev/transcripts/tr_itG3svUq/toc)). | `crates/sessions/src/fold.rs` folds a session into one card; the Recap shows prose plus a derived timeline. |
 | Human prose | Author-written title, a description on the artifact, and **notes anchored to a specific message** — a handwritten-style sticky note above the message it comments on ([`tr_u8pZjnFy`, note on `message-3`](https://yaplog.dev/transcripts/tr_u8pZjnFy)). | The journal: agent-written `done`/`next`, plus a user correction entry, append-only, latest-wins (`docs/adr/0013-agent-written-project-journal.md`). |
-| Metrics | Prompts / Tool calls / Messages / Assets, plus Author, Created At, Source. **No** tokens, cost, model, duration, or per-message timestamps anywhere. | Tokens, cost (including `sub_agent_cost_usd`), diff stat, branch, model, machine (`crates/sessions/src/fold.rs`, `crates/relay/src/wire.rs`). |
-| Hierarchy | None. No sub-agent, sidechain, or parent notion in the UI or in the CLI binary's symbol table. | Aggregate-only: a `SubAgents` badge on the parent, sub-agent tokens folded into the parent, and Codex `thread_source == "subagent"` rollouts suppressed entirely (`crates/sessions/src/codex.rs`). |
+| Metrics | Prompts / Tool calls / Messages / Assets, plus Author, Created At, Source. **No** tokens, cost, model, duration, or per-message timestamps anywhere. | Tokens, cost (including each Sub-agent's own, priced at its own model), diff stat, branch, model, machine (`crates/sessions/src/fold.rs`, `crates/relay/src/wire.rs`). |
+| Hierarchy | None. No sub-agent, sidechain, or parent notion in the UI or in the CLI binary's symbol table. | A roster on the parent: one row per Sub-agent with its Errand and its own spend, folded into the parent's totals. Codex `thread_source == "subagent"` rollouts still yield no roster row pending #76 (`crates/sessions/src/codex.rs`). |
 | Where data lives | Uploaded. GitHub OAuth, Postgres, S3 for assets, originals kept ([design answers in `tr_itG3svUq`](https://yaplog.dev/transcripts/tr_itG3svUq/toc)); "we keep your data until you delete it" ([privacy](https://yaplog.dev/privacy)). | Local-first; the journal "never leaves the machine" (ADR 0013), the Relay carries a one-way stream (ADR 0002). |
 
 ## 1. What it is for, and who it is for
@@ -263,7 +263,7 @@ recording so nobody looks again.
 **Don't adopt Yaplog's model for #67 — it has none — but take its rendering pattern.**
 On hierarchy Yaplog is a dead end: no parent/child anywhere, and for Codex it never
 even had to decide, since it publishes whatever single rollout you point it at. Riku's
-current handling (`SubAgents` badge, `sub_agent_cost_usd` folded into the parent,
+current handling (the Sub-agent roster, each row's cost folded into the parent,
 Codex `thread_source == "subagent"` rollouts suppressed in
 `crates/sessions/src/codex.rs`) has no counterpart to learn from. What *is* reusable is
 the turn fold's shape: an indented, left-bordered, collapsed child block under its

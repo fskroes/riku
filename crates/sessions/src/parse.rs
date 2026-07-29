@@ -1,9 +1,14 @@
 //! Transcript parsing. Each transcript line is one JSON object; we tolerate
 //! unknown fields, unknown `type` values, and schema drift between Claude Code
 //! versions (unknown => ignore, never error). Only `user` / `assistant` entries
-//! feed the session model. Sidechain (Sub-agent) `user` / `assistant` entries are
-//! parsed too, flagged with [`Entry::is_sidechain`]: the fold folds their token
-//! usage and liveness into the parent rather than surfacing them as their own card.
+//! feed the session model.
+//!
+//! The same decoding serves both kinds of Claude transcript — an Agent Session's
+//! and a Sub-agent's — because their entries have the same shape. Which of the two
+//! a file is has already been decided from its path by the time a line gets here
+//! (see `source.rs`); [`Entry::is_sidechain`] survives only so a parent's fold can
+//! *ignore* a Sub-agent turn that a legacy transcript still carries inline, never to
+//! fold one into the parent.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -84,9 +89,7 @@ enum Block {
         input: serde_json::Value,
     },
     #[serde(rename = "tool_result")]
-    ToolResult {
-        tool_use_id: Option<String>,
-    },
+    ToolResult { tool_use_id: Option<String> },
     #[serde(other)]
     Other,
 }
@@ -105,8 +108,11 @@ pub struct ToolUseInfo {
 #[derive(Debug)]
 pub struct Entry {
     pub is_assistant: bool,
-    /// `isSidechain: true` — Sub-agent traffic. The fold folds such an entry's token
-    /// usage and recency into the parent instead of treating it as a card of its own.
+    /// `isSidechain: true` — a Sub-agent's turn. In a Sub-agent's own transcript
+    /// every entry carries it and it decides nothing (the path already classified
+    /// the file). In a *parent's* transcript it should never appear: that traffic
+    /// moved into the child files. Where a legacy transcript still carries one, the
+    /// parent fold ignores it rather than folding a Sub-agent's turn as its own.
     pub is_sidechain: bool,
     pub session_id: Option<String>,
     pub timestamp: Option<DateTime<Utc>>,
@@ -131,8 +137,7 @@ pub struct Entry {
 
 /// Parse one transcript line.
 ///
-/// * `Ok(Some(entry))` — a relevant `user` / `assistant` entry (possibly sidechain,
-///   flagged with [`Entry::is_sidechain`] for the fold to fold into the parent).
+/// * `Ok(Some(entry))` — a relevant `user` / `assistant` entry.
 /// * `Ok(None)` — valid JSON we intentionally ignore (other `type`).
 /// * `Err(_)` — the line is not valid JSON (malformed or a mid-write fragment).
 pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {

@@ -105,10 +105,14 @@ pub struct DiffStat {
 /// carries every Sub-agent it has spawned, and a finished Agent Session by
 /// definition has none running — carrying only the active set would show the
 /// sessions that delegated the most work nothing at all (ADR 0014).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `Finished` is the default a partial wire row degrades to, deliberately: a row we
+/// could not fully read must not claim to be running, since a Running row keeps its
+/// parent's card out of Finished and would pin a stale session Active.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SubAgentState {
     Running,
+    #[default]
     Finished,
 }
 
@@ -126,10 +130,19 @@ pub enum SubAgentState {
 #[serde(rename_all = "camelCase")]
 pub struct SubAgent {
     /// The Sub-agent's own source-native id: Claude's `agentId`, Codex's rollout id.
+    ///
+    /// **Provisional until the Sub-agent's own file is discovered.** A row the parent
+    /// alone established carries the spawn key here, because the parent's transcript
+    /// names no other id; it becomes the Sub-agent's own once its file is found. Use
+    /// [`spawn_key`](Self::spawn_key) for anything that must stay stable across that
+    /// transition — a rendering key, say.
+    #[serde(default)]
     pub id: String,
     /// The key that joins this entry back to its spawn on the parent's side:
     /// Claude's spawning tool-use id, Codex's parent thread id. It is what lets the
-    /// roster be the union of what the parent recorded and what the child spent.
+    /// roster be the union of what the parent recorded and what the child spent, and
+    /// it is the one identity that does not change as the two sides come together.
+    #[serde(default)]
     pub spawn_key: String,
     /// What this Sub-agent was sent to do (CONTEXT.md "Errand"), verbatim from the
     /// spawning source. `None` when the source names no purpose — a Sub-agent with
@@ -137,6 +150,13 @@ pub struct SubAgent {
     /// looks like a purpose.
     #[serde(default)]
     pub errand: Option<String>,
+    /// Every field on this row carries `serde(default)`: a roster row is a *badge*,
+    /// and a peer across a version skew that omits one must cost the badge rather
+    /// than the whole session. Without it a single missing field fails the enclosing
+    /// `Session` decode and the Relay drops the card entirely — the exact failure the
+    /// wire's field rename was chosen to avoid, which the roster's contents reopen
+    /// now that they are no longer always empty.
+    #[serde(default)]
     pub state: SubAgentState,
     /// How it ended, in the source's own word (`completed`, `failed`, `stopped`,
     /// `killed`). Read, never inferred from prose, and `None` when the source states
@@ -146,7 +166,9 @@ pub struct SubAgent {
     pub outcome: Option<String>,
     /// This Sub-agent's own token usage. Also counted in its parent's headline
     /// totals; the roster row is the disclosure of whose spend it was.
+    #[serde(default)]
     pub tokens_in: u64,
+    #[serde(default)]
     pub tokens_out: u64,
     /// Estimated cost priced at [`model`](Self::model) — the Sub-agent's own, which
     /// may be cheaper than the orchestrator's. `None` for an unpriced model.

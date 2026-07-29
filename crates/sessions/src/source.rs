@@ -64,9 +64,17 @@ impl SessionSource for ClaudeSource {
 ///
 /// Claude writes each Sub-agent to `<project>/<root-uuid>/subagents/agent-<agentId>.jsonl`,
 /// in a flat directory (a depth-2 child sits beside its depth-1 spawner), so the
-/// path alone both classifies the file and names both ids. The root id here is the
-/// containing directory's; a child entry's own `sessionId` — which Claude stamps
-/// with the *root's* id at any depth — supersedes it once one arrives.
+/// path alone both classifies the file and names both ids. The containing directory
+/// is the root's id, and it is authoritative: a child entry names the root too, but
+/// letting a file's *contents* decide which card its row lands on is the one input
+/// to the cross-file join that a file could steer.
+///
+/// Beside the transcript sits `<stem>.meta.json`, the sidecar Claude writes at
+/// spawn. Its **path** is handed to the fold here — the sibling file the
+/// [`new_fold`](SessionSource::new_fold) seam exists to let a source resolve — and
+/// the fold reads it immediately. It re-reads only while the sidecar has still told
+/// it nothing, since the watcher may sight the transcript first and a Sub-agent that
+/// never learns its Errand also never joins its parent's spawn record.
 ///
 /// The **directory** is what classifies: anything Claude writes under `subagents/`
 /// is a Sub-agent's, whatever it comes to name the file. The `agent-` prefix only
@@ -81,7 +89,12 @@ fn claude_sub_agent_fold(path: &Path) -> Option<ClaudeSubAgentFold> {
     }
     let root_session_id = dir.parent()?.file_name()?.to_str()?.to_string();
     let agent_id = stem.strip_prefix("agent-").unwrap_or(stem).to_string();
-    Some(ClaudeSubAgentFold::new(agent_id, root_session_id))
+    let meta_path = dir.join(format!("{stem}.meta.json"));
+    Some(ClaudeSubAgentFold::new(
+        agent_id,
+        root_session_id,
+        meta_path,
+    ))
 }
 
 /// Codex CLI: date-nested `<root>/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` rollouts
