@@ -384,6 +384,72 @@ fn legacy_wire_degrades_to_input_details_on_source() {
 }
 
 #[test]
+fn a_legacy_sub_agent_field_costs_the_badge_and_not_the_card() {
+    // A pre-roster Collector sends the count-and-descriptions object under the old
+    // name. It is unknown to the wire type now, so it is dropped: the session still
+    // decodes and its roster is empty. Renaming is what buys that — a legacy object
+    // arriving where an array is expected would be a deserialization error, and the
+    // whole card would be lost rather than just its badge (ADR 0014).
+    let legacy = serde_json::json!({
+        "id": "old-2", "tool": "claude", "project": "p",
+        "model": null, "branch": null, "cwd": null,
+        "tokensIn": 0, "tokensOut": 0, "activity": null,
+        "lastEventAt": "2026-07-19T10:00:00Z",
+        "status": "active",
+        "subAgents": { "active": 2, "descriptions": ["map the parser"] }
+    })
+    .to_string();
+
+    let wire: WireSession = serde_json::from_str(&legacy).expect("legacy session still decodes");
+    let session: Session = wire.into();
+    assert_eq!(session.id, "old-2");
+    assert!(session.sub_agent_roster.is_empty());
+}
+
+#[test]
+fn a_roster_crosses_the_wire_with_its_errands_intact() {
+    // An Errand is the orchestrator's own one-line summary of what it delegated —
+    // structurally the activity line, which already crosses unreduced — so it is not
+    // bounded or reduced the way Attention Evidence is.
+    let mut s = project(
+        Src::Claude,
+        &[
+            c_tool_use("s1", "toolu_a", "Bash", serde_json::json!({})),
+            c_tool_result("s1", "toolu_a"),
+        ],
+    )
+    .unwrap();
+    s.sub_agent_roster = vec![sessions::SubAgent {
+        id: "a1b2c3".into(),
+        spawn_key: "toolu_a".into(),
+        errand: Some("map the parser end to end".into()),
+        state: sessions::SubAgentState::Running,
+        outcome: None,
+        tokens_in: 1_000,
+        tokens_out: 100,
+        cost_usd: Some(0.25),
+        model: Some("claude-haiku-4-5".into()),
+        depth: 1,
+        last_event_at: Some(ts("2026-07-19T10:00:10Z")),
+    }];
+
+    let wire: WireSession = s.into();
+    let frame = serde_json::to_string(&wire).unwrap();
+    assert!(
+        frame.contains("map the parser end to end"),
+        "the Errand crosses unreduced: {frame}"
+    );
+
+    let back: Session = serde_json::from_str::<WireSession>(&frame).unwrap().into();
+    let entry = &back.sub_agent_roster[0];
+    assert_eq!(entry.errand.as_deref(), Some("map the parser end to end"));
+    assert_eq!(entry.state, sessions::SubAgentState::Running);
+    assert_eq!(entry.spawn_key, "toolu_a");
+    assert_eq!(entry.depth, 1);
+    assert_eq!(entry.model.as_deref(), Some("claude-haiku-4-5"));
+}
+
+#[test]
 fn upsert_is_atomic() {
     // A reconnecting board converges via a whole-Session upsert: cause, since, and
     // evidence travel together in one frame, so a decode can never yield a torn card

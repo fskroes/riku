@@ -285,7 +285,7 @@ mod tests {
             attention: None,
             cost_usd: None,
             diff: None,
-            sub_agents: Default::default(),
+            sub_agent_roster: Vec::new(),
             machine: None,
         }
     }

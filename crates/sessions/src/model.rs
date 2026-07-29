@@ -99,21 +99,72 @@ pub struct DiffStat {
     pub removed: u64,
 }
 
-/// The Sub-agents a parent Agent Session is currently fanning work out to
-/// (CONTEXT.md "Sub-agent"). A Sub-agent never becomes its own card; it surfaces as
-/// a badge on the parent. Only *active* Sub-agents are carried: an entry is added
-/// when a `Task` tool-use spawns one and removed when its matching `tool_result`
-/// arrives, so `active` counts exactly what is running right now. Empty for a source
-/// with no Sub-agent concept (Codex), whose card then simply omits the badge.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Whether a Sub-agent is still running or has finished.
+///
+/// A state on each roster entry rather than a property of the collection: a parent
+/// carries every Sub-agent it has spawned, and a finished Agent Session by
+/// definition has none running — carrying only the active set would show the
+/// sessions that delegated the most work nothing at all (ADR 0014).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubAgentState {
+    Running,
+    Finished,
+}
+
+/// One Sub-agent on its parent's roster (CONTEXT.md "Sub-agent"). Never a card of
+/// its own — it carries no independent human need, since nobody can approve,
+/// answer, or resume it directly, only the Agent Session that sent it (ADR 0014).
+///
+/// Every Sub-agent an Agent Session has spawned stays on that session's roster,
+/// running and finished alike, in spawn order. However deep it was spawned, it
+/// belongs to the **root** Agent Session — the only node in the spawn tree that is
+/// a card.
+///
+/// `PartialEq` only (not `Eq`): `cost_usd` is an `f64`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SubAgents {
-    /// How many Sub-agents are running right now — the badge count.
-    pub active: usize,
-    /// Each active Sub-agent's short description, taken from the spawning `Task`
-    /// tool-use, for the badge's tooltip/expanded view. A Sub-agent whose spawn
-    /// carried no description still counts toward `active` but adds nothing here.
-    pub descriptions: Vec<String>,
+pub struct SubAgent {
+    /// The Sub-agent's own source-native id: Claude's `agentId`, Codex's rollout id.
+    pub id: String,
+    /// The key that joins this entry back to its spawn on the parent's side:
+    /// Claude's spawning tool-use id, Codex's parent thread id. It is what lets the
+    /// roster be the union of what the parent recorded and what the child spent.
+    pub spawn_key: String,
+    /// What this Sub-agent was sent to do (CONTEXT.md "Errand"), verbatim from the
+    /// spawning source. `None` when the source names no purpose — a Sub-agent with
+    /// no Errand is shown unlabelled rather than labelled with something that merely
+    /// looks like a purpose.
+    #[serde(default)]
+    pub errand: Option<String>,
+    pub state: SubAgentState,
+    /// How it ended, in the source's own word (`completed`, `failed`, `stopped`,
+    /// `killed`). Read, never inferred from prose, and `None` when the source states
+    /// none — including for every Running entry. A Sub-agent can resume after
+    /// finishing, so this is the latest word rather than a final one.
+    #[serde(default)]
+    pub outcome: Option<String>,
+    /// This Sub-agent's own token usage. Also counted in its parent's headline
+    /// totals; the roster row is the disclosure of whose spend it was.
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    /// Estimated cost priced at [`model`](Self::model) — the Sub-agent's own, which
+    /// may be cheaper than the orchestrator's. `None` for an unpriced model.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// The model this Sub-agent ran.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// How deep it was spawned (a Sub-agent may spawn its own). Carried and drawn
+    /// nowhere: only 5 of 135 observed Sub-agents nest at all, to a maximum depth of
+    /// 3, so carrying it keeps the nesting tree a later rendering change rather than
+    /// a re-fold (ADR 0014).
+    #[serde(default)]
+    pub depth: u32,
+    /// This Sub-agent's own latest entry timestamp, or `None` when no timestamped
+    /// line has arrived.
+    #[serde(default)]
+    pub last_event_at: Option<DateTime<Utc>>,
 }
 
 /// One Agent Session — a single Claude Code transcript, projected for the UI.
@@ -167,12 +218,19 @@ pub struct Session {
     /// serving/streaming. Omitted-on-wire tolerant (`default` → `None`).
     #[serde(default)]
     pub diff: Option<DiffStat>,
-    /// The Sub-agents this Session is currently fanning work out to — the card's
-    /// Sub-agent badge. Empty for a session that is not fanning out and for a source
-    /// with no Sub-agent concept (Codex). Rides the wire like any other field
-    /// (`default` → empty), so a legacy sender that omits it degrades to no badge.
+    /// Every Sub-agent this Session has spawned, running and finished alike, in
+    /// spawn order — the card's Sub-agent badge and the roster its panel shows.
+    /// Empty for a session that never fanned out.
+    ///
+    /// A **new** wire field name, replacing the legacy count-and-descriptions
+    /// object. An absent field defaults cleanly to an empty roster, but a legacy
+    /// object arriving where an array is expected is a deserialization error, not a
+    /// default — and would cost the whole session rather than just the badge. Under
+    /// a new name the legacy field is simply unknown and dropped, which is the
+    /// degradation ADR 0014 intends. There is no legacy content to preserve: the
+    /// tool-name bug means every legacy Collector has only ever sent an empty one.
     #[serde(default)]
-    pub sub_agents: SubAgents,
+    pub sub_agent_roster: Vec<SubAgent>,
     /// The machine this Session runs on — the host's name (C7). Stamped at the
     /// source: the board's own local runtime (and, later, a Collector on a remote
     /// machine) sets it to the local hostname before the Session leaves the watcher,

@@ -22,7 +22,7 @@
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use axum::response::sse::Event as SseEvent;
 use chrono::{DateTime, Utc};
-use sessions::{Attention, AttentionCause, DiffStat, Event, Session, Status, SubAgents, Tool};
+use sessions::{Attention, AttentionCause, DiffStat, Event, Session, Status, SubAgent, Tool};
 use serde::{Deserialize, Serialize};
 
 /// The `Authorization` scheme prefix for the shared token.
@@ -103,11 +103,22 @@ pub struct WireSession {
     pub diff: Option<DiffStat>,
     #[serde(default)]
     pub machine: Option<String>,
-    /// The parent's active Sub-agents (C-sub-agent badge), carried through the Relay
-    /// like any other field so a remote teammate's board shows fan-out too. `default`
-    /// → empty, so a legacy Collector that omits it degrades to no badge.
+    /// The parent's full Sub-agent roster, carried through the Relay like any other
+    /// field so a teammate's fan-out is as legible as your own. Errands cross
+    /// unreduced: an Errand is the orchestrator's own one-line summary of what it
+    /// delegated — structurally the activity line, which already crosses unreduced —
+    /// not an Attention Evidence excerpt, which is bounded and reduced by design.
+    ///
+    /// A **new** field name. The legacy `subAgents` count-and-descriptions object is
+    /// deliberately left unmodelled: absent, this field defaults to an empty roster,
+    /// whereas a legacy object arriving where an array is expected is a
+    /// deserialization error that would cost the whole session rather than the badge.
+    /// Under a new name the legacy field is unknown and dropped, which is the
+    /// degradation ADR 0014 intends — and there is no legacy content to preserve,
+    /// since the tool-name bug means every legacy Collector has only ever sent an
+    /// empty one. Hence no legacy-capture field of the kind `attentionReason` is.
     #[serde(default)]
-    pub sub_agents: SubAgents,
+    pub sub_agent_roster: Vec<SubAgent>,
     /// A legacy (pre-ADR-0010) Collector sends `attentionReason` ("waiting" |
     /// "error") in place of `attention`. Captured only so the board can detect and
     /// degrade legacy Attention; never re-serialized onto the wire.
@@ -145,7 +156,7 @@ impl From<Session> for WireSession {
             cost_usd: s.cost_usd,
             diff: s.diff,
             machine: s.machine,
-            sub_agents: s.sub_agents,
+            sub_agent_roster: s.sub_agent_roster,
             legacy_attention_reason: None,
         }
     }
@@ -178,7 +189,7 @@ impl From<WireSession> for Session {
             cost_usd: w.cost_usd,
             diff: w.diff,
             machine: w.machine,
-            sub_agents: w.sub_agents,
+            sub_agent_roster: w.sub_agent_roster,
         }
     }
 }
@@ -366,7 +377,7 @@ mod tests {
             cost_usd: None,
             diff: None,
             machine: Some(machine.into()),
-            sub_agents: SubAgents::default(),
+            sub_agent_roster: Vec::new(),
         }
         .into()
     }

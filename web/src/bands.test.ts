@@ -25,7 +25,7 @@ function session(
     attention: null,
     costUsd: null,
     diff: null,
-    subAgents: { active: 0, descriptions: [] },
+    subAgentRoster: [],
     machine: null,
     ...over,
   };

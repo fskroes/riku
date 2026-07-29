@@ -16,7 +16,7 @@ use tracing::warn;
 use crate::attention::{AttentionReducer, NeedEvidence, Observation};
 use crate::fold::{assemble, project_from_cwd, Fold, Folded, Projection, SubAgentProjection};
 use crate::liveness::ProcessLiveness;
-use crate::model::{AttentionCause, Session, SubAgents, Tool};
+use crate::model::{AttentionCause, Session, SubAgent, SubAgentState, Tool};
 use crate::parse::{parse_entry, Entry, ToolUseInfo};
 
 /// The Claude Code `Task` tool spawns a Sub-agent; its tool-use `id` correlates the
@@ -226,14 +226,29 @@ impl Fold for Accumulator {
             sub_tokens_in: self.sub_tokens_in,
             sub_tokens_out: self.sub_tokens_out,
             sub_agent_cost_usd: self.sub_agent_cost_usd,
-            sub_agents: SubAgents {
-                active: self.active_sub_agents.len(),
-                descriptions: self
-                    .active_sub_agents
-                    .iter()
-                    .filter_map(|(_, desc)| desc.clone())
-                    .collect(),
-            },
+            // The legacy `Task`-derived set, carried through the new roster shape
+            // unchanged. It is empty for every transcript either tool writes today —
+            // zero `Task` tool-uses exist in the corpus — so no real card gains a
+            // badge here. Reading the spawns Claude and Codex actually record, with
+            // each Sub-agent's own spend and outcome, is the work of #74 and #76,
+            // which replace this mapping outright.
+            sub_agent_roster: self
+                .active_sub_agents
+                .iter()
+                .map(|(id, description)| SubAgent {
+                    id: id.clone(),
+                    spawn_key: id.clone(),
+                    errand: description.clone(),
+                    state: SubAgentState::Running,
+                    outcome: None,
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cost_usd: None,
+                    model: None,
+                    depth: 0,
+                    last_event_at: None,
+                })
+                .collect(),
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
             attention: self.attention.current(),
@@ -582,9 +597,12 @@ mod tests {
     }
 
     #[test]
-    fn active_sub_agent_count_rises_on_task_and_falls_on_result() {
+    fn the_roster_carries_each_spawn_with_its_errand() {
+        // The legacy `Task` path, read through the roster shape. The rules it encodes
+        // — a spawn is a roster entry, a `tool_result` retires it — are the ones #74
+        // replaces against the records Claude Code actually writes; what this asserts
+        // is the pipe, not the population.
         let mut fs = claude();
-        // Two Task spawns → two active Sub-agents, each with its description.
         let mut data = task_spawn("toolu_a", "map the parser");
         data.push('\n');
         data.push_str(&task_spawn("toolu_b", "audit the tests"));
@@ -593,34 +611,56 @@ mod tests {
         let s = fs
             .build(ts("2026-07-19T10:00:20Z"), ts("2026-07-19T10:00:30Z"))
             .unwrap();
-        assert_eq!(s.sub_agents.active, 2);
+        // In spawn order, each Running, each carrying the Errand verbatim.
         assert_eq!(
-            s.sub_agents.descriptions,
-            vec!["map the parser".to_string(), "audit the tests".to_string()]
+            s.sub_agent_roster
+                .iter()
+                .map(|a| (a.errand.as_deref(), a.state))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("map the parser"), SubAgentState::Running),
+                (Some("audit the tests"), SubAgentState::Running),
+            ]
         );
+        // The join key back to the spawn travels with the entry.
+        assert_eq!(s.sub_agent_roster[0].spawn_key, "toolu_a");
+        // Depth is carried on every entry (and drawn nowhere).
+        assert!(s.sub_agent_roster.iter().all(|a| a.depth == 0));
 
-        // The first Sub-agent's tool_result arrives → count drops to one.
         fs.feed(format!("{}\n", task_result("toolu_a")).as_bytes());
         let s = fs
             .build(ts("2026-07-19T10:00:40Z"), ts("2026-07-19T10:00:50Z"))
             .unwrap();
-        assert_eq!(s.sub_agents.active, 1);
-        assert_eq!(s.sub_agents.descriptions, vec!["audit the tests".to_string()]);
+        assert_eq!(s.sub_agent_roster.len(), 1);
+        assert_eq!(s.sub_agent_roster[0].errand.as_deref(), Some("audit the tests"));
 
-        // The second completes → no badge.
         fs.feed(format!("{}\n", task_result("toolu_b")).as_bytes());
         let s = fs
             .build(ts("2026-07-19T10:00:55Z"), ts("2026-07-19T10:01:00Z"))
             .unwrap();
-        assert_eq!(s.sub_agents.active, 0);
-        assert!(s.sub_agents.descriptions.is_empty());
+        assert!(s.sub_agent_roster.is_empty());
+    }
+
+    #[test]
+    fn a_spawn_that_names_no_purpose_carries_no_errand() {
+        // Errand is absent rather than substituted: a Sub-agent with no stated
+        // purpose is shown unlabelled, never labelled with something that merely
+        // looks like one.
+        let mut fs = claude();
+        let line = r#"{"type":"assistant","sessionId":"s1","cwd":"/a/foo","timestamp":"2026-07-19T10:00:00Z","message":{"model":"claude-opus-4-8","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_x","name":"Task","input":{"subagent_type":"Explore"}}]}}"#;
+        fs.feed(format!("{line}\n").as_bytes());
+        let s = fs
+            .build(ts("2026-07-19T10:00:20Z"), ts("2026-07-19T10:00:30Z"))
+            .unwrap();
+        assert_eq!(s.sub_agent_roster.len(), 1);
+        assert!(s.sub_agent_roster[0].errand.is_none());
     }
 
     #[test]
     fn spawning_a_sub_agent_is_working_not_attention_or_stale() {
         // A `Task` spawn ends the turn with stop_reason tool_use, but it is the agent
         // fanning out — not a human-input wait — so the card must not enter Attention.
-        // And with a Sub-agent still active the parent stays Active even when its own
+        // And with a Sub-agent still Running the parent stays Active even when its own
         // transcript has been quiet well past the staleness window.
         let mut fs = claude();
         fs.feed(format!("{}\n", task_spawn("toolu_a", "grind on it")).as_bytes());
@@ -629,7 +669,8 @@ mod tests {
             .unwrap();
         assert_eq!(s.status, Status::Active);
         assert!(s.attention.is_none());
-        assert_eq!(s.sub_agents.active, 1);
+        assert_eq!(s.sub_agent_roster.len(), 1);
+        assert_eq!(s.sub_agent_roster[0].state, SubAgentState::Running);
     }
 
     #[test]

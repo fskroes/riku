@@ -377,7 +377,7 @@ fn projects(sessions: &[Session]) -> Vec<(String, String, DateTime<Utc>)> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use sessions::{Status, SubAgents, Tool};
+    use sessions::{Status, Tool};
 
     const CWD: &str = "/Users/x/repos/foo";
 
@@ -402,7 +402,7 @@ mod tests {
             attention: None,
             cost_usd: None,
             diff: None,
-            sub_agents: SubAgents::default(),
+            sub_agent_roster: Vec::new(),
             machine: None,
         }
     }
