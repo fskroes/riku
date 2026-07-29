@@ -113,7 +113,13 @@ export interface LinkedSession {
 export interface WorkItem {
   id: string;
   title: string;
+  // The status the board shows. A live Work Link raises an unmarked item to
+  // `doing`, since no source can say "an agent is on this right now" (#66).
   status: WorkStatus;
+  // What the WORK.md marker or GitHub label itself said. Differs from `status`
+  // only when a live Work Link raised it, which is what the card discloses so the
+  // plan's own word is never quietly overwritten.
+  sourceStatus: WorkStatus;
   effort: string | null;
   blockedBy: string[];
   session: LinkedSession | null;

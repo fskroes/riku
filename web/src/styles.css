@@ -286,6 +286,10 @@ body {
 .done-line { display: flex; align-items: center; gap: 7px; margin-top: 9px; color: var(--ink-muted); font-size: 12px; }
 .done-line.faint { color: var(--ink-faint); }
 
+/* what the source itself still says, when a live Work Link raised the status the
+   board shows (#66) — quieter than the card's own facts, since it is the aside */
+.src-status { margin-top: 7px; color: var(--ink-faint); font-size: 11px; }
+
 /* the linked Agent Session chip (the Work Link, made visible) */
 .link-sess { display: flex; width: 100%; align-items: center; gap: 8px; margin-top: 11px; padding: 8px 10px; border: 1px solid var(--hairline); border-radius: 8px; background: rgba(43, 36, 26, 0.04); cursor: pointer; text-align: left; }
 .link-sess:hover { background: var(--ghost); }

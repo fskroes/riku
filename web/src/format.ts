@@ -1,6 +1,6 @@
 // Small display helpers shared by the Board.
 
-import type { AttentionCause, DiffStat } from "./types";
+import type { AttentionCause, DiffStat, WorkSource, WorkStatus } from "./types";
 
 /** The label for each Attention cause. Text carries the triage meaning; all causes
  *  share one visual priority (ADR 0010), so there is no per-cause colour or icon. */
@@ -62,6 +62,33 @@ export function diffLabel(diff: DiffStat): string {
 /** The source badge label for a project's Work Items. */
 export function sourceLabel(source: "workMd" | "github"): string {
   return source === "workMd" ? "WORK.md" : "GitHub Issues";
+}
+
+/** The visible name of each Work Item Status, as the kanban's own column heads read
+ *  it. Distinct from `graph.ts`'s lowercase `statusLabel`, which is built to sit
+ *  mid-sentence inside an accessible name. */
+const COLUMN_LABEL: Record<WorkStatus, string> = {
+  todo: "To do",
+  doing: "In progress",
+  done: "Done",
+};
+
+export function columnLabel(status: WorkStatus): string {
+  return COLUMN_LABEL[status];
+}
+
+/** What a Work Item's own source still says, when a live Work Link has raised the
+ *  status the board shows (#66): `To do in WORK.md`. `null` when the two agree —
+ *  a card speaks up only about a real difference, so the derived status never
+ *  quietly overwrites the plan's word, and the two can never silently contradict
+ *  each other the way the column and the chip used to. */
+export function sourceStatusNote(
+  status: WorkStatus,
+  sourceStatus: WorkStatus,
+  source: WorkSource,
+): string | null {
+  if (status === sourceStatus) return null;
+  return `${columnLabel(sourceStatus)} in ${sourceLabel(source)}`;
 }
 
 /** A DOM-safe element id from an arbitrary Work Item id (`#5` → `item-5`). */

@@ -31,6 +31,10 @@ pub enum WorkSourceKind {
 /// so a `WORK.md` in-progress marker (`[~]`, `[-]`, `[/]`) or a GitHub
 /// `in-progress`/`doing` label produces it; everything else is `Todo` (open) or
 /// `Done` (checked / closed).
+///
+/// This is what the *source* said. A live Work Link can raise a `Todo` item to
+/// `Doing` on the board — see `status_with_work_link` in `crates/board/src/http.rs`,
+/// which owns that overlay because only the board holds the sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkStatus {

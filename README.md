@@ -137,6 +137,13 @@ When a same-project session is on a branch containing an item's id — for examp
 that item's **Work Link**. This association is inferred from the current branch
 name only: it is not stored or manually editable.
 
+A Work Link that is **live** — the session is running or waiting on you — also moves
+its item into In progress, without you marking anything. Neither `WORK.md` nor a
+GitHub label can say "an agent is on this right now", so Riku answers that from the
+session itself. The card still shows what the source said (`○ To do in WORK.md`), so
+the plan's own word is never quietly overwritten, and an item marked Done stays Done
+however busy its branch.
+
 ![The dependency graph: critical path flagged, done items green](docs/images/work-graph.png)
 
 ## Build from source
