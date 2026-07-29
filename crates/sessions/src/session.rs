@@ -1,16 +1,20 @@
-//! Two things live here: the Claude Code [`Fold`] ([`Accumulator`]) and the shared
-//! incremental tail ([`FileState`]) that drives any source's fold.
+//! Three things live here: the two Claude Code [`Fold`]s — [`Accumulator`] for an
+//! Agent Session transcript and [`ClaudeSubAgentFold`] for a Sub-agent's own — and
+//! the shared incremental tail ([`FileState`]) that drives any source's fold.
 //!
 //! [`Accumulator`] decodes Claude Code transcript entries and folds them into a
-//! [`Projection`]. [`FileState`] is source-agnostic: it owns the byte-offset
-//! bookkeeping, truncation reset, malformed-line handling, and the final
-//! [`Session`] assembly (status via [`status_for`]) for whatever [`Fold`] it holds.
+//! [`Projection`]; [`ClaudeSubAgentFold`] folds a child file into a
+//! [`SubAgentProjection`], which is never a card. Which of the two a file gets is
+//! the Session Source's decision, taken from the path (see `source.rs`).
+//! [`FileState`] is source-agnostic: it owns the byte-offset bookkeeping,
+//! truncation reset, malformed-line handling, and the final [`Session`] assembly
+//! (status via [`status_for`]) for whatever [`Fold`] it holds.
 
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use crate::attention::{AttentionReducer, NeedEvidence, Observation};
-use crate::fold::{assemble, project_from_cwd, Fold, Projection};
+use crate::fold::{assemble, project_from_cwd, Fold, Folded, Projection, SubAgentProjection};
 use crate::liveness::ProcessLiveness;
 use crate::model::{AttentionCause, Session, SubAgents, Tool};
 use crate::parse::{parse_entry, Entry, ToolUseInfo};
@@ -68,6 +72,13 @@ impl Accumulator {
         // per *this* entry's model, since a Sub-agent may run a cheaper one. Its
         // model, activity, id, and attention lifecycle never touch the parent (the
         // activity line stays the orchestrator's own words).
+        //
+        // This covers only the older inline layout. Claude Code now writes each
+        // Sub-agent to its own file, folded by `ClaudeSubAgentFold`, and ADR 0014
+        // measured zero `isSidechain` entries left in any parent transcript — so
+        // this branch has not fired since the layout changed. Retiring it (and the
+        // parent's own sub-token accounting with it) is the roster ticket's job,
+        // not this seam's.
         if entry.is_sidechain {
             if entry.is_assistant {
                 self.sub_tokens_in += entry.input_tokens;
@@ -201,9 +212,9 @@ impl Fold for Accumulator {
         *self = Accumulator::default();
     }
 
-    fn projection(&self) -> Option<Projection> {
+    fn projection(&self) -> Option<Folded> {
         let id = self.id.clone()?;
-        Some(Projection {
+        Some(Folded::AgentSession(Projection {
             id,
             tool: Tool::Claude,
             project: self.project.clone().unwrap_or_default(),
@@ -226,7 +237,110 @@ impl Fold for Accumulator {
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
             attention: self.attention.current(),
-        })
+        }))
+    }
+}
+
+/// The Claude Code Sub-agent fold: one child transcript at
+/// `<project>/<root-uuid>/subagents/agent-<agentId>.jsonl`.
+///
+/// It folds the child in full — every assistant turn's usage, priced at the child's
+/// own (possibly cheaper) model — and produces a [`SubAgentProjection`], which is
+/// not a card. Both ids come from the path, so a Sub-agent has an identity from the
+/// moment its file is discovered; a child entry's `sessionId`, which Claude stamps
+/// with the *root* session's id at any spawn depth, supersedes the path's root id
+/// once one arrives.
+#[derive(Debug)]
+pub struct ClaudeSubAgentFold {
+    id: String,
+    /// The root session id the path states — the containing directory's name.
+    root_from_path: String,
+    /// The root session id a child entry stated, which wins over the path's.
+    root_from_entry: Option<String>,
+    /// Model of the latest assistant entry in this child's own transcript.
+    model: Option<String>,
+    tokens_in: u64,
+    tokens_out: u64,
+    /// Running cost, priced per assistant entry's own model as it is folded in.
+    cost_usd: f64,
+    latest_timestamp: Option<DateTime<Utc>>,
+}
+
+impl ClaudeSubAgentFold {
+    /// A fold for the Sub-agent `id`, rooted at `root_session_id` (both read from
+    /// the path by the Session Source).
+    pub fn new(id: String, root_session_id: String) -> Self {
+        ClaudeSubAgentFold {
+            id,
+            root_from_path: root_session_id,
+            root_from_entry: None,
+            model: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+            latest_timestamp: None,
+        }
+    }
+}
+
+impl Fold for ClaudeSubAgentFold {
+    fn apply_line(&mut self, line: &str) -> bool {
+        if line.trim().is_empty() {
+            return true;
+        }
+        let entry = match parse_entry(line) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return true,
+            Err(_) => return false,
+        };
+        if let Some(ts) = entry.timestamp {
+            if self.latest_timestamp.is_none_or(|cur| ts >= cur) {
+                self.latest_timestamp = Some(ts);
+            }
+        }
+        // Every entry in this file is the Sub-agent's own traffic (Claude marks it
+        // `isSidechain`), so the flag decides nothing here — the path already did.
+        if let Some(id) = entry.session_id {
+            self.root_from_entry = Some(id);
+        }
+        if entry.is_assistant {
+            self.tokens_in += entry.input_tokens;
+            self.tokens_out += entry.output_tokens;
+            if let Some(cost) = crate::pricing::estimate_cost_usd(
+                entry.model.as_deref(),
+                entry.input_tokens,
+                entry.output_tokens,
+            ) {
+                self.cost_usd += cost;
+            }
+            if entry.model.is_some() {
+                self.model = entry.model;
+            }
+        }
+        true
+    }
+
+    /// Throw away what was folded, but not the identity the path stated — a rewrite
+    /// re-reads the same Sub-agent's file.
+    fn reset(&mut self) {
+        *self = ClaudeSubAgentFold::new(self.id.clone(), self.root_from_path.clone());
+    }
+
+    fn projection(&self) -> Option<Folded> {
+        Some(Folded::SubAgent(SubAgentProjection {
+            id: self.id.clone(),
+            root_session_id: Some(
+                self.root_from_entry
+                    .clone()
+                    .unwrap_or_else(|| self.root_from_path.clone()),
+            ),
+            tool: Tool::Claude,
+            model: self.model.clone(),
+            tokens_in: self.tokens_in,
+            tokens_out: self.tokens_out,
+            cost_usd: self.cost_usd,
+            last_event_at: self.latest_timestamp,
+        }))
     }
 }
 
@@ -292,7 +406,8 @@ impl FileState {
 
     /// Build the UI [`Session`], given the file's mtime and the session's process
     /// verdict (together they drive status — see [`status_for`]). Returns `None`
-    /// if the fold has no projection yet.
+    /// if the fold has no projection yet, or produced a Sub-agent — which is folded
+    /// in full but is not a card.
     pub fn build_with_liveness(
         &self,
         mtime: DateTime<Utc>,
@@ -301,7 +416,10 @@ impl FileState {
     ) -> Option<Session> {
         // The projection is this fold's job; turning it into a card is the shared,
         // pure `assemble` seam (see `fold::assemble`), which every source crosses.
-        Some(assemble(self.fold.projection()?, mtime, now, liveness))
+        match self.fold.projection()? {
+            Folded::AgentSession(p) => Some(assemble(p, mtime, now, liveness)),
+            Folded::SubAgent(_) => None,
+        }
     }
 }
 
@@ -314,6 +432,7 @@ fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::model::{AttentionCause, Status};
+    use crate::source::SessionSource;
 
     /// The cause of a session's current Attention, or `None`.
     fn cause(s: &Session) -> Option<AttentionCause> {
@@ -322,6 +441,89 @@ mod tests {
 
     fn claude() -> FileState {
         FileState::new(Box::new(Accumulator::default()))
+    }
+
+    /// A Claude Sub-agent's own transcript, at the path Claude Code writes it to:
+    /// `<project>/<root-uuid>/subagents/agent-<agentId>.jsonl`.
+    const SUB_AGENT_PATH: &str =
+        "/r/-Users-x-repos-foo/11111111-2222-3333-4444-555555555555/subagents/agent-a1b2c3.jsonl";
+
+    /// An Agent Session transcript, flat under its project directory.
+    const SESSION_PATH: &str = "/r/-Users-x-repos-foo/deadbeef.jsonl";
+
+    /// The fold the Claude Session Source hands back for `path` — the seam where a
+    /// source decides which of the two things it is about to read.
+    fn claude_fold(path: &str) -> Box<dyn Fold> {
+        crate::source::ClaudeSource::new("/r".into()).new_fold(std::path::Path::new(path))
+    }
+
+    /// One entry from a Sub-agent's own transcript file: `isSidechain`, the *root*
+    /// session's id (Claude stamps it on every child entry, at any depth), and the
+    /// child's own model — which may be cheaper than the orchestrator's.
+    fn sub_agent_assistant(root: &str, model: &str, tin: u64, tout: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":true,"agentId":"a1b2c3","sessionId":"{root}","cwd":"/Users/x/repos/foo","gitBranch":"main","timestamp":"2026-07-19T10:00:10Z","message":{{"model":"{model}","usage":{{"input_tokens":{tin},"output_tokens":{tout}}},"content":[{{"type":"text","text":"sub work"}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_sub_agent_transcript_folds_in_full_and_states_a_sub_agent_projection() {
+        // Folded in full — identity assigned, spend counted — and *stated* as a
+        // Sub-agent rather than coming back empty (ADR 0014).
+        let mut fold = claude_fold(SUB_AGENT_PATH);
+        assert!(fold.apply_line(&sub_agent_assistant("root-1", "claude-haiku-4-5", 200, 20)));
+        assert!(fold.apply_line(&sub_agent_assistant("root-1", "claude-haiku-4-5", 100, 10)));
+
+        let Some(Folded::SubAgent(sub)) = fold.projection() else {
+            panic!("a Sub-agent transcript states a Sub-agent projection");
+        };
+        assert_eq!(sub.id, "a1b2c3");
+        assert_eq!(sub.root_session_id.as_deref(), Some("root-1"));
+        assert_eq!(sub.tool, Tool::Claude);
+        assert_eq!(sub.model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(sub.tokens_in, 300);
+        assert_eq!(sub.tokens_out, 30);
+        assert_eq!(sub.last_event_at, Some(ts("2026-07-19T10:00:10Z")));
+    }
+
+    #[test]
+    fn a_sub_agent_transcript_yields_no_card() {
+        // Not because the fold came back empty, but because a Sub-agent projection
+        // is not a card.
+        let mut fs = FileState::new(claude_fold(SUB_AGENT_PATH));
+        let entry = sub_agent_assistant("root-1", "claude-haiku-4-5", 200, 20);
+        fs.feed(format!("{entry}\n").as_bytes());
+        assert!(fs
+            .build(ts("2026-07-19T10:00:20Z"), ts("2026-07-19T10:00:30Z"))
+            .is_none());
+    }
+
+    #[test]
+    fn a_sub_agent_identity_comes_from_the_path_before_a_line_arrives() {
+        // The path states both ids, so a Sub-agent has an identity from the moment
+        // its file is discovered — the containing directory is the root's id.
+        let fold = claude_fold(SUB_AGENT_PATH);
+        let Some(Folded::SubAgent(sub)) = fold.projection() else {
+            panic!("a Sub-agent transcript states a Sub-agent projection");
+        };
+        assert_eq!(sub.id, "a1b2c3");
+        assert_eq!(
+            sub.root_session_id.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+    }
+
+    #[test]
+    fn an_agent_session_path_still_folds_into_a_card() {
+        // The other side of the same classification: a flat transcript under a
+        // project directory is an Agent Session, and still becomes a card.
+        let mut fs = FileState::new(claude_fold(SESSION_PATH));
+        fs.feed(format!("{}\n", assistant("s1", "hello", 10, 2)).as_bytes());
+        let s = fs
+            .build(ts("2026-07-19T10:00:20Z"), ts("2026-07-19T10:00:30Z"))
+            .unwrap();
+        assert_eq!(s.id, "s1");
+        assert_eq!(s.tokens_in, 10);
     }
 
     fn ts(s: &str) -> DateTime<Utc> {

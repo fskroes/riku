@@ -14,6 +14,8 @@
 //! `tests/integration.rs` (snapshot-on-connect + whole-Session upserts) and asserted
 //! atomically in [`upsert_is_atomic`].
 
+use std::path::Path;
+
 use chrono::{DateTime, Utc};
 use relay::wire::{WireEvent, WireSession};
 use sessions::{
@@ -51,12 +53,15 @@ fn ts(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
 
-/// A fresh fold for `src`. The root path is irrelevant to folding (it only drives
-/// discovery), so any placeholder works.
+/// A fresh fold for `src`. Every case here is an Agent Session transcript, so the
+/// path is a placeholder shaped like one — a source reads it to decide which of the
+/// two things it is about to fold, but nothing else about it matters to folding.
 fn file_state(src: Src) -> FileState {
     let fold = match src {
-        Src::Claude => ClaudeSource::new("/x".into()).new_fold(),
-        Src::Codex => CodexSource::new("/x".into()).new_fold(),
+        Src::Claude => ClaudeSource::new("/x".into()).new_fold(Path::new("/x/p/s.jsonl")),
+        Src::Codex => {
+            CodexSource::new("/x".into()).new_fold(Path::new("/x/2026/07/19/rollout-1.jsonl"))
+        }
     };
     FileState::new(fold)
 }

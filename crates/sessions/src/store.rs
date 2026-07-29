@@ -159,7 +159,7 @@ impl SessionStore {
         // First sighting: bind this path to the source that owns it. A path no
         // source claims (e.g. a stray file under a root) is ignored.
         if !self.files.contains_key(path) {
-            let fold = self.source_for(path)?.new_fold();
+            let fold = self.source_for(path)?.new_fold(path);
             self.files.insert(
                 path.to_path_buf(),
                 FileEntry {

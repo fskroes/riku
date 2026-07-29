@@ -76,10 +76,18 @@ _Avoid_: log, history, notes, agent summary
 The board's reading of the Project Journal: one card per thread of effort — a project's journal and the Agent Sessions behind it — ordered by Handoff Status, carrying what the authors say was done (grouped by day), the next step, the entry's age, and the resume command Riku builds itself. The derived transcript timeline stays beside the prose, since the journal annotates ground truth rather than replacing it; the day view is a lens over the same cards, not the home. All journal prose is rendered as text and never executed (ADR 0013).
 _Avoid_: activity feed, digest, standup, summary view
 
+**Band**:
+A labelled, counted run of rows on a reading surface, standing for one group within it: the Board's Running in the background, Up next, and Finished, and the Recap's Older journals. The label names the group and the count says how much is there, so where a Band is capped the count discloses the cap (`5 of 12`) rather than letting a partial list read as the whole. A Band is not a status group — the Board's oldest Attention is the primary decision and stands outside every Band, while the needs behind it queue in Up next — and it never holds Work Items, which sit in the kanban's status Columns instead (ADR 0005).
+_Avoid_: column (the Work Items kanban only), lane, section, group
+
 **Session Source**:
 An adapter that discovers and reads Agent Sessions for one agent tool (Claude Code, Codex CLI). Each supported tool has exactly one Session Source.
 _Avoid_: provider, integration, connector
 
 **Sub-agent**:
-Work an Agent Session fans out to a child agent (a Claude Code `Task` — transcript-marked `isSidechain`). A Sub-agent is never its own card: it surfaces as a badge on the parent's card counting the currently-active ones, with each active one's short description in the badge tooltip. Its token usage and cost fold into the parent (cost priced per the Sub-agent's own model, since it may run a cheaper one); a Sub-agent event keeps the parent looking alive. Codex CLI has no comparable concept, so its cards carry none.
-_Avoid_: sidechain (transcript jargon only), subtask, child session
+Work an Agent Session fans out to a child agent that then runs on its own. A Sub-agent is never its own card, because it carries no independent human need: nobody can approve, answer, or resume it directly — only the Agent Session that sent it can. It is folded in full all the same. Every Sub-agent a session has spawned stays on that session's roster whether running or finished, each with its Errand, what it spent, and how it ended in the source's own word; a Sub-agent that failed is reported to the agent, not to the person, so it never moves the parent to Attention. Its tokens and cost belong to the parent's totals (priced per the Sub-agent's own model, since it may run a cheaper one), and a running Sub-agent keeps the parent looking alive while the parent's own transcript is quiet. A Sub-agent can resume after finishing, so how it ended is the latest word rather than a final one. However deep it was spawned, a Sub-agent belongs to the root Agent Session — the only one of them that is a card. Both Claude Code and Codex CLI have Sub-agents.
+_Avoid_: sidechain (transcript jargon only), subtask, child session, the spawning tool's own name (it changes)
+
+**Errand**:
+What a Sub-agent was sent to do, taken verbatim from the spawning source and never summarised, inferred, or stood in for. Absent when the source names no purpose — a Sub-agent with no Errand is shown unlabelled rather than labelled with something that merely looks like a purpose.
+_Avoid_: description, prompt, task, assignment
