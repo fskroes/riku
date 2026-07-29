@@ -85,5 +85,9 @@ An adapter that discovers and reads Agent Sessions for one agent tool (Claude Co
 _Avoid_: provider, integration, connector
 
 **Sub-agent**:
-Work an Agent Session fans out to a child agent (a Claude Code `Task` — transcript-marked `isSidechain`). A Sub-agent is never its own card: it surfaces as a badge on the parent's card counting the currently-active ones, with each active one's short description in the badge tooltip. Its token usage and cost fold into the parent (cost priced per the Sub-agent's own model, since it may run a cheaper one); a Sub-agent event keeps the parent looking alive. Codex CLI has no comparable concept, so its cards carry none.
-_Avoid_: sidechain (transcript jargon only), subtask, child session
+Work an Agent Session fans out to a child agent that then runs on its own. A Sub-agent is never its own card, because it carries no independent human need: nobody can approve, answer, or resume it directly — only the Agent Session that sent it can. It is folded in full all the same. Every Sub-agent a session has spawned stays on that session's roster whether running or finished, each with its Errand, what it spent, and how it ended in the source's own word; a Sub-agent that failed is reported to the agent, not to the person, so it never moves the parent to Attention. Its tokens and cost belong to the parent's totals (priced per the Sub-agent's own model, since it may run a cheaper one), and a running Sub-agent keeps the parent looking alive while the parent's own transcript is quiet. A Sub-agent can resume after finishing, so how it ended is the latest word rather than a final one. However deep it was spawned, a Sub-agent belongs to the root Agent Session — the only one of them that is a card. Both Claude Code and Codex CLI have Sub-agents.
+_Avoid_: sidechain (transcript jargon only), subtask, child session, the spawning tool's own name (it changes)
+
+**Errand**:
+What a Sub-agent was sent to do, taken verbatim from the spawning source and never summarised, inferred, or stood in for. Absent when the source names no purpose — a Sub-agent with no Errand is shown unlabelled rather than labelled with something that merely looks like a purpose.
+_Avoid_: description, prompt, task, assignment
