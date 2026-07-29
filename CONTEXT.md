@@ -45,8 +45,12 @@ A unit of project work to be done (a GitHub Issue or an entry in a Work Map file
 _Avoid_: task, ticket, todo, issue (except when specifically a GitHub Issue)
 
 **Work Link**:
-An ephemeral association between a Work Item and the most recently active local Agent Session whose git branch contains that item's id. It is inferred from the current branch name only; it is neither stored nor manually editable.
+An ephemeral association between a Work Item and the most recently active local Agent Session whose git branch contains that item's id. It is inferred from the current branch name only; it is neither stored nor manually editable. A Work Link outlives its session's activity — it survives the session going Finished — so its existence alone never means the item is being worked; only a **live** Work Link (see Work Item Status) does.
 _Avoid_: assignment, mapping
+
+**Work Item Status**:
+Which of To do / In progress / Done the board shows for a Work Item. A source can only assert To do or Done on its own — In progress exists there just as a hand-written Work Map marker (`[~]`, `[-]`, `[/]`) or a GitHub `in-progress`/`doing` label — so a **live** Work Link, one whose Agent Session is Running or in Attention, raises an unmarked item to In progress from evidence instead (#66). The source's own word travels beside it and the card discloses any difference, so the plan is never silently overwritten; Done is never overridden, since work continuing on a branch must not un-complete an item.
+_Avoid_: lane, state, progress
 
 **Work Map**:
 A Markdown checklist (`WORK.md`) listing a project's Work Items, each with a short stable id (`W-14`). A project's single source of Work Items: if `WORK.md` exists it wins; otherwise GitHub Issues is used. Never both.
