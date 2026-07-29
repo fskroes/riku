@@ -21,7 +21,9 @@ use futures::StreamExt;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sessions::{DeepLink, Event, Handoff, Session, Status, Tool, WorkItem, WorkSourceKind};
+use sessions::{
+    DeepLink, Event, Handoff, Session, Status, Tool, WorkItem, WorkSourceKind, WorkStatus,
+};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::open::{is_safe_session_id, Launcher};
@@ -224,11 +226,17 @@ struct WorkResponse {
 
 /// A Work Item enriched with its Work Link — the [`LinkedSession`] whose branch
 /// this item's id was inferred from, if any.
+///
+/// The flattened `status` is the one the board shows, which a live Work Link can
+/// raise to Doing (see [`status_with_work_link`]); `sourceStatus` is what the
+/// `WORK.md` marker or GitHub label actually said. Both travel so the card can
+/// disclose the difference — the plan's own word is never quietly overwritten.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkItemOut {
     #[serde(flatten)]
     item: WorkItem,
+    source_status: WorkStatus,
     session: Option<LinkedSession>,
 }
 
@@ -272,9 +280,15 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
     let items = map
         .items
         .into_iter()
-        .map(|item| {
+        .map(|mut item| {
             let session = link_session(&item, &candidates);
-            WorkItemOut { item, session }
+            let source_status = item.status;
+            item.status = status_with_work_link(source_status, session.as_ref().map(|s| s.status));
+            WorkItemOut {
+                item,
+                source_status,
+                session,
+            }
         })
         .collect();
 
@@ -284,6 +298,30 @@ async fn work(State(state): State<AppState>, Query(q): Query<WorkQuery>) -> impl
         items,
     })
     .into_response()
+}
+
+/// The status the board shows for a Work Item, given the status of its Work Link
+/// (`None` when nothing links).
+///
+/// A source has no way to say "an agent is on this right now" — Doing exists only
+/// as a hand-written `WORK.md` marker or a GitHub label, so an item being worked
+/// sat in To do until somebody remembered to mark it (#66). A **live** Work Link
+/// answers that from evidence instead.
+///
+/// Live means Active or Attention: an agent waiting on the user is still carrying
+/// the item, and it is the common mid-task state, so excluding it would drop the
+/// card back to To do every time the agent asked a question. Finished is not live —
+/// a Work Link is inferred from the branch alone and outlives the session's own
+/// activity, so "has a Work Link" can never mean "is being worked". Done is left
+/// alone: the source asserted completion, and work continuing on the branch
+/// afterwards must not un-complete the item.
+fn status_with_work_link(source: WorkStatus, link: Option<Status>) -> WorkStatus {
+    let live = matches!(link, Some(Status::Active) | Some(Status::Attention));
+    if live && source == WorkStatus::Todo {
+        WorkStatus::Doing
+    } else {
+        source
+    }
 }
 
 /// The Work Link for `item`: the most-recently-active candidate session whose
@@ -506,7 +544,66 @@ async fn missing_dist() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::branch_links;
+    use super::{branch_links, status_with_work_link};
+    use sessions::{Status, WorkStatus};
+
+    #[test]
+    fn a_live_work_link_carries_an_unmarked_item_into_doing() {
+        // The #66 fix: nobody wrote the marker, but an agent is on it.
+        assert_eq!(
+            status_with_work_link(WorkStatus::Todo, Some(Status::Active)),
+            WorkStatus::Doing
+        );
+        // An agent waiting on the user is still working the item — and this is the
+        // common mid-task state, so excluding it would flap the card back to To do
+        // every time the agent asks a question.
+        assert_eq!(
+            status_with_work_link(WorkStatus::Todo, Some(Status::Attention)),
+            WorkStatus::Doing
+        );
+    }
+
+    #[test]
+    fn a_session_that_has_gone_quiet_does_not_claim_the_item() {
+        // A Work Link survives the session going Finished (it is inferred from the
+        // branch alone), so "has a Work Link" cannot mean "is being worked".
+        assert_eq!(
+            status_with_work_link(WorkStatus::Todo, Some(Status::Finished)),
+            WorkStatus::Todo
+        );
+        assert_eq!(
+            status_with_work_link(WorkStatus::Todo, None),
+            WorkStatus::Todo
+        );
+    }
+
+    #[test]
+    fn a_done_item_stays_done_however_live_its_branch() {
+        // Done is an explicit assertion of completion by the source. Work continuing
+        // on the branch afterwards (review fixes) must not un-complete the item.
+        assert_eq!(
+            status_with_work_link(WorkStatus::Done, Some(Status::Active)),
+            WorkStatus::Done
+        );
+        assert_eq!(
+            status_with_work_link(WorkStatus::Done, Some(Status::Attention)),
+            WorkStatus::Done
+        );
+    }
+
+    #[test]
+    fn the_source_saying_doing_needs_no_live_session_to_stay_doing() {
+        // The reverse mismatch, which the card already narrates as "In progress ·
+        // no live session": the source's word stands on its own.
+        assert_eq!(
+            status_with_work_link(WorkStatus::Doing, None),
+            WorkStatus::Doing
+        );
+        assert_eq!(
+            status_with_work_link(WorkStatus::Doing, Some(Status::Finished)),
+            WorkStatus::Doing
+        );
+    }
 
     #[test]
     fn work_map_id_links_by_dash_or_compact_form() {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import type { LinkedSession, ProjectRef, WorkItem, WorkStatus } from "./types";
-import { domId, shortModel, sourceLabel } from "./format";
+import type { LinkedSession, ProjectRef, WorkItem, WorkSource, WorkStatus } from "./types";
+import { columnLabel, domId, shortModel, sourceLabel, sourceStatusNote } from "./format";
 import { Branch, Machine, Tile, useFlash } from "./ui";
 import { useWork } from "./useWork";
 import {
@@ -16,11 +16,9 @@ import {
   statusLabel,
 } from "./graph";
 
-const COLUMNS: { key: WorkStatus; label: string }[] = [
-  { key: "todo", label: "To do" },
-  { key: "doing", label: "In progress" },
-  { key: "done", label: "Done" },
-];
+const COLUMNS: { key: WorkStatus; label: string }[] = (
+  ["todo", "doing", "done"] as const
+).map((key) => ({ key, label: columnLabel(key) }));
 
 const STATUS_GLYPH: Record<WorkStatus, string> = { todo: "○", doing: "◐", done: "✓" };
 
@@ -159,10 +157,21 @@ function SessionChip({ session, onOpen }: { session: LinkedSession; onOpen: Open
 
 /** One Work Item card in the kanban. Shows id + effort, title, and — the payload
  *  of C4 — the Work Link chip on items with a live session, or a blocked-by hint
- *  on blocked To-do items. */
-function WorkCard({ item, onOpenSession }: { item: WorkItem; onOpenSession: OpenSession }) {
+ *  on blocked To-do items. When a live Work Link raised the item's status (#66),
+ *  it also discloses what the source itself still says, so the derived column and
+ *  the plan never silently disagree. */
+function WorkCard({
+  item,
+  source,
+  onOpenSession,
+}: {
+  item: WorkItem;
+  source: WorkSource | null;
+  onOpenSession: OpenSession;
+}) {
   const tileColor =
     item.status === "done" ? "var(--positive)" : item.status === "doing" ? "var(--info)" : "var(--ink-faint)";
+  const derived = sourceStatusNote(item.status, item.sourceStatus, source);
 
   let body = null;
   if (item.session) {
@@ -193,6 +202,12 @@ function WorkCard({ item, onOpenSession }: { item: WorkItem; onOpenSession: Open
       </div>
       <div className="title">{item.title}</div>
       {body}
+      {derived && (
+        <div className="srcstatus">
+          <span aria-hidden="true">{STATUS_GLYPH[item.sourceStatus]} </span>
+          {derived}
+        </div>
+      )}
     </div>
   );
 }
@@ -202,7 +217,15 @@ function WorkCard({ item, onOpenSession }: { item: WorkItem; onOpenSession: Open
  *  count, and each Work Item as a list entry; empty columns say so rather than
  *  showing a bare `0` (audit L3). `role="list"` is kept explicit because
  *  `list-style:none` drops list semantics in some browsers. */
-function Kanban({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: OpenSession }) {
+function Kanban({
+  items,
+  source,
+  onOpenSession,
+}: {
+  items: WorkItem[];
+  source: WorkSource | null;
+  onOpenSession: OpenSession;
+}) {
   return (
     <div className="cols">
       {COLUMNS.map(({ key, label }) => {
@@ -221,7 +244,7 @@ function Kanban({ items, onOpenSession }: { items: WorkItem[]; onOpenSession: Op
               ) : (
                 inCol.map((item) => (
                   <li key={item.id}>
-                    <WorkCard item={item} onOpenSession={onOpenSession} />
+                    <WorkCard item={item} source={source} onOpenSession={onOpenSession} />
                   </li>
                 ))
               )}
@@ -655,7 +678,7 @@ export function WorkItems({
           action={{ label: "Refresh", onClick: refetch }}
         />
       ) : mode === "kanban" ? (
-        <Kanban items={items} onOpenSession={onOpenSession} />
+        <Kanban items={items} source={data?.source ?? null} onOpenSession={onOpenSession} />
       ) : (
         <>
           {/* Wide screens: the spatial pan-scroll graph. Narrow screens: the same

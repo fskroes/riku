@@ -671,6 +671,117 @@ async fn work_map_items_carry_their_work_link() {
     );
 }
 
+#[tokio::test]
+async fn a_live_work_link_makes_an_unmarked_item_read_as_doing() {
+    // The #66 scenario: W-20 is *unmarked* in WORK.md — nobody wrote `[~]` — but a
+    // Claude session is live on `feat/W-20-...`, so the board pairs them. The chip is
+    // the evidence that the work is happening; the question is whether the lane agrees.
+    let claude = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    let proj_cwd = proj.path().to_string_lossy().to_string();
+    fs::write(
+        proj.path().join("WORK.md"),
+        "# Work Map\n\n\
+         - [ ] W-20 Unmarked, but an agent is on it\n\
+         - [ ] W-21 Unmarked, and nobody is on it\n",
+    )
+    .unwrap();
+    write_transcript(
+        claude.path(),
+        "-proj",
+        "aaaa.jsonl",
+        &[assistant_line_in("sess-live", &proj_cwd, "feat/W-20-doing-it")],
+    );
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/work"))
+        .query(&[("cwd", proj_cwd.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let items = body["items"].as_array().unwrap();
+    let w20 = items.iter().find(|i| i["id"] == "W-20").unwrap();
+
+    // The premise: the Work Link exists and the session really is live.
+    assert_eq!(w20["session"]["id"], "sess-live", "premise: {w20:?}");
+    assert_eq!(w20["session"]["status"], "active", "premise: {w20:?}");
+
+    // The symptom: the column the card lands in.
+    assert_eq!(
+        w20["status"], "doing",
+        "#66: a live Work Link should make the item read as Doing, not sit in To do \
+         while its own chip says an agent is active: {w20:?}"
+    );
+    // And the plan's own word survives, so the card can disclose the difference
+    // rather than the board quietly overwriting WORK.md.
+    assert_eq!(w20["sourceStatus"], "todo", "{w20:?}");
+
+    // The control: an unmarked item with no session stays To do.
+    let w21 = items.iter().find(|i| i["id"] == "W-21").unwrap();
+    assert!(w21["session"].is_null(), "control: {w21:?}");
+    assert_eq!(w21["status"], "todo", "control: {w21:?}");
+}
+
+#[tokio::test]
+async fn a_work_link_whose_session_has_gone_quiet_does_not_claim_the_item() {
+    // The other half of #66. A Work Link is inferred from the branch alone, so it
+    // outlives the session's activity: an item can carry a chip for an agent that
+    // stopped half an hour ago. That must not read as Doing. Backdate the transcript
+    // past ACTIVITY_WINDOW (15 min) to age the session out to Finished.
+    let claude = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    let proj_cwd = proj.path().to_string_lossy().to_string();
+    fs::write(
+        proj.path().join("WORK.md"),
+        "- [ ] W-30 Nobody is on this any more\n",
+    )
+    .unwrap();
+    let transcript = write_transcript(
+        claude.path(),
+        "-proj",
+        "aaaa.jsonl",
+        &[assistant_line_in("sess-gone", &proj_cwd, "feat/W-30-abandoned")],
+    );
+    let long_ago = std::time::SystemTime::now() - Duration::from_secs(30 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&transcript)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(long_ago))
+        .unwrap();
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/work"))
+        .query(&[("cwd", proj_cwd.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let w30 = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "W-30")
+        .unwrap();
+    assert_eq!(w30["session"]["status"], "finished", "premise: {w30:?}");
+    assert_eq!(
+        w30["status"], "todo",
+        "a Work Link that outlived its session must not claim the item: {w30:?}"
+    );
+    assert_eq!(w30["sourceStatus"], "todo", "{w30:?}");
+}
+
 /// Run a git command in `dir`, asserting it succeeds.
 fn git(dir: &Path, args: &[&str]) {
     let status = std::process::Command::new("git")

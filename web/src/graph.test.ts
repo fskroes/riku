@@ -12,9 +12,21 @@ import {
   statusLabel,
 } from "./graph";
 
-// A minimal Work Item; only the graph-relevant fields matter here.
+// A minimal Work Item; only the graph-relevant fields matter here. `sourceStatus`
+// defaults to agreeing with `status` — the graph reads only the status the board
+// shows, and the disclosure of a difference belongs to the card (#66).
 function item(id: string, blockedBy: string[], over: Partial<WorkItem> = {}): WorkItem {
-  return { id, title: `${id} title`, status: "todo", effort: null, blockedBy, session: null, ...over };
+  const status = over.status ?? "todo";
+  return {
+    id,
+    title: `${id} title`,
+    status,
+    sourceStatus: status,
+    effort: null,
+    blockedBy,
+    session: null,
+    ...over,
+  };
 }
 
 const session = (over: Partial<LinkedSession> = {}): LinkedSession => ({
