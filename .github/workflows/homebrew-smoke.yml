@@ -19,9 +19,12 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Build embedded UI and test workspace
+      # `npm run build` is `tsc && vite build`, so the typecheck is gated here too.
+      # `npm test` (vitest) covers the pure web modules — graph, journal, bands,
+      # format — which the build alone does not execute.
+      - name: Build embedded UI, then test both sides
         run: |
-          cd web && npm ci && npm run build
+          cd web && npm ci && npm run build && npm test
           cd .. && cargo test --workspace
       # The formula is generated into fskroes/homebrew-riku on a tagged release.
       # This smoke path deliberately exercises the same source-build sequence.
