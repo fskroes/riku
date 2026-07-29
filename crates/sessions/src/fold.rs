@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::attention::PendingAttention;
 use crate::liveness::ProcessLiveness;
-use crate::model::{Attention, Session, Status, SubAgents, Tool};
+use crate::model::{Attention, Session, Status, SubAgent, SubAgentState, Tool};
 
 /// A session is Active/Attention while its file was touched within this window,
 /// and Finished once it goes quiet. Locked for C1 (mtime only); shared by every
@@ -117,9 +117,9 @@ pub struct Projection {
     /// model (they may run cheaper models than the orchestrator). The builder adds it
     /// to the main-model cost. `0.0` when there is no Sub-agent usage.
     pub sub_agent_cost_usd: f64,
-    /// The Sub-agents currently fanning out under this session — the card's badge.
-    /// Empty for a source with no Sub-agent concept.
-    pub sub_agents: SubAgents,
+    /// Every Sub-agent spawned under this session, running and finished alike, in
+    /// spawn order — the card's badge and roster. Empty until a source populates it.
+    pub sub_agent_roster: Vec<SubAgent>,
     pub activity: Option<String>,
     /// Latest entry timestamp; falls back to the file mtime when a source records
     /// no timestamps.
@@ -208,7 +208,9 @@ pub fn assemble(
 ) -> Session {
     let status = status_for(
         p.attention.is_some(),
-        p.sub_agents.active > 0,
+        p.sub_agent_roster
+            .iter()
+            .any(|s| s.state == SubAgentState::Running),
         mtime,
         now,
         liveness,
@@ -250,7 +252,7 @@ pub fn assemble(
         attention,
         cost_usd,
         diff: None,
-        sub_agents: p.sub_agents,
+        sub_agent_roster: p.sub_agent_roster,
         machine: None,
     }
 }
@@ -337,7 +339,7 @@ mod tests {
             sub_tokens_in: 0,
             sub_tokens_out: 0,
             sub_agent_cost_usd: 0.0,
-            sub_agents: SubAgents::default(),
+            sub_agent_roster: Vec::new(),
             activity: None,
             last_event_at: Some(ts("2026-07-19T10:00:00Z")),
             attention: None,

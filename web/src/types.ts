@@ -31,13 +31,35 @@ export interface DiffStat {
   removed: number;
 }
 
-// The Sub-agents a session is currently fanning work out to — the card's badge
-// (issue #23). A Sub-agent is never its own card. `active` is the badge count;
-// `descriptions` are the active ones' short descriptions, for the tooltip. Empty
-// for a session not fanning out and for Codex (no Sub-agent concept).
-export interface SubAgents {
-  active: number;
-  descriptions: string[];
+// Whether a Sub-agent is still running or has finished. A state on each roster
+// entry rather than a property of the collection: a finished session by definition
+// has none running, and would otherwise show nothing at all.
+export type SubAgentState = "running" | "finished";
+
+// One Sub-agent on its parent's roster. Never its own card — it carries no
+// independent human need, since only the session that sent it can approve, answer,
+// or resume it (ADR 0014).
+export interface SubAgent {
+  id: string;
+  // The key joining this entry back to its spawn on the parent's side.
+  spawnKey: string;
+  // What it was sent to do, verbatim from the spawning source (the Errand). `null`
+  // when the source names no purpose — the row is then unlabelled, never given a
+  // placeholder that would read as content.
+  errand: string | null;
+  state: SubAgentState;
+  // How it ended, in the source's own word (`completed`, `failed`, `stopped`,
+  // `killed`); `null` while it runs or when the source states none.
+  outcome: string | null;
+  tokensIn: number;
+  tokensOut: number;
+  // Priced at this Sub-agent's own model, which may be cheaper than its parent's.
+  costUsd: number | null;
+  model: string | null;
+  // How deep it was spawned. Carried and drawn nowhere — the nesting tree is a
+  // later rendering change, not a re-fold.
+  depth: number;
+  lastEventAt: string | null; // ISO 8601
 }
 
 export interface Session {
@@ -59,10 +81,10 @@ export interface Session {
   costUsd: number | null;
   // Live git `+/-` for the session's repo, or `null` when there is none.
   diff: DiffStat | null;
-  // The Sub-agents this session is currently fanning out to (issue #23). Empty when
-  // it is not fanning out or the source has no Sub-agent concept (Codex) — the card
-  // then omits the badge. Always present (defaults to an empty set on the wire).
-  subAgents: SubAgents;
+  // Every Sub-agent this session has spawned, running and finished alike, in spawn
+  // order. Empty when it never fanned out — the card then omits the badge. Always
+  // present (defaults to an empty roster on the wire).
+  subAgentRoster: SubAgent[];
   // The machine this session runs on — the host's name (C7). Stamped by the board
   // (or a Collector) so every card shows which machine it is on; `null` only for a
   // pre-C7 session that was never stamped.

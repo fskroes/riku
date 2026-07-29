@@ -480,9 +480,10 @@ async fn codex_subagent_rollout_is_not_a_card() {
 }
 
 #[tokio::test]
-async fn sub_agent_badge_fields_serialize_through_the_sessions_api() {
-    // A session fanning work out to one Sub-agent surfaces the badge fields on its
-    // card; a Codex session (no Sub-agent concept) carries an empty, badge-less set.
+async fn the_sub_agent_roster_serializes_through_the_sessions_api() {
+    // A session fanning work out carries its Sub-agent on a roster, under the wire's
+    // new field name; a session that never fanned out carries an empty one and so
+    // shows no badge.
     let claude = tempfile::tempdir().unwrap();
     let codex = tempfile::tempdir().unwrap();
     write_transcript(
@@ -512,20 +513,21 @@ async fn sub_agent_badge_fields_serialize_through_the_sessions_api() {
     let sessions = body["sessions"].as_array().unwrap();
 
     let fanout = sessions.iter().find(|s| s["id"] == "sess-fanout").unwrap();
-    assert_eq!(fanout["subAgents"]["active"], 1);
-    assert_eq!(
-        fanout["subAgents"]["descriptions"],
-        serde_json::json!(["map the parser"])
-    );
-    // A live Sub-agent keeps the parent working (never stale), not in Attention.
+    let roster = fanout["subAgentRoster"].as_array().unwrap();
+    assert_eq!(roster.len(), 1);
+    assert_eq!(roster[0]["errand"], "map the parser");
+    assert_eq!(roster[0]["state"], "running");
+    // Outcome is absent while it runs — a word the source has not said.
+    assert_eq!(roster[0]["outcome"], serde_json::Value::Null);
+    // Depth rides along on every entry, drawn nowhere.
+    assert_eq!(roster[0]["depth"], 0);
+    // The legacy count-and-descriptions field is gone from the card entirely.
+    assert_eq!(fanout["subAgents"], serde_json::Value::Null);
+    // A Running Sub-agent keeps the parent working (never stale), not in Attention.
     assert_eq!(fanout["status"], "active");
 
     let codex_card = sessions.iter().find(|s| s["id"] == "codex-plain").unwrap();
-    assert_eq!(codex_card["subAgents"]["active"], 0);
-    assert_eq!(
-        codex_card["subAgents"]["descriptions"],
-        serde_json::json!([])
-    );
+    assert_eq!(codex_card["subAgentRoster"], serde_json::json!([]));
 }
 
 #[tokio::test]

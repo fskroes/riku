@@ -41,7 +41,9 @@ pub use journal_store::{
     read_journal, read_journal_in, resolve_journal_project, Noted,
 };
 pub use liveness::{probe_alive_cwds, ProcessLiveness};
-pub use model::{Attention, AttentionCause, DiffStat, Session, Status, SubAgents, Tool};
+pub use model::{
+    Attention, AttentionCause, DiffStat, Session, Status, SubAgent, SubAgentState, Tool,
+};
 pub use session::{Accumulator, FileState};
 pub use source::{ClaudeSource, CodexSource, SessionSource};
 pub use store::{Event, SessionStore, DISCOVERY_WINDOW};
