@@ -76,6 +76,10 @@ _Avoid_: log, history, notes, agent summary
 The board's reading of the Project Journal: one card per thread of effort — a project's journal and the Agent Sessions behind it — ordered by Handoff Status, carrying what the authors say was done (grouped by day), the next step, the entry's age, and the resume command Riku builds itself. The derived transcript timeline stays beside the prose, since the journal annotates ground truth rather than replacing it; the day view is a lens over the same cards, not the home. All journal prose is rendered as text and never executed (ADR 0013).
 _Avoid_: activity feed, digest, standup, summary view
 
+**Band**:
+A labelled, counted run of rows on a reading surface, standing for one group within it: the Board's Running in the background, Up next, and Finished, and the Recap's Older journals. The label names the group and the count says how much is there, so where a Band is capped the count discloses the cap (`5 of 12`) rather than letting a partial list read as the whole. A Band is not a status group — the Board's oldest Attention is the primary decision and stands outside every Band, while the needs behind it queue in Up next — and it never holds Work Items, which sit in the kanban's status Columns instead (ADR 0005).
+_Avoid_: column (the Work Items kanban only), lane, section, group
+
 **Session Source**:
 An adapter that discovers and reads Agent Sessions for one agent tool (Claude Code, Codex CLI). Each supported tool has exactly one Session Source.
 _Avoid_: provider, integration, connector
