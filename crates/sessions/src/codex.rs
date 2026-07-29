@@ -7,9 +7,9 @@
 //! `payload.type`s, and unknown fields are dropped, never errored:
 //!
 //! * `session_meta` (first line) — `payload.id` is the Session id; `thread_source
-//!   == "subagent"` marks a subagent rollout we suppress entirely (Codex's analog
-//!   of Claude's `isSidechain`); `payload.cwd` and `payload.git.branch` seed the
-//!   project/branch.
+//!   == "subagent"` marks a subagent rollout, which folds like any other but is
+//!   stated as a Sub-agent rather than an Agent Session, so it never becomes a
+//!   card; `payload.cwd` and `payload.git.branch` seed the project/branch.
 //! * `turn_context` — the model lives here (`payload.model`), per turn, not on the
 //!   message; latest wins.
 //! * `event_msg` / `token_count` — `payload.info.total_token_usage` is *cumulative
@@ -29,7 +29,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::attention::{AttentionReducer, NeedEvidence, Observation};
-use crate::fold::{first_line, project_from_cwd, Fold, Projection};
+use crate::fold::{first_line, project_from_cwd, Fold, Folded, Projection, SubAgentProjection};
 use crate::model::{AttentionCause, Tool};
 
 /// A raw Codex rollout line, deserialized leniently. Every field is optional so
@@ -97,7 +97,8 @@ struct ContentBlock {
 #[derive(Debug, Default)]
 pub struct CodexFold {
     id: Option<String>,
-    /// `thread_source == "subagent"` — the whole file is suppressed.
+    /// `thread_source == "subagent"` — the whole file is a Sub-agent's, so the fold
+    /// states a Sub-agent projection instead of an Agent Session one.
     is_subagent: bool,
     project: Option<String>,
     cwd: Option<String>,
@@ -236,13 +237,31 @@ impl Fold for CodexFold {
         *self = CodexFold::default();
     }
 
-    fn projection(&self) -> Option<Projection> {
-        // Subagent rollouts never surface as their own card.
-        if self.is_subagent {
-            return None;
-        }
+    fn projection(&self) -> Option<Folded> {
         let id = self.id.clone()?;
-        Some(Projection {
+        // A subagent rollout is folded like any other and *stated* as a Sub-agent,
+        // which is not a card — rather than suppressed into nothing.
+        if self.is_subagent {
+            return Some(Folded::SubAgent(SubAgentProjection {
+                id,
+                // Codex names the immediate spawner, which may itself be a
+                // Sub-agent; walking that chain up to the root is not done here, so
+                // no attachment is claimed rather than a guessed one.
+                root_session_id: None,
+                tool: Tool::Codex,
+                model: self.model.clone(),
+                tokens_in: self.tokens_in,
+                tokens_out: self.tokens_out,
+                cost_usd: crate::pricing::estimate_cost_usd(
+                    self.model.as_deref(),
+                    self.tokens_in,
+                    self.tokens_out,
+                )
+                .unwrap_or(0.0),
+                last_event_at: self.latest_timestamp,
+            }));
+        }
+        Some(Folded::AgentSession(Projection {
             id,
             tool: Tool::Codex,
             project: self.project.clone().unwrap_or_default(),
@@ -259,7 +278,7 @@ impl Fold for CodexFold {
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
             attention: self.attention.current(),
-        })
+        }))
     }
 }
 
@@ -318,6 +337,7 @@ mod tests {
     use super::*;
     use crate::model::Session;
     use crate::session::FileState;
+    use crate::source::SessionSource;
 
     fn codex() -> FileState {
         FileState::new(Box::new(CodexFold::default()))
@@ -533,6 +553,33 @@ mod tests {
         assert!(fs
             .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
             .is_none());
+    }
+
+    #[test]
+    fn a_subagent_rollout_states_a_sub_agent_projection() {
+        // A subagent rollout is not path-distinguishable (same directory, same
+        // `rollout-` name), so Codex classifies it from `thread_source` — but it
+        // reports the same stated outcome as Claude: a Sub-agent, not nothing.
+        let path = std::path::Path::new("/x/2026/07/20/rollout-2026-07-20T13-39-51-sub.jsonl");
+        let mut fold = crate::source::CodexSource::new("/x".into()).new_fold(path);
+        for line in [
+            meta("sub-1", "subagent"),
+            turn_context("gpt-5.6-sol"),
+            token_count(1000, 200),
+        ] {
+            assert!(fold.apply_line(&line));
+        }
+        let Some(Folded::SubAgent(sub)) = fold.projection() else {
+            panic!("a subagent rollout states a Sub-agent projection");
+        };
+        assert_eq!(sub.id, "sub-1");
+        assert_eq!(sub.tool, Tool::Codex);
+        assert_eq!(sub.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(sub.tokens_in, 1000);
+        assert_eq!(sub.tokens_out, 200);
+        // The chain up to the root is not walked yet (#76), so no attachment is
+        // claimed rather than a guessed one.
+        assert_eq!(sub.root_session_id, None);
     }
 
     #[test]

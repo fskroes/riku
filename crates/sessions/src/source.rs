@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::codex::CodexFold;
 use crate::fold::Fold;
-use crate::session::Accumulator;
+use crate::session::{Accumulator, ClaudeSubAgentFold};
 
 /// An adapter that discovers and reads Agent Sessions for one agent tool.
 pub trait SessionSource: Send + Sync {
@@ -17,12 +17,19 @@ pub trait SessionSource: Send + Sync {
     fn roots(&self) -> Vec<PathBuf>;
     /// Whether `path` is a transcript this source should ingest.
     fn owns(&self, path: &Path) -> bool;
-    /// A fresh fold for one of this source's transcripts.
-    fn new_fold(&self) -> Box<dyn Fold>;
+    /// A fresh fold for the transcript at `path`.
+    ///
+    /// The source decides here which of the two things it is about to read — an
+    /// Agent Session transcript or a Sub-agent transcript — and hands back the fold
+    /// that produces the matching projection. It is given the path (rather than
+    /// deciding line by line) so that decision, and any sibling file the fold needs
+    /// pre-loaded, stay outside line handling: a [`Fold`] is pure over lines.
+    fn new_fold(&self, path: &Path) -> Box<dyn Fold>;
 }
 
 /// Claude Code: flat `<root>/<project-dir>/<uuid>.jsonl` transcripts under
-/// `~/.claude/projects`.
+/// `~/.claude/projects`, with each Sub-agent written to its own file at
+/// `<project-dir>/<root-uuid>/subagents/agent-<agentId>.jsonl`.
 pub struct ClaudeSource {
     root: PathBuf,
 }
@@ -42,9 +49,39 @@ impl SessionSource for ClaudeSource {
         path.extension().and_then(|e| e.to_str()) == Some("jsonl")
     }
 
-    fn new_fold(&self) -> Box<dyn Fold> {
-        Box::new(Accumulator::default())
+    /// Claude states which of the two a file is in the path itself, so the fold is
+    /// chosen before a single line is read.
+    fn new_fold(&self, path: &Path) -> Box<dyn Fold> {
+        match claude_sub_agent_fold(path) {
+            Some(fold) => Box::new(fold),
+            None => Box::new(Accumulator::default()),
+        }
     }
+}
+
+/// The Sub-agent fold a Claude path calls for, or `None` for an Agent Session
+/// transcript.
+///
+/// Claude writes each Sub-agent to `<project>/<root-uuid>/subagents/agent-<agentId>.jsonl`,
+/// in a flat directory (a depth-2 child sits beside its depth-1 spawner), so the
+/// path alone both classifies the file and names both ids. The root id here is the
+/// containing directory's; a child entry's own `sessionId` — which Claude stamps
+/// with the *root's* id at any depth — supersedes it once one arrives.
+///
+/// The **directory** is what classifies: anything Claude writes under `subagents/`
+/// is a Sub-agent's, whatever it comes to name the file. The `agent-` prefix only
+/// names the id, so a file without it keeps its whole stem as the id rather than
+/// falling through to the Agent Session fold — which would be the one outcome that
+/// puts a Sub-agent on the board as a card.
+fn claude_sub_agent_fold(path: &Path) -> Option<ClaudeSubAgentFold> {
+    let stem = path.file_stem()?.to_str()?;
+    let dir = path.parent()?;
+    if dir.file_name()?.to_str()? != "subagents" {
+        return None;
+    }
+    let root_session_id = dir.parent()?.file_name()?.to_str()?.to_string();
+    let agent_id = stem.strip_prefix("agent-").unwrap_or(stem).to_string();
+    Some(ClaudeSubAgentFold::new(agent_id, root_session_id))
 }
 
 /// Codex CLI: date-nested `<root>/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` rollouts
@@ -71,7 +108,11 @@ impl SessionSource for CodexSource {
         )
     }
 
-    fn new_fold(&self) -> Box<dyn Fold> {
+    /// Codex's subagent rollouts are not path-distinguishable — same date-nested
+    /// directory, same `rollout-` name as an Agent Session's — so the path says
+    /// nothing here and the classification comes from the rollout's own
+    /// `session_meta` (`thread_source`). The fold states the outcome all the same.
+    fn new_fold(&self, _path: &Path) -> Box<dyn Fold> {
         Box::new(CodexFold::default())
     }
 }

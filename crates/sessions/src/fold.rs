@@ -3,9 +3,10 @@
 //! tailing, truncation reset, the mtime-based status heuristic, the [`Session`]
 //! shape — is shared and lives in `session.rs`.
 //!
-//! A [`Fold`] folds a file's lines into a [`Projection`]: the tool-agnostic inputs
-//! the shared builder needs. The status column is derived here from
-//! [`Projection::attention`] plus file mtime, so no source reimplements it.
+//! A [`Fold`] folds a file's lines into one of the two things a transcript can be
+//! ([`Folded`]): an Agent Session [`Projection`] — the tool-agnostic inputs the
+//! shared builder needs — or a [`SubAgentProjection`]. The status column is derived
+//! here from [`Projection::attention`] plus file mtime, so no source reimplements it.
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -33,9 +34,61 @@ pub trait Fold: Send {
     /// Drop all accumulated state (the file was truncated or rewritten).
     fn reset(&mut self);
 
-    /// The current projection, or `None` if no line has yet supplied a session id
-    /// (or the file is one we suppress entirely, e.g. a Codex subagent rollout).
-    fn projection(&self) -> Option<Projection>;
+    /// What this fold has produced so far — an Agent Session projection or a
+    /// Sub-agent projection — or `None` while nothing has yet supplied an identity.
+    ///
+    /// A fold *states* which of the two it produced. Neither is reached by an early
+    /// return that skips identity assignment: "not a card" and "not folded" are
+    /// different things (ADR 0014).
+    fn projection(&self) -> Option<Folded>;
+}
+
+/// The two things a transcript can be, and which one a [`Fold`] says it produced.
+///
+/// The distinction holds at the compile boundary rather than by convention. That is
+/// the whole reason ADR 0014 chose a distinct type over an Agent Session carrying a
+/// parent field: a consumer that would retarget a Work Link or claim a Process
+/// Liveness credit is handed a [`SubAgentProjection`], which has no branch and no
+/// working directory to read.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Folded {
+    /// An Agent Session — the unit the board displays as a card.
+    AgentSession(Projection),
+    /// A Sub-agent — folded in full, and never a card, because it carries no
+    /// independent human need: nobody can approve, answer, or resume it directly,
+    /// only the Agent Session that sent it.
+    SubAgent(SubAgentProjection),
+}
+
+/// The per-source projection of one Sub-agent's transcript.
+///
+/// Deliberately *not* card-shaped: no Attention, no branch, no working directory.
+/// Those are the fields Work Link and Process Liveness read, and a Sub-agent shares
+/// its parent's branch and cwd verbatim — so carrying them is how a Work Item chip
+/// would come to point at a card that does not exist, and how a parent would lose
+/// its liveness credit to its own children. Absent by type, they cannot.
+///
+/// `PartialEq` only (not `Eq`): `cost_usd` is an `f64`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubAgentProjection {
+    /// The Sub-agent's own source-native id: Claude's `agentId`, Codex's
+    /// `session_meta` rollout id.
+    pub id: String,
+    /// The root Agent Session this Sub-agent belongs to — the only node in the
+    /// spawn tree that is a card, however deep the Sub-agent was spawned. `None`
+    /// while the source cannot yet resolve it, in which case the Sub-agent is held
+    /// out of every roster rather than attached to a guess.
+    pub root_session_id: Option<String>,
+    pub tool: Tool,
+    /// The model this Sub-agent ran, which may be cheaper than the orchestrator's.
+    pub model: Option<String>,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    /// Already priced at this Sub-agent's *own* model as it was folded, so the
+    /// parent's total is a sum rather than a re-pricing. `0.0` for an unpriced model.
+    pub cost_usd: f64,
+    /// Latest entry timestamp, or `None` when no timestamped line has arrived.
+    pub last_event_at: Option<DateTime<Utc>>,
 }
 
 /// Tool-agnostic inputs the shared builder turns into a [`Session`]. Everything

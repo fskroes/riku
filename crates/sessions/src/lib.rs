@@ -30,7 +30,7 @@ use std::path::PathBuf;
 pub use attention::{AttentionReducer, NeedEvidence, Observation, PendingAttention};
 pub use deeplink::DeepLink;
 pub use diff::DiffCache;
-pub use fold::{Fold, Projection, ACTIVITY_WINDOW};
+pub use fold::{Fold, Folded, Projection, SubAgentProjection, ACTIVITY_WINDOW};
 pub use git::diff_stat;
 pub use journal::{
     project_slug, Handoff, Journal, JournalDay, JournalEntry, JournalReading, Resume, Voice,
