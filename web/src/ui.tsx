@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { DiffStat, Session, SubAgents, Tool } from "./types";
+import { rosterBadge, rosterRows } from "./roster";
+import type { DiffStat, Session, SubAgent, Tool } from "./types";
 import { abbrevTokens, diffLabel, formatCost, shortModel, tokensLabel } from "./format";
 
 /** Per-tool tile glyph, accessible name + accent. One Session Source per tool
@@ -100,42 +101,52 @@ export function Diff({ diff }: { diff: DiffStat | null }) {
   );
 }
 
-/** The Sub-agent fan-out badge (issue #23): a count pill on the parent's card
- *  showing how many Sub-agents are running right now, with each active one's short
- *  description revealed on hover/focus. A Sub-agent is never its own card. Renders
- *  nothing when none is active — a quiet or Codex session stays badge-less. The
- *  count is the accessible label; the pulse dot is decorative "still working". */
-export function SubAgentBadge({ subAgents }: { subAgents: SubAgents }) {
-  const { active, descriptions } = subAgents;
-  if (active <= 0) return null;
-  const noun = active === 1 ? "sub-agent" : "sub-agents";
+/** The Sub-agent fan-out badge and its roster panel (ADR 0014). Two states: a
+ *  pulsing, accented pill counting what is running now; a still, dimmed pill
+ *  carrying the roster total once they have all finished — the work a session
+ *  delegated stays discoverable after the fact. Nothing at all when the roster is
+ *  empty, so the badge means something when it is there.
+ *
+ *  The panel is the roster either way, one row per Sub-agent in spawn order. It
+ *  renders here and never as expanded rows beneath a Band's own: a Band's count has
+ *  to keep describing what is on screen (#64/#65). Which count, which label, and
+ *  each row's text are `roster.ts`'s; this renders what it returns. */
+export function SubAgentBadge({ roster }: { roster: SubAgent[] }) {
+  const badge = rosterBadge(roster);
+  if (!badge) return null;
+  const rows = rosterRows(roster);
   return (
     <span className="subagents">
       <span
-        className="pill"
+        className={badge.running ? "pill" : "pill still"}
         role="img"
-        aria-label={`${active} ${noun} running`}
-        // The full list rides `title` too, so the descriptions are reachable without
-        // hover (native tooltip) as well as through the styled panel below.
-        title={descriptions.length ? descriptions.join("\n") : undefined}
+        aria-label={badge.label}
         tabIndex={0}
       >
-        <span className="pulse" aria-hidden="true" />
-        <span className="fan" aria-hidden="true">⑃</span> {active}
+        {badge.running && <span className="pulse" aria-hidden="true" />}
+        <span className="fan" aria-hidden="true">⑃</span> {badge.count}
       </span>
-      {descriptions.length > 0 && (
-        <span className="tip" role="tooltip">
-          <span className="tip-h">{active} {noun} running</span>
-          <ul>
-            {descriptions.map((d, i) => (
-              <li key={i}>
-                <span className="d" aria-hidden="true" />
-                {d}
-              </li>
-            ))}
-          </ul>
-        </span>
-      )}
+      <span className="tip" role="tooltip">
+        <span className="tip-h">{badge.label}</span>
+        <ul>
+          {rows.map((row) => (
+            <li key={row.id}>
+              <span className={row.running ? "d" : "d done"} aria-hidden="true" />
+              <span className="row">
+                {/* A Sub-agent whose source named no purpose is unlabelled — the
+                    Errand line is simply absent rather than filled with a stand-in. */}
+                {row.errand && <span className="errand">{row.errand}</span>}
+                <span className="sub">
+                  <span className="st">{row.state}</span>
+                  {row.model && <span className="k">{row.model}</span>}
+                  <span className="tk">{row.tokens}</span>
+                  {row.cost && <span className="ct">{row.cost}</span>}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </span>
     </span>
   );
 }

@@ -103,7 +103,7 @@ function AlertRow({
           {/* A session can need attention *and* still be fanning work out (a
               non-Task wait alongside live Sub-agents) — keep the badge visible so
               its fan-out does not vanish when it routes to an attention card. */}
-          <SubAgentBadge subAgents={session.subAgents} />
+          <SubAgentBadge roster={session.subAgentRoster} />
         </div>
         {failed && <div className="openerr">{failed}</div>}
       </div>
@@ -169,7 +169,7 @@ function CompactRow({
         )}
         <OpenLink session={session} open={open} />
         <PlanLink session={session} onOpenPlan={onOpenPlan} />
-        <SubAgentBadge subAgents={session.subAgents} />
+        <SubAgentBadge roster={session.subAgentRoster} />
         <Diff diff={session.diff} />
         <Tokens tokensIn={session.tokensIn} tokensOut={session.tokensOut} />
         <Cost usd={session.costUsd} show={showCost} />
