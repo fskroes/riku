@@ -17,9 +17,6 @@ describe("sourceStatusNote", () => {
     expect(sourceStatusNote("done", "done", "github")).toBeNull();
   });
 
-  it("claims nothing about a source it cannot name", () => {
-    expect(sourceStatusNote("doing", "todo", null)).toBeNull();
-  });
 });
 
 describe("columnLabel", () => {

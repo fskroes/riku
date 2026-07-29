@@ -658,6 +658,10 @@ async fn work_map_items_carry_their_work_link() {
 
     let w12 = items.iter().find(|i| i["id"] == "W-12").unwrap();
     assert_eq!(w12["status"], "doing");
+    // W-12 is `[~]` *and* carries a live link, so `status` alone would pass for two
+    // reasons. `sourceStatus` comes only from the marker, so it is what pins the
+    // parse this test is about.
+    assert_eq!(w12["sourceStatus"], "doing");
     assert_eq!(w12["effort"], "~2d");
     // The Work Link: W-12's branch names the item, so its session is attached.
     assert_eq!(w12["session"]["id"], "sess-dl");
@@ -675,7 +679,7 @@ async fn work_map_items_carry_their_work_link() {
 async fn a_live_work_link_makes_an_unmarked_item_read_as_doing() {
     // The #66 scenario: W-20 is *unmarked* in WORK.md — nobody wrote `[~]` — but a
     // Claude session is live on `feat/W-20-...`, so the board pairs them. The chip is
-    // the evidence that the work is happening; the question is whether the lane agrees.
+    // the evidence that the work is happening; the question is whether the column agrees.
     let claude = tempfile::tempdir().unwrap();
     let proj = tempfile::tempdir().unwrap();
     let proj_cwd = proj.path().to_string_lossy().to_string();
@@ -780,6 +784,49 @@ async fn a_work_link_whose_session_has_gone_quiet_does_not_claim_the_item() {
         "a Work Link that outlived its session must not claim the item: {w30:?}"
     );
     assert_eq!(w30["sourceStatus"], "todo", "{w30:?}");
+}
+
+#[tokio::test]
+async fn a_live_session_does_not_un_complete_a_done_item() {
+    // The third case of #66, and the one that bounds the derivation: W-40 is checked
+    // off, but its branch is still busy — review fixes, a follow-up commit. Done is
+    // the source asserting completion, and evidence of activity must not undo it.
+    let claude = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    let proj_cwd = proj.path().to_string_lossy().to_string();
+    fs::write(
+        proj.path().join("WORK.md"),
+        "- [x] W-40 Shipped, but the branch is still busy\n",
+    )
+    .unwrap();
+    write_transcript(
+        claude.path(),
+        "-proj",
+        "aaaa.jsonl",
+        &[assistant_line_in("sess-live", &proj_cwd, "feat/W-40-review-fixes")],
+    );
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/work"))
+        .query(&[("cwd", proj_cwd.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let w40 = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "W-40")
+        .unwrap();
+    assert_eq!(w40["session"]["status"], "active", "premise: {w40:?}");
+    assert_eq!(w40["status"], "done", "{w40:?}");
+    assert_eq!(w40["sourceStatus"], "done", "{w40:?}");
 }
 
 /// Run a git command in `dir`, asserting it succeeds.
