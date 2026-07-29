@@ -288,7 +288,7 @@ body {
 
 /* what the source itself still says, when a live Work Link raised the status the
    board shows (#66) — quieter than the card's own facts, since it is the aside */
-.srcstatus { margin-top: 7px; color: var(--ink-faint); font-size: 11px; }
+.src-status { margin-top: 7px; color: var(--ink-faint); font-size: 11px; }
 
 /* the linked Agent Session chip (the Work Link, made visible) */
 .link-sess { display: flex; width: 100%; align-items: center; gap: 8px; margin-top: 11px; padding: 8px 10px; border: 1px solid var(--hairline); border-radius: 8px; background: rgba(43, 36, 26, 0.04); cursor: pointer; text-align: left; }

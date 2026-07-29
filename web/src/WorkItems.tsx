@@ -162,16 +162,16 @@ function SessionChip({ session, onOpen }: { session: LinkedSession; onOpen: Open
  *  the plan never silently disagree. */
 function WorkCard({
   item,
-  source,
+  sourceKind,
   onOpenSession,
 }: {
   item: WorkItem;
-  source: WorkSource | null;
+  sourceKind: WorkSource;
   onOpenSession: OpenSession;
 }) {
   const tileColor =
     item.status === "done" ? "var(--positive)" : item.status === "doing" ? "var(--info)" : "var(--ink-faint)";
-  const derived = sourceStatusNote(item.status, item.sourceStatus, source);
+  const derived = sourceStatusNote(item.status, item.sourceStatus, sourceKind);
 
   let body = null;
   if (item.session) {
@@ -203,7 +203,7 @@ function WorkCard({
       <div className="title">{item.title}</div>
       {body}
       {derived && (
-        <div className="srcstatus">
+        <div className="src-status">
           <span aria-hidden="true">{STATUS_GLYPH[item.sourceStatus]} </span>
           {derived}
         </div>
@@ -219,11 +219,11 @@ function WorkCard({
  *  `list-style:none` drops list semantics in some browsers. */
 function Kanban({
   items,
-  source,
+  sourceKind,
   onOpenSession,
 }: {
   items: WorkItem[];
-  source: WorkSource | null;
+  sourceKind: WorkSource;
   onOpenSession: OpenSession;
 }) {
   return (
@@ -244,7 +244,7 @@ function Kanban({
               ) : (
                 inCol.map((item) => (
                   <li key={item.id}>
-                    <WorkCard item={item} source={source} onOpenSession={onOpenSession} />
+                    <WorkCard item={item} sourceKind={sourceKind} onOpenSession={onOpenSession} />
                   </li>
                 ))
               )}
@@ -662,7 +662,7 @@ export function WorkItems({
         />
       ) : loading && total === 0 ? (
         <WorkLoading />
-      ) : total === 0 ? (
+      ) : !data || total === 0 ? (
         <StateBlock
           tone="info"
           live="status"
@@ -678,7 +678,7 @@ export function WorkItems({
           action={{ label: "Refresh", onClick: refetch }}
         />
       ) : mode === "kanban" ? (
-        <Kanban items={items} source={data?.source ?? null} onOpenSession={onOpenSession} />
+        <Kanban items={items} sourceKind={data.source} onOpenSession={onOpenSession} />
       ) : (
         <>
           {/* Wide screens: the spatial pan-scroll graph. Narrow screens: the same
