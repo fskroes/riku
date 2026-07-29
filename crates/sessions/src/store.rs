@@ -11,8 +11,9 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::fold::{assemble, merge_roster, Folded, Projection};
 use crate::liveness::ProcessLiveness;
-use crate::model::Session;
+use crate::model::{Session, SubAgent};
 use crate::session::FileState;
 use crate::source::SessionSource;
 
@@ -53,11 +54,17 @@ pub enum Event {
     Removed { id: String },
 }
 
+/// Roster rows contributed by discovered Sub-agent files, indexed by the id of the
+/// **root** Agent Session each belongs to — the only node in a spawn tree that is a
+/// card, however deep the Sub-agent was spawned.
+type Rosters = HashMap<String, Vec<SubAgent>>;
+
 struct FileEntry {
     state: FileState,
     mtime: DateTime<Utc>,
     /// Last Session built for this file, cached to diff against and to know which
-    /// id to remove when the file disappears.
+    /// id to remove when the file disappears. Always `None` for a Sub-agent's file:
+    /// a Sub-agent is folded in full and is never a card.
     session: Option<Session>,
     /// Current process verdict for this transcript ([`apply_liveness`] maintains
     /// it; `Unknown` until a probe has matched or definitively missed it).
@@ -104,9 +111,49 @@ impl SessionStore {
             }
         }
         for path in candidates {
-            self.ingest(&path, now);
+            self.feed(&path, now);
         }
+        // Join after every file is folded, rather than per ingest — which would
+        // re-index every Sub-agent for every transcript found. `refresh` is called
+        // for its caching side effect (its events are the whole corpus and nobody
+        // has subscribed yet); caching here is what stops the first live refresh
+        // from re-emitting every card.
+        self.refresh(now);
         self.snapshot(now)
+    }
+
+    /// Every discovered Sub-agent's roster row, indexed by its root Agent Session.
+    ///
+    /// This is the cross-file join the store owns. A Sub-agent's spend is in its own
+    /// file and what it was sent to do is in a sidecar beside that file, while the
+    /// spawn that created it is in a third — its root's transcript. Indexing by root
+    /// here, and merging in [`build`], is what lets `assemble` stay the one pure
+    /// projection-to-card seam and gain an input rather than a second job.
+    ///
+    /// A Sub-agent whose root the source could not resolve is **held out** rather
+    /// than attached to a guess: it waits, invisible, until its root is discovered.
+    ///
+    /// **Known bound, recorded rather than fixed.** A Sub-agent's file is filtered by
+    /// [`DISCOVERY_WINDOW`] on its *own* mtime, like any other transcript, so a
+    /// Sub-agent that went quiet more than a day ago does not appear on the roster of
+    /// a parent that is still fresh. The parent's own spawn record survives — the row
+    /// is there, with its Errand — but it reports no spend, and the card's headline
+    /// tokens and cost under-report by that Sub-agent's share with nothing on screen
+    /// to say so. The roster reflects what discovery found. Discovering Sub-agent
+    /// files by their *root's* freshness instead of their own would fix it and is a
+    /// change to discovery, not to this join.
+    fn rosters(&self) -> Rosters {
+        let mut rosters = Rosters::new();
+        for entry in self.files.values() {
+            let Some(Folded::SubAgent(sub)) = entry.state.folded() else {
+                continue;
+            };
+            let Some(root) = sub.root_session_id.clone() else {
+                continue;
+            };
+            rosters.entry(root).or_default().push(sub.roster_entry());
+        }
+        rosters
     }
 
     /// The source that owns `path`: the one whose root is an ancestor and whose
@@ -125,11 +172,13 @@ impl SessionStore {
     }
 
     /// Current sessions, with status recomputed against `now` (so time-based
-    /// transitions like Active -> Finished are reflected without a file change).
+    /// transitions like Active -> Finished are reflected without a file change) and
+    /// every Sub-agent joined onto its root's roster.
     pub fn snapshot(&self, now: DateTime<Utc>) -> Vec<Session> {
+        let rosters = self.rosters();
         self.files
             .values()
-            .filter_map(|e| e.state.build_with_liveness(e.mtime, now, e.liveness))
+            .filter_map(|e| build(e, &rosters, now))
             .collect()
     }
 
@@ -137,18 +186,20 @@ impl SessionStore {
     /// the built Session. Used by the deep-link endpoint to resolve which local
     /// transcript / directory a client-supplied id refers to — the id is the only
     /// client input; the path and `cwd` come from the store, never the caller.
+    ///
+    /// A Sub-agent is never returned: it is not a card, so nothing can be opened or
+    /// resumed at it. Its roster is carried on the session this *does* return.
     pub fn find_by_id(&self, id: &str, now: DateTime<Utc>) -> Option<(PathBuf, Session)> {
+        let rosters = self.rosters();
         self.files.iter().find_map(|(path, entry)| {
-            let session = entry
-                .state
-                .build_with_liveness(entry.mtime, now, entry.liveness)?;
+            let session = build(entry, &rosters, now)?;
             (session.id == id).then(|| (path.clone(), session))
         })
     }
 
-    /// Ingest new bytes for a created/modified transcript. Returns an `Upsert`
-    /// event iff the resulting Session changed.
-    pub fn ingest(&mut self, path: &Path, now: DateTime<Utc>) -> Option<Event> {
+    /// Read a transcript's new bytes into its fold, creating the entry on first
+    /// sighting. `None` for a path no source claims, or one that cannot be read.
+    fn feed(&mut self, path: &Path, now: DateTime<Utc>) -> Option<()> {
         let meta = fs::metadata(path).ok()?;
         if !meta.is_file() {
             return None;
@@ -185,30 +236,63 @@ impl SessionStore {
             }
         }
         entry.mtime = mtime;
+        Some(())
+    }
 
-        let session = entry
-            .state
-            .build_with_liveness(mtime, now, entry.liveness)?;
+    /// Ingest new bytes for a created/modified transcript. Returns an `Upsert`
+    /// event iff the resulting Session changed.
+    ///
+    /// A Sub-agent's file emits an update for **its root's** session and never one
+    /// of its own: what changed is a row on the root's roster. If the root has not
+    /// been discovered, nothing is emitted and the Sub-agent waits — held out of
+    /// every roster rather than attached to a guess.
+    pub fn ingest(&mut self, path: &Path, now: DateTime<Utc>) -> Option<Event> {
+        self.feed(path, now)?;
+        match self.files.get(path)?.state.folded()? {
+            Folded::SubAgent(sub) => self.rebuild_session(&sub.root_session_id?, now),
+            Folded::AgentSession(_) => self.rebuild(&path.to_path_buf(), now),
+        }
+    }
+
+    /// Drop a removed transcript. Returns a `Removed` event if it had a Session.
+    ///
+    /// A Sub-agent's file never produces a removal of its own — it was never a card.
+    /// Its disappearance is a row leaving its root's roster, so the root is re-emitted.
+    pub fn remove(&mut self, path: &Path, now: DateTime<Utc>) -> Option<Event> {
+        let entry = self.files.remove(path)?;
+        if let Some(Folded::SubAgent(sub)) = entry.state.folded() {
+            return self.rebuild_session(&sub.root_session_id?, now);
+        }
+        entry.session.map(|s| Event::Removed { id: s.id })
+    }
+
+    /// Rebuild one file's card with its Sub-agents joined on, cache it, and emit an
+    /// `Upsert` iff it changed.
+    fn rebuild(&mut self, path: &PathBuf, now: DateTime<Utc>) -> Option<Event> {
+        let rosters = self.rosters();
+        let entry = self.files.get_mut(path)?;
+        let session = build(entry, &rosters, now)?;
         let changed = entry.session.as_ref() != Some(&session);
         entry.session = Some(session.clone());
         changed.then_some(Event::Upsert(session))
     }
 
-    /// Drop a removed transcript. Returns a `Removed` event if it had a Session.
-    pub fn remove(&mut self, path: &Path) -> Option<Event> {
-        let entry = self.files.remove(path)?;
-        entry.session.map(|s| Event::Removed { id: s.id })
+    /// As [`rebuild`](Self::rebuild), for the transcript carrying Agent Session `id`.
+    fn rebuild_session(&mut self, id: &str, now: DateTime<Utc>) -> Option<Event> {
+        let path = self.files.iter().find_map(|(path, entry)| {
+            matches!(entry.state.folded(), Some(Folded::AgentSession(p)) if p.id == id)
+                .then(|| path.clone())
+        })?;
+        self.rebuild(&path, now)
     }
 
     /// Re-evaluate every session's status against `now`, emitting an `Upsert` for
     /// each one whose projection changed (e.g. it just crossed into Finished).
     pub fn refresh(&mut self, now: DateTime<Utc>) -> Vec<Event> {
+        let rosters = self.rosters();
         let mut events = Vec::new();
         for entry in self.files.values_mut() {
-            if let Some(session) = entry
-                .state
-                .build_with_liveness(entry.mtime, now, entry.liveness)
-            {
+            if let Some(session) = build(entry, &rosters, now) {
                 if entry.session.as_ref() != Some(&session) {
                     entry.session = Some(session.clone());
                     events.push(Event::Upsert(session));
@@ -233,6 +317,15 @@ impl SessionStore {
     /// whose cwd is missing from the probe accrues misses and flips to `Dead`
     /// only at [`LIVENESS_MISS_THRESHOLD`] — the ported anti-flap debounce.
     ///
+    /// **Sub-agent files never enter that contest**, and cannot: the credit is read
+    /// off `entry.session`, which a Sub-agent's file never has, because a Sub-agent
+    /// is not a card. That is structural rather than a filter someone must remember,
+    /// and it matters — a Sub-agent shares its parent's working directory *exactly*
+    /// and is usually more recently active, so letting one compete would drop the
+    /// **parent** to `Unknown` and back onto the Staleness heuristic, precisely for
+    /// the sessions doing the most work (ADR 0014). The liveness probe already votes
+    /// this way one layer down, stripping Sub-agent worktree processes from the pool.
+    ///
     /// [`probe_alive_cwds`]: crate::liveness::probe_alive_cwds
     pub fn apply_liveness(
         &mut self,
@@ -256,6 +349,7 @@ impl SessionStore {
         let credited: HashMap<PathBuf, String> =
             credit.into_iter().map(|(cwd, path)| (path, cwd)).collect();
 
+        let rosters = self.rosters();
         let mut events = Vec::new();
         for (path, entry) in &mut self.files {
             match credited.get(path) {
@@ -279,10 +373,7 @@ impl SessionStore {
                     entry.liveness = ProcessLiveness::Unknown;
                 }
             }
-            if let Some(session) = entry
-                .state
-                .build_with_liveness(entry.mtime, now, entry.liveness)
-            {
+            if let Some(session) = build(entry, &rosters, now) {
                 if entry.session.as_ref() != Some(&session) {
                     entry.session = Some(session.clone());
                     events.push(Event::Upsert(session));
@@ -291,6 +382,28 @@ impl SessionStore {
         }
         events
     }
+}
+
+/// One file's card, with the rows its Sub-agents contributed joined onto the spawns
+/// its own transcript recorded.
+///
+/// `None` for a fold that has no identity yet, and for a Sub-agent's own file — the
+/// one place "never a card" is enforced, by type rather than by convention.
+fn build(entry: &FileEntry, rosters: &Rosters, now: DateTime<Utc>) -> Option<Session> {
+    let Folded::AgentSession(p) = entry.state.folded()? else {
+        return None;
+    };
+    let contributions = rosters.get(&p.id).cloned().unwrap_or_default();
+    let sub_agent_roster = merge_roster(p.sub_agent_roster, contributions);
+    Some(assemble(
+        Projection {
+            sub_agent_roster,
+            ..p
+        },
+        entry.mtime,
+        now,
+        entry.liveness,
+    ))
 }
 
 /// Recursively collect files under `dir`, descending at most `depth` levels.
@@ -493,6 +606,307 @@ mod tests {
         store.apply_liveness(&none, later);
         store.apply_liveness(&none, later);
         assert_eq!(status_of(&store, "new", later), Status::Finished);
+    }
+
+    // --- the cross-file Sub-agent join -----------------------------------------
+    //
+    // A Sub-agent's spend is in its own file, what it was sent to do is in a sidecar
+    // beside that file, and the spawn that created it is in a third — its root's
+    // transcript. Only the store sees all three.
+
+    /// A main-chain `Agent` tool-use: the parent recording that it sent a Sub-agent
+    /// out, and what for.
+    fn agent_spawn_line(id: &str, cwd: &str, tuid: &str, errand: &str) -> String {
+        serde_json::json!({
+            "type": "assistant", "sessionId": id, "cwd": cwd,
+            "timestamp": "2026-07-19T10:00:00Z",
+            "message": {
+                "model": "claude-opus-4-8", "stop_reason": "tool_use",
+                "content": [{
+                    "type": "tool_use", "id": tuid, "name": "Agent",
+                    "input": { "description": errand, "subagent_type": "Explore" }
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    /// The sidecar Claude writes beside a Sub-agent's transcript **at spawn**, in
+    /// the four-field shape 70 of 70 real ones carry.
+    fn meta(errand: &str, tuid: &str, depth: u32) -> serde_json::Value {
+        serde_json::json!({
+            "agentType": "Explore", "description": errand,
+            "toolUseId": tuid, "spawnDepth": depth,
+        })
+    }
+
+    /// Write a Sub-agent's transcript and its spawn-time sidecar under `root`'s
+    /// `subagents/` directory, where Claude Code puts them.
+    fn write_sub_agent(
+        project: &Path,
+        root_id: &str,
+        agent_id: &str,
+        meta: serde_json::Value,
+        cwd: &str,
+        tin: u64,
+    ) -> PathBuf {
+        let dir = project.join(root_id).join("subagents");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("agent-{agent_id}.meta.json")),
+            meta.to_string(),
+        )
+        .unwrap();
+        let path = dir.join(format!("agent-{agent_id}.jsonl"));
+        let line = serde_json::json!({
+            "type": "assistant", "isSidechain": true, "agentId": agent_id,
+            // Claude stamps the *root* session's id on every child entry, at any depth.
+            "sessionId": root_id, "cwd": cwd, "gitBranch": "main",
+            "timestamp": "2026-07-19T10:00:10Z",
+            "message": {
+                "model": "claude-haiku-4-5",
+                "usage": { "input_tokens": tin, "output_tokens": 10 },
+                "content": [{ "type": "text", "text": "sub work" }]
+            }
+        });
+        fs::write(&path, format!("{line}\n")).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_sub_agent_file_joins_its_roots_roster_and_is_never_a_card_itself() {
+        // The union: the parent's spawn says what the Sub-agent was for, the child's
+        // own file says what it spent, and the sidecar's tool-use id makes them one
+        // row. The Sub-agent never appears as a session of its own, and is never
+        // returned by an id lookup.
+        let dir = tempfile::tempdir().unwrap();
+        let now = ts("2026-07-19T10:00:30Z");
+        let project = dir.path().join("-Users-x-repos-foo");
+        fs::create_dir_all(&project).unwrap();
+        let mut store = SessionStore::new(vec![Box::new(ClaudeSource::new(dir.path().into()))]);
+
+        let parent = project.join("root-1.jsonl");
+        fs::write(
+            &parent,
+            format!(
+                "{}\n",
+                agent_spawn_line("root-1", "/a/foo", "toolu_a", "map the parser")
+            ),
+        )
+        .unwrap();
+        store.ingest(&parent, now);
+        let child = write_sub_agent(
+            &project,
+            "root-1",
+            "a1b2c3",
+            meta("map the parser", "toolu_a", 1),
+            "/a/foo",
+            900,
+        );
+
+        // Ingesting the child emits an update for its **root**, never for itself.
+        let event = store.ingest(&child, now).expect("the root is re-emitted");
+        let Event::Upsert(card) = event else {
+            panic!("a Sub-agent's file never produces a removal");
+        };
+        assert_eq!(card.id, "root-1");
+        assert_eq!(card.sub_agent_roster.len(), 1);
+        let row = &card.sub_agent_roster[0];
+        assert_eq!(row.id, "a1b2c3"); // the child's own id, once it is known
+        assert_eq!(row.errand.as_deref(), Some("map the parser"));
+        assert_eq!(row.tokens_in, 900);
+        assert_eq!(row.depth, 1);
+        assert_eq!(row.model.as_deref(), Some("claude-haiku-4-5"));
+
+        // Every build path joins, and none of them yields the Sub-agent as a card.
+        let snapshot = store.snapshot(now);
+        assert_eq!(
+            snapshot.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["root-1"]
+        );
+        assert_eq!(snapshot[0].sub_agent_roster.len(), 1);
+        assert_eq!(
+            store
+                .find_by_id("root-1", now)
+                .unwrap()
+                .1
+                .sub_agent_roster
+                .len(),
+            1
+        );
+        assert!(store.find_by_id("a1b2c3", now).is_none());
+        assert!(store.refresh(now).is_empty(), "the join is already cached");
+
+        // And its disappearance re-emits the root rather than removing anything.
+        let Some(Event::Upsert(card)) = store.remove(&child, now) else {
+            panic!("a Sub-agent leaving re-emits its root");
+        };
+        assert_eq!(card.id, "root-1");
+        assert_eq!(card.sub_agent_roster.len(), 1); // the spawn record remains
+        assert_eq!(card.sub_agent_roster[0].tokens_in, 0);
+    }
+
+    #[test]
+    fn a_sub_agent_spawned_by_a_sub_agent_lands_on_the_roots_roster() {
+        // Attachment is to the root — the only node that is a card. A depth-2 child
+        // sits beside its depth-1 spawner in the same flat directory, and its spawn
+        // was recorded in a child transcript, so the parent's side of the union has
+        // no record of it at all. It is a row on the child file's word alone.
+        let dir = tempfile::tempdir().unwrap();
+        let now = ts("2026-07-19T10:00:30Z");
+        let project = dir.path().join("-Users-x-repos-foo");
+        fs::create_dir_all(&project).unwrap();
+        let parent = project.join("root-1.jsonl");
+        fs::write(&parent, format!("{}\n", assistant_line("root-1", "/a/foo"))).unwrap();
+        write_sub_agent(
+            &project,
+            "root-1",
+            "a-deep",
+            meta("research the API", "toolu_nested", 2),
+            "/a/foo",
+            400,
+        );
+
+        let mut store = SessionStore::new(vec![Box::new(ClaudeSource::new(dir.path().into()))]);
+        let cards = store.scan(now);
+        assert_eq!(cards.len(), 1, "only the root is a card: {cards:?}");
+        assert_eq!(cards[0].id, "root-1");
+        assert_eq!(cards[0].sub_agent_roster.len(), 1);
+        assert_eq!(cards[0].sub_agent_roster[0].depth, 2);
+        assert_eq!(
+            cards[0].sub_agent_roster[0].errand.as_deref(),
+            Some("research the API")
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_whose_root_is_undiscovered_is_held_out_of_every_roster() {
+        // The roster reflects what discovery found. A Sub-agent whose root has not
+        // been discovered waits — attached to nothing rather than to a guess — and
+        // its ingest emits no event at all.
+        let dir = tempfile::tempdir().unwrap();
+        let now = ts("2026-07-19T10:00:30Z");
+        let project = dir.path().join("-Users-x-repos-foo");
+        fs::create_dir_all(&project).unwrap();
+        // A different session's transcript; the orphan's root is never written.
+        let other = project.join("other.jsonl");
+        fs::write(&other, format!("{}\n", assistant_line("other", "/a/foo"))).unwrap();
+        let orphan = write_sub_agent(
+            &project,
+            "root-missing",
+            "a-orphan",
+            meta("nobody's errand", "toolu_x", 1),
+            "/a/foo",
+            100,
+        );
+
+        let mut store = SessionStore::new(vec![Box::new(ClaudeSource::new(dir.path().into()))]);
+        store.scan(now);
+        assert!(store.ingest(&orphan, now).is_none(), "nothing to emit yet");
+        let cards = store.snapshot(now);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "other");
+        assert!(cards[0].sub_agent_roster.is_empty());
+    }
+
+    #[test]
+    fn a_sub_agent_quiet_past_the_discovery_window_leaves_its_spend_off_the_card() {
+        // The known bound, asserted rather than merely written down. Discovery filters
+        // a Sub-agent's file on its *own* mtime, so a fresh parent with a long-quiet
+        // Sub-agent keeps the row (the parent's spawn record survives, Errand and all)
+        // but loses its spend — the card's tokens under-report with nothing on screen
+        // to say so. Fixing it means discovering child files by their root's
+        // freshness; this pins today's behaviour so the change is visible when it comes.
+        let dir = tempfile::tempdir().unwrap();
+        // Real wall-clock, because the cutoff is compared against real file mtimes.
+        let now = Utc::now();
+        let project = dir.path().join("-Users-x-repos-foo");
+        fs::create_dir_all(&project).unwrap();
+        let parent = project.join("root-1.jsonl");
+        fs::write(
+            &parent,
+            format!(
+                "{}\n",
+                agent_spawn_line("root-1", "/a/foo", "toolu_a", "map the parser")
+            ),
+        )
+        .unwrap();
+        let child = write_sub_agent(
+            &project,
+            "root-1",
+            "a1b2c3",
+            meta("map the parser", "toolu_a", 1),
+            "/a/foo",
+            900,
+        );
+        // The child went quiet two days ago; the parent is fresh.
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        fs::File::options()
+            .write(true)
+            .open(&child)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(long_ago))
+            .unwrap();
+
+        let mut store = SessionStore::new(vec![Box::new(ClaudeSource::new(dir.path().into()))]);
+        let cards = store.scan(now);
+        assert_eq!(cards.len(), 1);
+        // The row is there, and says what the Sub-agent was sent to do…
+        assert_eq!(cards[0].sub_agent_roster.len(), 1);
+        assert_eq!(
+            cards[0].sub_agent_roster[0].errand.as_deref(),
+            Some("map the parser")
+        );
+        // …but its spend is not, and neither is it in the headline total.
+        assert_eq!(cards[0].sub_agent_roster[0].tokens_in, 0);
+        assert_eq!(cards[0].tokens_in, 0);
+    }
+
+    #[test]
+    fn a_parent_keeps_its_liveness_credit_when_a_sub_agent_shares_its_cwd() {
+        // A Sub-agent shares its parent's working directory *exactly* and is usually
+        // more recently active. If it could take the per-cwd credit, the parent would
+        // fall back to the Staleness heuristic — precisely for the sessions doing the
+        // most work. It cannot: a Sub-agent is not a card, so it never competes.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("wd");
+        fs::create_dir_all(&cwd).unwrap();
+        let cwd_str = cwd.to_str().unwrap().to_string();
+        let ingested = ts("2026-07-19T10:00:30Z");
+        let project = dir.path().join("-Users-x-repos-foo");
+        fs::create_dir_all(&project).unwrap();
+        let parent = project.join("root-1.jsonl");
+        fs::write(&parent, format!("{}\n", assistant_line("root-1", &cwd_str))).unwrap();
+        write_sub_agent(
+            &project,
+            "root-1",
+            "a1b2c3",
+            meta("grind on it", "toolu_a", 1),
+            &cwd_str,
+            900,
+        );
+
+        let mut store = SessionStore::new(vec![Box::new(ClaudeSource::new(dir.path().into()))]);
+        store.scan(ingested);
+        // Pin both files' mtimes apart the wrong way round: the child is newer, as it
+        // is in practice, so a contest it could enter is one the parent would lose.
+        for (path, entry) in store.files.iter_mut() {
+            entry.mtime = if path == &parent {
+                ingested
+            } else {
+                ts("2026-07-19T10:20:00Z")
+            };
+        }
+
+        let later = ts("2026-07-19T10:25:00Z");
+        let alive: HashSet<String> = [fs::canonicalize(&cwd)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()]
+        .into();
+        store.apply_liveness(&alive, later);
+        assert_eq!(status_of(&store, "root-1", later), Status::Active);
     }
 
     #[test]

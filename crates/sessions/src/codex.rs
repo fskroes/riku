@@ -139,8 +139,8 @@ impl CodexFold {
         // (see `approval_kind`), so an unrecognised name simply never fires. The
         // command is local-only evidence; only the structured kind label crosses
         // the wire (ADR 0010 allowlist).
-        if let Some(kind) =
-            approval_kind(raw.line_type.as_deref()).or_else(|| approval_kind(payload.payload_type.as_deref()))
+        if let Some(kind) = approval_kind(raw.line_type.as_deref())
+            .or_else(|| approval_kind(payload.payload_type.as_deref()))
         {
             self.attention.apply(Observation::Need {
                 key: payload.call_id.clone().unwrap_or_else(|| "approval".into()),
@@ -248,6 +248,11 @@ impl Fold for CodexFold {
                 // Sub-agent; walking that chain up to the root is not done here, so
                 // no attachment is claimed rather than a guessed one.
                 root_session_id: None,
+                // Codex's `session_meta` carries a parent thread id, a depth, and a
+                // nickname that names nothing; none is read yet (#76).
+                spawn_key: None,
+                errand: None,
+                depth: 0,
                 tool: Tool::Codex,
                 model: self.model.clone(),
                 tokens_in: self.tokens_in,
@@ -272,9 +277,6 @@ impl Fold for CodexFold {
             tokens_out: self.tokens_out,
             // A Codex Agent Session's own Sub-agents are rollouts of their own, folded
             // separately; nothing joins them onto this roster yet (#76).
-            sub_tokens_in: 0,
-            sub_tokens_out: 0,
-            sub_agent_cost_usd: 0.0,
             sub_agent_roster: Vec::new(),
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,

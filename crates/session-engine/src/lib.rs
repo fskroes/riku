@@ -176,7 +176,7 @@ fn start_watch(
             let mut store = store.lock().unwrap();
             match change {
                 Change::Modified(path) => store.ingest(&path, Utc::now()),
-                Change::Removed(path) => store.remove(&path),
+                Change::Removed(path) => store.remove(&path, Utc::now()),
             }
         };
         // The watcher owns a dedicated thread, keeping git work off the runtime.
@@ -315,7 +315,12 @@ mod tests {
 
         // Write a transcript *after* subscribing so the update travels the live
         // watcher path rather than being seen only by the initial scan.
-        write_transcript(root.path(), "-Users-x-repos-bar", "watched-1", "/Users/x/repos/bar");
+        write_transcript(
+            root.path(),
+            "-Users-x-repos-bar",
+            "watched-1",
+            "/Users/x/repos/bar",
+        );
 
         // The watcher debounces (~250ms) on a dedicated thread, so allow a generous
         // budget before giving up rather than racing a fixed sleep.
@@ -340,7 +345,12 @@ mod tests {
     #[tokio::test]
     async fn snapshot_exposes_an_enriched_machine_stamped_local_session() {
         let root = tempfile::tempdir().unwrap();
-        write_transcript(root.path(), "-Users-x-repos-foo", "engine-1", "/Users/x/repos/foo");
+        write_transcript(
+            root.path(),
+            "-Users-x-repos-foo",
+            "engine-1",
+            "/Users/x/repos/foo",
+        );
 
         let engine = Engine::start(root.path().to_path_buf(), None, "loki.local");
         let sessions = engine.snapshot();
@@ -354,7 +364,12 @@ mod tests {
         // The Work-Link read is machine-stamped like every Engine read, so the Board
         // never has to re-stamp a candidate (see `Engine::sessions_in`).
         let root = tempfile::tempdir().unwrap();
-        write_transcript(root.path(), "-Users-x-repos-foo", "engine-1", "/Users/x/repos/foo");
+        write_transcript(
+            root.path(),
+            "-Users-x-repos-foo",
+            "engine-1",
+            "/Users/x/repos/foo",
+        );
 
         let engine = Engine::start(root.path().to_path_buf(), None, "loki.local");
         let sessions = engine.sessions_in("/Users/x/repos/foo");
@@ -367,10 +382,17 @@ mod tests {
     async fn find_by_id_returns_a_machine_stamped_session() {
         // The deep-link read is machine-stamped too, keeping the invariant uniform.
         let root = tempfile::tempdir().unwrap();
-        write_transcript(root.path(), "-Users-x-repos-foo", "engine-1", "/Users/x/repos/foo");
+        write_transcript(
+            root.path(),
+            "-Users-x-repos-foo",
+            "engine-1",
+            "/Users/x/repos/foo",
+        );
 
         let engine = Engine::start(root.path().to_path_buf(), None, "loki.local");
-        let (_, session) = engine.find_by_id("engine-1").expect("session resolves by id");
+        let (_, session) = engine
+            .find_by_id("engine-1")
+            .expect("session resolves by id");
         assert_eq!(session.machine.as_deref(), Some("loki.local"));
     }
 }

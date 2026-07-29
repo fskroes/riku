@@ -75,7 +75,14 @@ describe("rosterRows", () => {
       subAgent("third", { state: "finished", outcome: "failed" }),
     ]);
 
-    expect(rows.map((r) => r.id)).toEqual(["first", "second", "third"]);
+    // Keyed on the spawn key, the one identity that survives the join: a row the
+    // parent alone established adopts the Sub-agent's own id once its file is
+    // discovered, so keying on that would remount the row when its spend arrives.
+    expect(rows.map((r) => r.id)).toEqual([
+      "toolu_first",
+      "toolu_second",
+      "toolu_third",
+    ]);
   });
 
   it("leaves a Sub-agent with no stated purpose unlabelled", () => {

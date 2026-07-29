@@ -63,25 +63,90 @@ fn assistant_line_in(id: &str, cwd: &str, branch: &str) -> String {
     .to_string()
 }
 
-/// A Claude assistant turn that spawns a Sub-agent via a `Task` tool-use (still
-/// active — no matching `tool_result` follows).
-fn claude_task_spawn(id: &str) -> String {
+/// A Claude assistant turn that spawns a Sub-agent, in the shape Claude Code writes
+/// today: an `Agent` tool-use whose id the Sub-agent's sidecar joins back on, and
+/// whose `description` is the Errand.
+fn claude_agent_spawn(id: &str, cwd: &str, tuid: &str, errand: &str) -> String {
     serde_json::json!({
         "type": "assistant",
         "sessionId": id,
         "timestamp": "2026-07-19T10:00:00Z",
-        "cwd": "/Users/x/repos/foo",
+        "cwd": cwd,
         "gitBranch": "main",
         "message": {
             "model": "claude-opus-4-8",
             "stop_reason": "tool_use",
             "content": [{
-                "type": "tool_use", "id": "toolu_sub", "name": "Task",
-                "input": { "description": "map the parser", "subagent_type": "Explore" }
+                "type": "tool_use", "id": tuid, "name": "Agent",
+                "input": { "description": errand, "subagent_type": "Explore" }
             }]
         }
     })
     .to_string()
+}
+
+/// The `tool_result` answering an `Agent` spawn: a launch acknowledgement, not a
+/// completion.
+fn claude_launch_ack(id: &str, tuid: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "sessionId": id,
+        "cwd": "/Users/x/repos/foo",
+        "message": { "content": [{
+            "type": "tool_result", "tool_use_id": tuid,
+            "content": "Async agent launched successfully. You will be notified automatically when it completes.",
+        }] }
+    })
+    .to_string()
+}
+
+/// Write a Claude Sub-agent's own transcript and the metadata sidecar Claude writes
+/// beside it at spawn, at
+/// `<project>/<root-uuid>/subagents/agent-<agentId>.{jsonl,meta.json}`.
+///
+/// The directory is flat: a depth-2 child sits beside its depth-1 spawner, and every
+/// entry in either carries the **root** session's id.
+#[allow(clippy::too_many_arguments)]
+fn write_sub_agent(
+    claude_root: &Path,
+    project_dir: &str,
+    root_id: &str,
+    agent_id: &str,
+    tuid: &str,
+    errand: &str,
+    depth: u32,
+    cwd: &str,
+    model: &str,
+    tin: u64,
+    tout: u64,
+) -> PathBuf {
+    let dir = claude_root
+        .join(project_dir)
+        .join(root_id)
+        .join("subagents");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(format!("agent-{agent_id}.meta.json")),
+        serde_json::json!({
+            "agentType": "Explore", "description": errand,
+            "toolUseId": tuid, "spawnDepth": depth,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let path = dir.join(format!("agent-{agent_id}.jsonl"));
+    let line = serde_json::json!({
+        "type": "assistant", "isSidechain": true, "agentId": agent_id,
+        "sessionId": root_id, "cwd": cwd, "gitBranch": "main",
+        "timestamp": "2026-07-19T10:00:10Z",
+        "message": {
+            "model": model,
+            "usage": { "input_tokens": tin, "output_tokens": tout },
+            "content": [{ "type": "text", "text": "sub work" }]
+        }
+    });
+    fs::write(&path, format!("{line}\n")).unwrap();
+    path
 }
 
 /// A Claude assistant turn that ended to call a tool (waiting on the human).
@@ -479,24 +544,78 @@ async fn codex_subagent_rollout_is_not_a_card() {
     );
 }
 
+/// Backdate a file's modification time by `minutes`, so a test can put a transcript
+/// past the 15-minute Staleness window without waiting for it.
+fn age_file(path: &Path, minutes: u64) {
+    let when = std::time::SystemTime::now() - Duration::from_secs(minutes * 60);
+    let f = OpenOptions::new().write(true).open(path).unwrap();
+    f.set_times(fs::FileTimes::new().set_modified(when))
+        .unwrap();
+}
+
 #[tokio::test]
-async fn the_sub_agent_roster_serializes_through_the_sessions_api() {
-    // A session fanning work out carries its Sub-agent on a roster, under the wire's
-    // new field name; a session that never fanned out carries an empty one and so
-    // shows no badge.
+async fn a_claude_fan_out_shows_its_sub_agents_on_the_parents_card() {
+    // The whole feature at the seam a person can see: a parent transcript, two
+    // Sub-agent files, and their spawn-time sidecars, written as real files —
+    // through discovery, both folds, the cross-file join, the status refinement,
+    // cost and token totals, and JSON serialization.
     let claude = tempfile::tempdir().unwrap();
     let codex = tempfile::tempdir().unwrap();
-    write_transcript(
+    let project = "-Users-x-repos-foo";
+    let cwd = "/Users/x/repos/foo";
+
+    // The parent: 1M in / 1M out on Opus, two spawns, and a launch acknowledgement
+    // for the first — which must change nothing about its entry.
+    let parent = write_transcript(
         claude.path(),
-        "-Users-x-repos-foo",
-        "aaaa.jsonl",
-        &[claude_task_spawn("sess-fanout")],
+        project,
+        "sess-fanout.jsonl",
+        &[
+            assistant_line("sess-fanout", "orchestrating", 1_000_000, 1_000_000),
+            claude_agent_spawn("sess-fanout", cwd, "toolu_a", "map the parser"),
+            claude_agent_spawn("sess-fanout", cwd, "toolu_b", "audit the tests"),
+            claude_launch_ack("sess-fanout", "toolu_a"),
+        ],
     );
+    // A depth-1 Sub-agent on the cheaper Haiku: 1M in, 0 out → $0.80.
+    write_sub_agent(
+        claude.path(),
+        project,
+        "sess-fanout",
+        "a1b2c3",
+        "toolu_a",
+        "map the parser",
+        1,
+        cwd,
+        "claude-haiku-4-5",
+        1_000_000,
+        0,
+    );
+    // A Sub-agent spawned by that Sub-agent. Its spawn was recorded in a child
+    // transcript, not the parent's — so only its own file speaks for it, and it must
+    // still land on the **root's** roster.
+    write_sub_agent(
+        claude.path(),
+        project,
+        "sess-fanout",
+        "a-deep",
+        "toolu_nested",
+        "research the API",
+        2,
+        cwd,
+        "claude-haiku-4-5",
+        500,
+        50,
+    );
+    // A session that never fanned out: an empty roster, so no badge.
     write_codex_rollout(
         codex.path(),
         "rollout-2026-07-19T10-00-00-codex-plain.jsonl",
         &codex_rollout("codex-plain", "no fan-out here", 100, 10),
     );
+    // The parent's own transcript has been quiet for half an hour — twice the
+    // Staleness window, and past the 963s of observed fan-out silence.
+    age_file(&parent, 30);
 
     let (addr, _started) = spawn_server_with(
         claude.path().to_path_buf(),
@@ -514,20 +633,209 @@ async fn the_sub_agent_roster_serializes_through_the_sessions_api() {
 
     let fanout = sessions.iter().find(|s| s["id"] == "sess-fanout").unwrap();
     let roster = fanout["subAgentRoster"].as_array().unwrap();
-    assert_eq!(roster.len(), 1);
-    assert_eq!(roster[0]["errand"], "map the parser");
-    assert_eq!(roster[0]["state"], "running");
+    assert_eq!(roster.len(), 3, "roster was {roster:?}");
+
+    // In spawn order, each carrying its Errand verbatim and what it has spent.
+    let mapped = &roster[0];
+    assert_eq!(mapped["errand"], "map the parser");
+    assert_eq!(mapped["state"], "running");
+    assert_eq!(mapped["tokensIn"], 1_000_000);
+    assert_eq!(mapped["model"], "claude-haiku-4-5");
+    assert_eq!(mapped["depth"], 1);
     // Outcome is absent while it runs — a word the source has not said.
-    assert_eq!(roster[0]["outcome"], serde_json::Value::Null);
-    // Depth rides along on every entry, drawn nowhere.
-    assert_eq!(roster[0]["depth"], 0);
+    assert_eq!(mapped["outcome"], serde_json::Value::Null);
+
+    // `toolu_b` spawned but its file has not appeared: the parent's own record is
+    // enough for a row, and the row says what it was sent to do.
+    let audited = roster
+        .iter()
+        .find(|r| r["errand"] == "audit the tests")
+        .unwrap();
+    assert_eq!(audited["tokensIn"], 0);
+
+    // However deep it was spawned, a Sub-agent belongs to the root — the only node
+    // that is a card. This one's spawn was never in the parent's transcript, so the
+    // row exists on its own file's word, after the two the parent recorded.
+    let nested = &roster[2];
+    assert_eq!(nested["errand"], "research the API");
+    assert_eq!(nested["depth"], 2);
+    assert_eq!(nested["tokensIn"], 500);
+
+    // Headline totals include every Sub-agent's usage, each priced at its own model:
+    // Opus main (15 + 75 = 90) + Haiku children (0.80 + 0.0006), never Opus-priced.
+    assert_eq!(fanout["tokensIn"], 2_000_500);
+    assert_eq!(fanout["tokensOut"], 1_000_050);
+    let cost = fanout["costUsd"].as_f64().unwrap();
+    assert!((cost - 90.8006).abs() < 1e-6, "cost was {cost}");
+    // The card's model stays the orchestrator's, never a Sub-agent's.
+    assert_eq!(fanout["model"], "claude-opus-4-8");
+
+    // A parent whose own transcript went quiet while its Sub-agents grind stays
+    // Running rather than ageing into Finished — and fanning out is not a human wait.
+    assert_eq!(fanout["status"], "active");
+    assert_eq!(fanout["attention"], serde_json::Value::Null);
     // The legacy count-and-descriptions field is gone from the card entirely.
     assert_eq!(fanout["subAgents"], serde_json::Value::Null);
-    // A Running Sub-agent keeps the parent working (never stale), not in Attention.
-    assert_eq!(fanout["status"], "active");
 
     let codex_card = sessions.iter().find(|s| s["id"] == "codex-plain").unwrap();
     assert_eq!(codex_card["subAgentRoster"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn a_sub_agent_appearing_mid_flight_streams_its_roots_card() {
+    // The live half: a Sub-agent's file and sidecar appear *while the board is
+    // watching*, in the order Claude Code writes them — sidecar at spawn, transcript
+    // filling as the Sub-agent works. Riku observes them appear and the parent's
+    // roster fills, on the stream rather than only in a later snapshot.
+    let claude = tempfile::tempdir().unwrap();
+    let project = "-Users-x-repos-foo";
+    let cwd = "/Users/x/repos/foo";
+    write_transcript(
+        claude.path(),
+        project,
+        "sess-live.jsonl",
+        &[claude_agent_spawn(
+            "sess-live",
+            cwd,
+            "toolu_a",
+            "map the parser",
+        )],
+    );
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+
+    // Awaiting send() guarantees the handler has subscribed before we mutate.
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/api/events"))
+        .send()
+        .await
+        .unwrap();
+
+    // The Sub-agent starts: its sidecar and its first turn land together.
+    write_sub_agent(
+        claude.path(),
+        project,
+        "sess-live",
+        "a1b2c3",
+        "toolu_a",
+        "map the parser",
+        1,
+        cwd,
+        "claude-haiku-4-5",
+        4_242,
+        424,
+    );
+
+    let buf = read_until(resp, "\"tokensIn\":4242", Duration::from_secs(15)).await;
+
+    // Parse the streamed cards rather than substring-matching the serialization —
+    // an assertion that depends on two fields being adjacent silently stops being
+    // able to fail the moment the struct is reordered.
+    let cards: Vec<serde_json::Value> = buf
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    assert!(
+        !cards.is_empty(),
+        "expected at least one streamed card: {buf:?}"
+    );
+    // Every streamed card is the **root's**; a Sub-agent never streams as one.
+    for card in &cards {
+        assert_eq!(
+            card["id"], "sess-live",
+            "a Sub-agent must never stream as a card: {card:?}"
+        );
+    }
+    let roster = cards
+        .iter()
+        .rev()
+        .find_map(|c| c["subAgentRoster"].as_array().filter(|r| !r.is_empty()))
+        .expect("a filled roster reached the stream");
+    assert_eq!(roster[0]["errand"], "map the parser");
+    assert_eq!(roster[0]["state"], "running");
+    assert_eq!(roster[0]["tokensIn"], 4242);
+}
+
+#[tokio::test]
+async fn a_sub_agent_is_never_a_card_a_lookup_target_or_a_work_link() {
+    // The three things that must keep working. A Sub-agent shares its parent's
+    // branch and working directory verbatim and is more recently active than it, so
+    // every one of these would go wrong if a Sub-agent were a session.
+    let claude = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    let proj_cwd = proj.path().to_string_lossy().to_string();
+    fs::write(
+        proj.path().join("WORK.md"),
+        "# Work Map\n\n- [ ] W-30 The work the parent is carrying\n",
+    )
+    .unwrap();
+    write_transcript(
+        claude.path(),
+        "-proj",
+        "sess-parent.jsonl",
+        &[assistant_line_in(
+            "sess-parent",
+            &proj_cwd,
+            "feat/W-30-roster",
+        )],
+    );
+    write_sub_agent(
+        claude.path(),
+        "-proj",
+        "sess-parent",
+        "a1b2c3",
+        "toolu_a",
+        "map the parser",
+        1,
+        &proj_cwd,
+        "claude-haiku-4-5",
+        900,
+        90,
+    );
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+
+    // Never a card of its own.
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.iter().map(|s| &s["id"]).collect::<Vec<_>>(),
+        vec!["sess-parent"],
+        "a Sub-agent is not a card: {sessions:?}"
+    );
+    assert_eq!(sessions[0]["subAgentRoster"].as_array().unwrap().len(), 1);
+
+    // Never returned by an id lookup — there is nothing a person could open at it.
+    let missing = reqwest::Client::new()
+        .post(format!("http://{addr}/api/sessions/a1b2c3/open"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Never a Work Link target: the chip stays on the parent, the only card there is.
+    let work: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/work"))
+        .query(&[("cwd", proj_cwd.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let w30 = work["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "W-30")
+        .unwrap();
+    assert_eq!(w30["session"]["id"], "sess-parent");
 }
 
 #[tokio::test]
@@ -696,7 +1004,11 @@ async fn a_live_work_link_makes_an_unmarked_item_read_as_doing() {
         claude.path(),
         "-proj",
         "aaaa.jsonl",
-        &[assistant_line_in("sess-live", &proj_cwd, "feat/W-20-doing-it")],
+        &[assistant_line_in(
+            "sess-live",
+            &proj_cwd,
+            "feat/W-20-doing-it",
+        )],
     );
 
     let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
@@ -752,15 +1064,13 @@ async fn a_work_link_whose_session_has_gone_quiet_does_not_claim_the_item() {
         claude.path(),
         "-proj",
         "aaaa.jsonl",
-        &[assistant_line_in("sess-gone", &proj_cwd, "feat/W-30-abandoned")],
+        &[assistant_line_in(
+            "sess-gone",
+            &proj_cwd,
+            "feat/W-30-abandoned",
+        )],
     );
-    let long_ago = std::time::SystemTime::now() - Duration::from_secs(30 * 60);
-    fs::File::options()
-        .write(true)
-        .open(&transcript)
-        .unwrap()
-        .set_times(fs::FileTimes::new().set_modified(long_ago))
-        .unwrap();
+    age_file(&transcript, 30);
 
     let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
 
@@ -805,7 +1115,11 @@ async fn a_live_session_does_not_un_complete_a_done_item() {
         claude.path(),
         "-proj",
         "aaaa.jsonl",
-        &[assistant_line_in("sess-live", &proj_cwd, "feat/W-40-review-fixes")],
+        &[assistant_line_in(
+            "sess-live",
+            &proj_cwd,
+            "feat/W-40-review-fixes",
+        )],
     );
 
     let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;

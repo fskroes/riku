@@ -79,6 +79,19 @@ pub struct SubAgentProjection {
     /// while the source cannot yet resolve it, in which case the Sub-agent is held
     /// out of every roster rather than attached to a guess.
     pub root_session_id: Option<String>,
+    /// The key that joins this Sub-agent back to the spawn that created it: Claude's
+    /// spawning tool-use id, Codex's parent thread id. `None` when the source states
+    /// none, in which case this Sub-agent joins no spawn record and stands as its own
+    /// roster row — which is right, since nothing links it to one.
+    pub spawn_key: Option<String>,
+    /// What it was sent to do, verbatim from the source (bounded where it is read,
+    /// like every other string the card carries). `None` when none is stated.
+    pub errand: Option<String>,
+    /// How deep it was spawned: 1 for a Sub-agent of an Agent Session, 2 for one a
+    /// Sub-agent spawned itself. `0` means the source has not stated a depth — both
+    /// producers of a Claude row emit 1 for a direct Sub-agent, so a 0 is an absence
+    /// rather than a level.
+    pub depth: u32,
     pub tool: Tool,
     /// The model this Sub-agent ran, which may be cheaper than the orchestrator's.
     pub model: Option<String>,
@@ -91,10 +104,85 @@ pub struct SubAgentProjection {
     pub last_event_at: Option<DateTime<Utc>>,
 }
 
+impl SubAgentProjection {
+    /// This Sub-agent as a roster row — what it spent, and what the source said it
+    /// was sent to do.
+    ///
+    /// The row's state is `Running`: a Sub-agent's completion is read from its
+    /// parent's notification records, which no source populates yet, and a parent
+    /// that is itself Finished demotes every still-Running row of its own accord in
+    /// [`assemble`]. `cost_usd` is `None` for an unpriced model rather than a
+    /// misleading `0.00`, matching the folded `0.0` accumulator's meaning.
+    ///
+    /// The join key falls back to this Sub-agent's own id when the source states
+    /// none: it then matches no spawn record and the row stands on its own.
+    pub fn roster_entry(&self) -> SubAgent {
+        SubAgent {
+            id: self.id.clone(),
+            spawn_key: self.spawn_key.clone().unwrap_or_else(|| self.id.clone()),
+            errand: self.errand.clone(),
+            state: SubAgentState::Running,
+            outcome: None,
+            tokens_in: self.tokens_in,
+            tokens_out: self.tokens_out,
+            cost_usd: (self.cost_usd > 0.0).then_some(self.cost_usd),
+            model: self.model.clone(),
+            depth: self.depth,
+            last_event_at: self.last_event_at,
+        }
+    }
+}
+
+/// The roster of one Agent Session: the union of what its own transcript recorded
+/// and what its Sub-agents' files spent, keyed by the spawn's tool-use id.
+///
+/// Neither side alone is required for a row. The parent's spawn record establishes
+/// that a Sub-agent exists and what it was sent to do — it is there the instant the
+/// spawn is written, before any child file exists. The child file supplies what that
+/// Sub-agent spent, and is the *only* side for a Sub-agent spawned by another
+/// Sub-agent, whose spawn was recorded in a child transcript rather than the
+/// parent's (1 of 70 observed children).
+///
+/// `spawns` keeps its order — that is spawn order, which is what the roster reads in.
+/// Rows contributed by a child file alone are appended in a deterministic order
+/// (oldest first, ties broken by id) rather than in whatever order the store's file
+/// map happened to yield, so an unchanged roster compares equal and the store's
+/// no-op suppression holds.
+///
+/// **A spawn key identifies at most one Sub-agent.** Claude mints one per `Agent`
+/// tool-use and its sidecar carries it back, so two children cannot honestly claim
+/// the same one; a Sub-agent resumed after finishing keeps writing to its own file
+/// under its own `agentId`. If two ever did collide, the later one would take the
+/// row and the earlier one's spend would leave the card silently — stated here
+/// because the totals are derived from this roster, so a dropped row is a dropped
+/// number, and pinned by `two_contributions_cannot_honestly_share_a_spawn_key`.
+pub fn merge_roster(mut spawns: Vec<SubAgent>, contributions: Vec<SubAgent>) -> Vec<SubAgent> {
+    let mut extra: Vec<SubAgent> = Vec::new();
+    for child in contributions {
+        match spawns.iter_mut().find(|s| s.spawn_key == child.spawn_key) {
+            // The spawn said what the Sub-agent was for; the child says what it cost.
+            // Errand stays the parent's word when it stated one — both sides copy it
+            // from the same spawn, so this only decides which copy is read.
+            Some(row) => {
+                let errand = row.errand.take().or(child.errand);
+                *row = SubAgent { errand, ..child };
+            }
+            None => extra.push(child),
+        }
+    }
+    extra.sort_by(|a, b| {
+        a.last_event_at
+            .cmp(&b.last_event_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    spawns.extend(extra);
+    spawns
+}
+
 /// Tool-agnostic inputs the shared builder turns into a [`Session`]. Everything
 /// except `status`, which the builder computes from `pending_input` and mtime.
 ///
-/// `PartialEq` only (not `Eq`): `sub_agent_cost_usd` is an `f64`.
+/// `PartialEq` only (not `Eq`): the roster's `cost_usd` is an `f64`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Projection {
     pub id: String,
@@ -103,22 +191,16 @@ pub struct Projection {
     pub model: Option<String>,
     pub branch: Option<String>,
     pub cwd: Option<String>,
-    /// Main-conversation assistant token usage. The Sub-agent (sidechain) usage is
-    /// kept apart in `sub_tokens_*` so cost can be priced per each agent's own model;
-    /// the builder sums the two into the card's displayed counts.
+    /// This session's *own* assistant token usage. Its Sub-agents' spend lives on
+    /// the roster, priced per each one's own model, and the builder sums the two
+    /// into the card's displayed counts.
     pub tokens_in: u64,
     pub tokens_out: u64,
-    /// Sub-agent (sidechain) assistant token usage folded into this parent, held
-    /// separately only for per-model pricing (see `sub_agent_cost_usd`). `0` for a
-    /// source with no Sub-agent concept.
-    pub sub_tokens_in: u64,
-    pub sub_tokens_out: u64,
-    /// Cost of the Sub-agent usage, already priced per each Sub-agent entry's *own*
-    /// model (they may run cheaper models than the orchestrator). The builder adds it
-    /// to the main-model cost. `0.0` when there is no Sub-agent usage.
-    pub sub_agent_cost_usd: f64,
     /// Every Sub-agent spawned under this session, running and finished alike, in
-    /// spawn order — the card's badge and roster. Empty until a source populates it.
+    /// spawn order — the card's badge and roster, and the *only* record of fan-out
+    /// spend. A parallel set of sub-token counters used to run beside it; that
+    /// arrangement is what let Claude's Sub-agent accounting reach the bin unseen,
+    /// so the totals are derived from the roster instead (ADR 0014).
     pub sub_agent_roster: Vec<SubAgent>,
     pub activity: Option<String>,
     /// Latest entry timestamp; falls back to the file mtime when a source records
@@ -190,13 +272,18 @@ pub fn status_for(
 ///   evidence so the card does not pretend the session is resumable in place.
 /// - **Attention Since falls back to the file mtime** when the source recorded no
 ///   timestamp for the need.
-/// - **Cost is a pure sum**: the main-conversation usage is priced at the session
-///   model; the Sub-agent usage was already priced per each Sub-agent's own model as
-///   it was folded (they may run cheaper models), so the two are added here. When the
-///   main model is unpriced but Sub-agents ran priced models, the card still shows
-///   their cost rather than nothing.
-/// - **Token counts include Sub-agent usage** — fan-out spend is real and counted
-///   (the split exists only so cost could be priced per model).
+/// - **Cost is a pure sum**: the session's own usage is priced at its model; each
+///   Sub-agent's was already priced at that Sub-agent's own model as it was folded
+///   (they may run cheaper ones), so the two are added here. When the session's model
+///   is unpriced but Sub-agents ran priced models, the card still shows their cost
+///   rather than nothing.
+/// - **Token counts include Sub-agent usage** — fan-out spend is real and counted.
+/// - **A Sub-agent is never Running when its root is not.** The roster's raw Running
+///   flags feed the status rule first; only if the result is Finished is a row still
+///   marked Running presented as Finished, with no outcome word. Stated in that
+///   order the rule is well-founded, and it can only fire when Process Liveness says
+///   the process is dead — exactly the gap it exists to close, where a session died
+///   before its Sub-agent's completion arrived (6 of 59 observed spawns).
 ///
 /// The live git `diff` is out-of-transcript, and `machine` is stamped at the source,
 /// so both are left `None` here — the board (or a Collector) fills them.
@@ -229,14 +316,27 @@ pub fn assemble(
             details_on_source: false,
             remote_evidence: a.remote_evidence,
         });
-    let main_cost = crate::pricing::estimate_cost_usd(p.model.as_deref(), p.tokens_in, p.tokens_out);
+    let mut sub_agent_roster = p.sub_agent_roster;
+    // Parent-dominance, applied *after* the status above was computed from the raw
+    // flags: a Sub-agent is never Running when its root is not.
+    if status == Status::Finished {
+        for entry in &mut sub_agent_roster {
+            if entry.state == SubAgentState::Running {
+                entry.state = SubAgentState::Finished;
+                entry.outcome = None;
+            }
+        }
+    }
+    let sub_cost: f64 = sub_agent_roster.iter().filter_map(|s| s.cost_usd).sum();
+    let main_cost =
+        crate::pricing::estimate_cost_usd(p.model.as_deref(), p.tokens_in, p.tokens_out);
     let cost_usd = match main_cost {
-        Some(main) => Some(main + p.sub_agent_cost_usd),
-        None if p.sub_agent_cost_usd > 0.0 => Some(p.sub_agent_cost_usd),
+        Some(main) => Some(main + sub_cost),
+        None if sub_cost > 0.0 => Some(sub_cost),
         None => None,
     };
-    let tokens_in = p.tokens_in + p.sub_tokens_in;
-    let tokens_out = p.tokens_out + p.sub_tokens_out;
+    let tokens_in = p.tokens_in + sub_agent_roster.iter().map(|s| s.tokens_in).sum::<u64>();
+    let tokens_out = p.tokens_out + sub_agent_roster.iter().map(|s| s.tokens_out).sum::<u64>();
     Session {
         id: p.id,
         tool: p.tool,
@@ -252,7 +352,7 @@ pub fn assemble(
         attention,
         cost_usd,
         diff: None,
-        sub_agent_roster: p.sub_agent_roster,
+        sub_agent_roster,
         machine: None,
     }
 }
@@ -336,13 +436,28 @@ mod tests {
             cwd: Some("/a/foo".into()),
             tokens_in: 0,
             tokens_out: 0,
-            sub_tokens_in: 0,
-            sub_tokens_out: 0,
-            sub_agent_cost_usd: 0.0,
             sub_agent_roster: Vec::new(),
             activity: None,
             last_event_at: Some(ts("2026-07-19T10:00:00Z")),
             attention: None,
+        }
+    }
+
+    /// One roster entry: a Running Sub-agent with its own spend, priced at its own
+    /// model. Tests tweak only the fields they exercise.
+    fn sub_agent(id: &str, model: &str, tin: u64, tout: u64) -> SubAgent {
+        SubAgent {
+            id: id.into(),
+            spawn_key: format!("toolu_{id}"),
+            errand: Some(format!("errand for {id}")),
+            state: SubAgentState::Running,
+            outcome: None,
+            tokens_in: tin,
+            tokens_out: tout,
+            cost_usd: crate::pricing::estimate_cost_usd(Some(model), tin, tout),
+            model: Some(model.into()),
+            depth: 1,
+            last_event_at: Some(ts("2026-07-19T10:00:05Z")),
         }
     }
 
@@ -440,7 +555,10 @@ mod tests {
             ts("2026-07-19T10:05:00Z"),
             ProcessLiveness::Dead,
         );
-        assert_eq!(s.attention.unwrap().evidence.as_deref(), Some("process exited"));
+        assert_eq!(
+            s.attention.unwrap().evidence.as_deref(),
+            Some("process exited")
+        );
     }
 
     #[test]
@@ -450,7 +568,12 @@ mod tests {
         let mut p = projection();
         p.attention = Some(waiting(None, Some("Bash")));
         let mtime = ts("2026-07-19T10:04:00Z");
-        let s = assemble(p, mtime, ts("2026-07-19T10:05:00Z"), ProcessLiveness::Unknown);
+        let s = assemble(
+            p,
+            mtime,
+            ts("2026-07-19T10:05:00Z"),
+            ProcessLiveness::Unknown,
+        );
         assert_eq!(s.attention.unwrap().since, mtime);
     }
 
@@ -460,7 +583,7 @@ mod tests {
         // spend still surfaces rather than vanishing.
         let mut p = projection();
         p.model = Some("some-future-model".into());
-        p.sub_agent_cost_usd = 0.80;
+        p.sub_agent_roster = vec![sub_agent("a1", "claude-haiku-4-5", 1_000_000, 0)];
         let s = assemble(
             p,
             ts("2026-07-19T10:00:00Z"),
@@ -472,21 +595,221 @@ mod tests {
     }
 
     #[test]
-    fn card_tokens_include_sub_agent_usage() {
-        // The split of main vs Sub-agent tokens exists only for per-model pricing;
-        // the card's counts are the sum.
+    fn card_tokens_and_cost_are_the_roster_summed_at_each_own_model() {
+        // Fan-out spend is real and counted, and each Sub-agent is priced at the model
+        // *it* ran — an Opus orchestrator with a Haiku child costs 90 + 0.80, never
+        // the 105 an Opus-priced child would give.
         let mut p = projection();
-        p.tokens_in = 100;
-        p.tokens_out = 10;
-        p.sub_tokens_in = 40;
-        p.sub_tokens_out = 4;
+        p.tokens_in = 1_000_000;
+        p.tokens_out = 1_000_000;
+        p.sub_agent_roster = vec![sub_agent("a1", "claude-haiku-4-5", 1_000_000, 0)];
         let s = assemble(
             p,
             ts("2026-07-19T10:00:00Z"),
             ts("2026-07-19T10:05:00Z"),
             ProcessLiveness::Unknown,
         );
-        assert_eq!(s.tokens_in, 140);
-        assert_eq!(s.tokens_out, 14);
+        assert_eq!(s.tokens_in, 2_000_000);
+        assert_eq!(s.tokens_out, 1_000_000);
+        let cost = s.cost_usd.unwrap();
+        assert!((cost - 90.80).abs() < 1e-9, "cost was {cost}");
+        // The card's model stays the orchestrator's, never a Sub-agent's.
+        assert_eq!(s.model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn a_running_sub_agent_keeps_a_quiet_parent_working() {
+        // The Staleness refinement, with a truthful input at last: the parent's own
+        // transcript has been quiet for 25 minutes — well past the 15-minute window,
+        // and inside the 963s of observed fan-out silence — but it is working.
+        let mut p = projection();
+        p.sub_agent_roster = vec![sub_agent("a1", "claude-haiku-4-5", 500, 50)];
+        let s = assemble(
+            p,
+            ts("2026-07-19T10:00:00Z"),
+            ts("2026-07-19T10:25:00Z"),
+            ProcessLiveness::Unknown,
+        );
+        assert_eq!(s.status, Status::Active);
+        assert_eq!(s.sub_agent_roster[0].state, SubAgentState::Running);
+    }
+
+    #[test]
+    fn a_dead_process_finishes_the_parent_and_its_running_sub_agents_with_it() {
+        // Parent-dominance: a Sub-agent is never Running when its root is not. The
+        // refinement above does not override a Process Liveness verdict, and the row
+        // that was Running is presented Finished — with no outcome word, since the
+        // source never said one.
+        let mut p = projection();
+        p.sub_agent_roster = vec![sub_agent("a1", "claude-haiku-4-5", 500, 50)];
+        let s = assemble(
+            p,
+            ts("2026-07-19T10:00:00Z"),
+            ts("2026-07-19T10:00:30Z"),
+            ProcessLiveness::Dead,
+        );
+        assert_eq!(s.status, Status::Finished);
+        assert_eq!(s.sub_agent_roster[0].state, SubAgentState::Finished);
+        assert_eq!(s.sub_agent_roster[0].outcome, None);
+        // Demotion is presentation, not erasure: its spend still counts.
+        assert_eq!(s.tokens_in, 500);
+    }
+
+    #[test]
+    fn a_running_sub_agent_never_makes_the_parent_wait_on_a_human() {
+        // Fanning out is not a human wait: with no pending need, a parent full of
+        // Running Sub-agents is Active, never Attention.
+        let mut p = projection();
+        p.sub_agent_roster = vec![
+            sub_agent("a1", "claude-haiku-4-5", 10, 1),
+            sub_agent("a2", "claude-haiku-4-5", 10, 1),
+        ];
+        let s = assemble(
+            p,
+            ts("2026-07-19T10:00:00Z"),
+            ts("2026-07-19T10:00:30Z"),
+            ProcessLiveness::Unknown,
+        );
+        assert_eq!(s.status, Status::Active);
+        assert!(s.attention.is_none());
+    }
+
+    // --- merge_roster(): the union of the parent's spawns and its children's files -
+
+    #[test]
+    fn a_spawn_and_its_child_file_are_one_row() {
+        // The parent said a Sub-agent exists and what it was for; the child file says
+        // what it spent. Keyed by the spawn's tool-use id, that is one row.
+        let spawn = SubAgent {
+            spawn_key: "toolu_a".into(),
+            errand: Some("map the parser".into()),
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: None,
+            model: None,
+            depth: 0,
+            last_event_at: None,
+            ..sub_agent("toolu_a", "claude-haiku-4-5", 0, 0)
+        };
+        let child = SubAgent {
+            spawn_key: "toolu_a".into(),
+            errand: None,
+            ..sub_agent("a1b2c3", "claude-haiku-4-5", 900, 90)
+        };
+        let roster = merge_roster(vec![spawn], vec![child]);
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].id, "a1b2c3");
+        assert_eq!(roster[0].errand.as_deref(), Some("map the parser"));
+        assert_eq!(roster[0].tokens_in, 900);
+        assert_eq!(roster[0].depth, 1);
+    }
+
+    #[test]
+    fn either_side_alone_is_a_row() {
+        // A spawn whose child file has not appeared yet is a row that says what it was
+        // sent to do; a child whose spawn was recorded in *another* child's transcript
+        // — the depth-2 case — is a row that says what it spent. Spawn order first,
+        // then what only the children knew about.
+        let spawn = SubAgent {
+            spawn_key: "toolu_a".into(),
+            errand: Some("still starting".into()),
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: None,
+            ..sub_agent("toolu_a", "claude-haiku-4-5", 0, 0)
+        };
+        let nested = SubAgent {
+            spawn_key: "toolu_deep".into(),
+            depth: 2,
+            ..sub_agent("a-deep", "claude-haiku-4-5", 100, 10)
+        };
+        let roster = merge_roster(vec![spawn], vec![nested]);
+        assert_eq!(
+            roster.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["toolu_a", "a-deep"]
+        );
+        assert_eq!(roster[1].depth, 2);
+    }
+
+    #[test]
+    fn a_fan_out_parent_stays_running_until_a_completion_says_otherwise() {
+        // The interim this ticket ships, stated as a decision rather than left as an
+        // accident. Nothing reads completions yet, so every row is Running, and a
+        // Running row keeps its parent out of Finished — which means a session that
+        // ever fanned out cannot age into Finished by Staleness alone, however long
+        // it has been quiet. Process Liveness is the only thing that finishes it.
+        // Reading the completion notification is the next ticket's job; when it
+        // lands, this assertion is the one that should change.
+        let mut p = projection();
+        p.sub_agent_roster = vec![sub_agent("a1", "claude-haiku-4-5", 500, 50)];
+        let s = assemble(
+            p.clone(),
+            ts("2026-07-19T10:00:00Z"),
+            ts("2026-07-19T18:00:00Z"), // eight hours quiet
+            ProcessLiveness::Unknown,
+        );
+        assert_eq!(s.status, Status::Active);
+        assert_eq!(s.sub_agent_roster[0].state, SubAgentState::Running);
+
+        // And the one thing that does finish it, which is what keeps the above honest.
+        let dead = assemble(
+            p,
+            ts("2026-07-19T10:00:00Z"),
+            ts("2026-07-19T18:00:00Z"),
+            ProcessLiveness::Dead,
+        );
+        assert_eq!(dead.status, Status::Finished);
+        assert_eq!(dead.sub_agent_roster[0].state, SubAgentState::Finished);
+    }
+
+    #[test]
+    fn two_contributions_cannot_honestly_share_a_spawn_key() {
+        // Claude mints one spawn key per `Agent` tool-use and the sidecar carries it
+        // back, so a collision means a file is lying about which spawn it came from.
+        // The later row wins and the earlier one's spend leaves the card — pinned
+        // here because the totals are derived from this roster, so a dropped row is a
+        // dropped number rather than a cosmetic loss.
+        let spawn = SubAgent {
+            spawn_key: "toolu_a".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: None,
+            ..sub_agent("toolu_a", "claude-haiku-4-5", 0, 0)
+        };
+        let first = SubAgent {
+            spawn_key: "toolu_a".into(),
+            ..sub_agent("a1", "claude-haiku-4-5", 900, 90)
+        };
+        let second = SubAgent {
+            spawn_key: "toolu_a".into(),
+            ..sub_agent("a2", "claude-haiku-4-5", 100, 10)
+        };
+        let roster = merge_roster(vec![spawn], vec![first, second]);
+        assert_eq!(roster.len(), 1, "one spawn, one row");
+        assert_eq!(roster[0].id, "a2", "the later contribution takes the row");
+    }
+
+    #[test]
+    fn child_only_rows_land_in_a_stable_order() {
+        // The store's file map has no order of its own, so rows it alone contributes
+        // are ordered oldest-first — otherwise an unchanged roster would compare
+        // unequal and the board would churn upserts.
+        let older = SubAgent {
+            last_event_at: Some(ts("2026-07-19T10:00:01Z")),
+            ..sub_agent("z-first", "claude-haiku-4-5", 1, 1)
+        };
+        let newer = SubAgent {
+            last_event_at: Some(ts("2026-07-19T10:00:09Z")),
+            ..sub_agent("a-second", "claude-haiku-4-5", 1, 1)
+        };
+        let ids = |r: Vec<SubAgent>| r.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(merge_roster(Vec::new(), vec![newer.clone(), older.clone()])),
+            vec!["z-first", "a-second"]
+        );
+        assert_eq!(
+            ids(merge_roster(Vec::new(), vec![older, newer])),
+            vec!["z-first", "a-second"]
+        );
     }
 }

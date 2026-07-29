@@ -3,6 +3,10 @@ name = "sessions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Workspace-internal. Its public surface (Projection, SessionStore, the Fold trait)
+# is shaped for the board and the Collector, and changes with them — nothing outside
+# this workspace is meant to pin it.
+publish = false
 
 [dependencies]
 serde = { workspace = true }
