@@ -1,10 +1,8 @@
 import type { Session } from "./types";
 import type { OpenController } from "./useOpen";
+import { byMostRecent, finishedBand, finishedLine } from "./bands";
 import { causeLabel, domId, relativeAge, waitingFor } from "./format";
 import { Branch, Cost, Diff, Machine, SubAgentBadge, Tile, Tokens, useFlash } from "./ui";
-
-const byMostRecent = (a: Session, b: Session): number =>
-  Date.parse(b.lastEventAt) - Date.parse(a.lastEventAt);
 
 /** Oldest-waiting-first (ADR 0010): the session whose current need began longest
  *  ago sorts to the top, so the most-neglected need is always first. Falls back to
@@ -182,7 +180,7 @@ function CompactRow({
   );
 }
 
-function Band({ dot, label, count }: { dot: string; label: string; count: number }) {
+function Band({ dot, label, count }: { dot: string; label: string; count: number | string }) {
   return (
     <div className="band">
       <span className={`dot ${dot}`} />
@@ -219,7 +217,10 @@ export function Board({
 
   const attention = sessions.filter((s) => s.status === "attention").sort(byOldestWaiting);
   const active = sessions.filter((s) => s.status === "active").sort(byMostRecent);
-  const finished = sessions.filter((s) => s.status === "finished").sort(byMostRecent);
+  // Finished is capped and the cap is disclosed (issue #64): the tail of a long day
+  // would otherwise push the queue off screen. `focusId` is handed in so a card
+  // arrived at from a Work Item's session chip survives the cap.
+  const finished = finishedBand(sessions, focusId);
 
   // Before the first snapshot resolves, "connecting…" — not the settled empty
   // state — so the Board never flashes "no sessions" on first paint (audit M6).
@@ -292,8 +293,12 @@ export function Board({
           />
         ))}
 
-        <Band dot="finished" label="Finished" count={finished.length} />
-        {finished.map((session) => (
+        <Band
+          dot="finished"
+          label="Finished"
+          count={finishedLine(finished.shown.length, finished.total)}
+        />
+        {finished.shown.map((session) => (
           <CompactRow
             key={session.id}
             session={session}
