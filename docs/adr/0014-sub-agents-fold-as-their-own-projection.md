@@ -181,6 +181,55 @@ were suppressed — the same "invisible because the failure mode is silence" thi
 ADR was written about, one layer down. The first `session_meta` is now the one
 that identifies a rollout.
 
+## Update — 2026-07-30, on verifying against a live fan-out (#85)
+
+The last of the Consequences above — "the Running state … has never been observed
+live. Verify against a session actively fanning out before treating the lifecycle as
+settled" — is now discharged. Four Sub-agents were spawned in a real Claude Code
+session in this repo while the board polled `/api/sessions` every 0.5s. Two things
+came out differently, and both make that warning the most useful sentence in the ADR.
+
+- **The notification has several record forms, and which one is written depends on
+  the parent's timing.** Decision 8 reads the outcome from "the notification's
+  `<status>` tag" as though a notification were one record. It is one *event* with
+  several carriers. The user turn that carries it is written only when the parent is
+  **idle** when its child ends; a parent that is mid-turn — which is what an
+  orchestrator that just fanned out is — has it *enqueued* instead, and the only
+  records ever written are a `queue-operation` (`enqueue`, then `remove`) and a
+  queued-command `attachment`. Reading only the user turn dropped **33 of 92** spawns
+  on this machine's corpus and left **20 of 41** fan-out parents carrying a row stuck
+  Running, which `has_active_sub_agents` then held out of Finished — one session quiet
+  for five hours was still served `active`. (Measured when the bug was found; this is a
+  live corpus and the session that found it kept adding to it, so the figure moves — by
+  the end of the same session it was 36 of 95. The ratio, about a third, is the durable
+  part.) Every archived sample the roster work was built on happened to be the
+  idle-parent case, which is why it looked right at rest.
+  The rule that survives is the one that matters: a word is never inferred. Where it
+  is read from is now "whichever record carries it".
+- **The fourth breakage was worse than recorded.** Above, retiring on `tool_result`
+  "would zero the badge ~2s after every spawn". Measured live, the spawn and the
+  acknowledgement answering it are flushed to disk in the *same* write — both records
+  landed inside one 100ms sample, 2.05s after the spawn's own timestamp. So no watcher
+  ever sees a transcript holding the spawn without the acknowledgement, and the old
+  rule would not have zeroed a badge that had shown: the badge would never have
+  appeared at all. The deletion of that rule is more load-bearing than this ADR
+  claims.
+
+What held, live and unaltered: the acknowledgement never ends a Sub-agent; the
+outcome word travels verbatim; the join is by tool-use id; a Running row keeps a
+quiet parent working; and a Sub-agent is never promoted to a card.
+
+The method is the point as much as the result. A first live run found a bug that 288
+passing tests did not, because every Claude fixture in the repo was hand-written
+against a format nobody here controls — the failure this ADR was written about, one
+more layer down. `the_claude_corpus_reads_every_ending_it_states` now reads the real
+corpus and reports every ending the fold failed to read. It is deliberately dumber
+than the fold — a raw scan for `<task-notification>` tags that knows nothing of record
+types, turns or queues — because the fold and the fixtures shared a false premise, so
+only a check that does not share it could fail. That asymmetry, not the schedule, is
+what #78 should be specced around; with the Codex test #76 added, both tools now have
+one.
+
 ## Deliberately out of scope
 
 A per-session detail surface (the roster's eventual right home — a hover panel

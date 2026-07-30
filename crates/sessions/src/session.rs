@@ -1180,18 +1180,29 @@ mod tests {
         .to_string()
     }
 
+    /// One `queue-operation` record. The queue states the same notification twice, on
+    /// the `enqueue` that parks it and the `remove` that takes it back off.
+    fn queue_operation(operation: &str, tuid: &str, task_id: &str, status: &str) -> String {
+        serde_json::json!({
+            "type": "queue-operation", "operation": operation,
+            "timestamp": "2026-07-19T10:20:00Z", "sessionId": "s1",
+            "content": notification_body(tuid, task_id, status),
+        })
+        .to_string()
+    }
+
     /// The same notification's other two record forms — the queue record that
-    /// enqueued it and the attachment that carries the queued prompt. Both sit in the
-    /// transcript beside the user turn above; neither is a user turn, so neither is
-    /// read.
+    /// enqueued it and the attachment that carries the queued prompt.
+    ///
+    /// These are not a duplicate of the user turn above but the **only** forms written
+    /// when the Sub-agent finishes while its parent is mid-turn, which is what a
+    /// fan-out orchestrator is (issue #85): 33 of 92 spawns on the corpus notified this
+    /// way and this way only. So a completion is read out of whichever record carries
+    /// it, and reading all three is harmless because the join is by id and latest wins.
     fn task_notification_queue_forms(tuid: &str, task_id: &str, status: &str) -> [String; 2] {
         let body = notification_body(tuid, task_id, status);
         [
-            serde_json::json!({
-                "type": "queue-operation", "operation": "enqueue",
-                "timestamp": "2026-07-19T10:20:00Z", "sessionId": "s1", "content": body,
-            })
-            .to_string(),
+            queue_operation("enqueue", tuid, task_id, status),
             serde_json::json!({
                 "type": "attachment", "sessionId": "s1", "cwd": "/a/foo",
                 "timestamp": "2026-07-19T10:20:00Z",
@@ -1364,9 +1375,10 @@ mod tests {
 
     #[test]
     fn a_notification_in_all_its_record_forms_produces_one_outcome() {
-        // The same notification is written three times — a queue record, a queued-
-        // command attachment, and the user turn. Only the user turn is read, and the
-        // roster carries one Sub-agent with one outcome either way.
+        // The same notification can be written three times — a queue record, a queued-
+        // command attachment, and the user turn. All three are read, and the roster
+        // still carries one Sub-agent with one outcome: the join is by tool-use id, so
+        // the repeats land on the same row and the last simply restates the word.
         let [queued, attached] = task_notification_queue_forms("toolu_a", "task-a", "completed");
         let s = fold_lines(&[
             agent_spawn("toolu_a", "map the parser"),
@@ -1378,10 +1390,134 @@ mod tests {
             outcomes(&s),
             vec![(SubAgentState::Finished, Some("completed"))]
         );
+        assert_eq!(s.sub_agent_roster.len(), 1, "one Sub-agent, not three");
+    }
 
-        // And the queue forms alone say nothing: they are not the parent's turn.
-        let queue_only = fold_lines(&[agent_spawn("toolu_a", "map the parser"), queued, attached]);
-        assert_eq!(outcomes(&queue_only), vec![(SubAgentState::Running, None)]);
+    #[test]
+    fn a_completion_is_read_from_whichever_record_carries_it() {
+        // Issue #85. The user turn is written only when the parent is *idle* when its
+        // child ends. A parent that is mid-turn — which is what an orchestrator that
+        // just fanned out is — gets the notification enqueued instead, and the only
+        // records ever written are these two. Dropping them left 33 of 92 spawns on
+        // the corpus Running forever, and `has_active_sub_agents` then pinned 20 of 41
+        // fan-out parents Active for as long as the process lived.
+        let [queued, attached] = task_notification_queue_forms("toolu_a", "task-a", "completed");
+
+        // Each carrier alone is the completion, and carries the source's own word.
+        for carrier in [&queued, &attached] {
+            let s = fold_lines(&[agent_spawn("toolu_a", "map the parser"), carrier.clone()]);
+            assert_eq!(
+                outcomes(&s),
+                vec![(SubAgentState::Finished, Some("completed"))],
+                "a queued notification is still the only statement of how it ended"
+            );
+        }
+
+        // The `remove` that dequeues it restates the same record; latest-wins makes
+        // that idempotent rather than a second ending.
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            queued.clone(),
+            queue_operation("remove", "toolu_a", "task-a", "completed"),
+        ]);
+        assert_eq!(
+            outcomes(&s),
+            vec![(SubAgentState::Finished, Some("completed"))]
+        );
+
+        // Join by id, never by count, holds for the queued forms too: a backgrounded
+        // command notifies under the same tag and must move nothing.
+        let [other, _] = task_notification_queue_forms("toolu_bash", "task-bg", "completed");
+        let unrelated = fold_lines(&[agent_spawn("toolu_a", "map the parser"), other]);
+        assert_eq!(outcomes(&unrelated), vec![(SubAgentState::Running, None)]);
+        assert_eq!(unrelated.sub_agent_roster.len(), 1);
+    }
+
+    #[test]
+    fn a_queued_notification_lets_a_quiet_parent_finish() {
+        // The harm #85 actually did, stated as a test. Dropping the queued forms did
+        // not merely mislabel a row: a row claiming to be Running is what holds a quiet
+        // parent out of Finished, so the card stayed Active for as long as the process
+        // lived. One session on the corpus was still served `active` five hours after
+        // everything on it had stopped.
+        let mut fs = claude();
+        let mut data = agent_spawn("toolu_a", "map the parser");
+        data.push('\n');
+        fs.feed(data.as_bytes());
+        // Eight hours quiet, with the Sub-agent still Running: the parent is working,
+        // because a fan-out parent genuinely goes silent while its children run.
+        let mtime = ts("2026-07-19T10:20:00Z");
+        let much_later = ts("2026-07-19T18:00:00Z");
+        let working = fs.build(mtime, much_later).unwrap();
+        assert_eq!(working.status, Status::Active);
+        assert_eq!(outcomes(&working), vec![(SubAgentState::Running, None)]);
+
+        // The child ends while the parent is mid-turn, so only the queued records are
+        // written. Reading them is what lets the card go Finished.
+        let [queued, attached] = task_notification_queue_forms("toolu_a", "task-a", "completed");
+        let mut more = queued;
+        more.push('\n');
+        more.push_str(&attached);
+        more.push('\n');
+        fs.feed(more.as_bytes());
+        let done = fs.build(mtime, much_later).unwrap();
+        assert_eq!(
+            outcomes(&done),
+            vec![(SubAgentState::Finished, Some("completed"))]
+        );
+        assert_eq!(
+            done.status,
+            Status::Finished,
+            "nothing is running any more, so nothing should hold the card Active"
+        );
+    }
+
+    #[test]
+    fn a_non_turn_record_carrying_no_completion_is_an_absence_not_a_failure() {
+        // Reading a record type that is not a turn must keep the distinction the fold
+        // depends on: `Ok(None)` is "nothing here", `Err` is "this line is a mid-write
+        // fragment, come back to it". A queued payload of an unexpected shape is the
+        // first, or a transcript would stall on its own bookkeeping records.
+        for line in [
+            r#"{"type":"queue-operation","operation":"enqueue","content":"just a prompt someone typed"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","content":{"not":"a string"}}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","content":null}"#,
+            r#"{"type":"attachment","attachment":{"type":"file","path":"/a/b.rs"}}"#,
+            r#"{"type":"summary","summary":"a compacted conversation"}"#,
+        ] {
+            assert!(
+                matches!(crate::parse::parse_entry(line), Ok(None)),
+                "{line} should read as nothing, not as a malformed line"
+            );
+        }
+    }
+
+    #[test]
+    fn a_queued_notification_moves_a_roster_row_and_nothing_else() {
+        // It is still an agent-level event addressed to the orchestrator, so reading it
+        // out of a new record type must not hand the card anything else: no tokens of
+        // its own, no activity line, and neither raising a human need nor answering one
+        // (ADR 0010). The Bash call the person is waiting on is still waiting.
+        let [queued, attached] = task_notification_queue_forms("toolu_a", "task-a", "failed");
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            assistant("s1", "reading the parser", 100, 10),
+            assistant_tool_use("s1"),
+            queued,
+            attached,
+        ]);
+        assert_eq!(
+            outcomes(&s),
+            vec![(SubAgentState::Finished, Some("failed"))]
+        );
+        assert_eq!((s.tokens_in, s.tokens_out), (100, 10));
+        assert_eq!(s.activity.as_deref(), Some("reading the parser"));
+        assert_eq!(s.status, Status::Attention);
+        let a = s
+            .attention
+            .expect("the human's wait survives a queued notification");
+        assert_eq!(a.cause, AttentionCause::Input);
+        assert_eq!(a.evidence.as_deref(), Some("Bash"));
     }
 
     #[test]

@@ -110,11 +110,45 @@ fn claude_task_notification(id: &str, tuid: &str, task_id: &str, status: &str) -
         "sessionId": id,
         "cwd": "/Users/x/repos/foo",
         "timestamp": "2026-07-19T10:20:00Z",
-        "message": { "role": "user", "content": format!(
-            "<task-notification>\n<task-id>{task_id}</task-id>\n<tool-use-id>{tuid}</tool-use-id>\n<status>{status}</status>\n<summary>Agent finished</summary>\n</task-notification>"
-        ) }
+        "message": { "role": "user", "content": notification_body(tuid, task_id, status) }
     })
     .to_string()
+}
+
+/// The `<task-notification>` block itself: the structured tags that carry the join key
+/// and the outcome word. Every record form that can carry a notification carries this
+/// same body.
+fn notification_body(tuid: &str, task_id: &str, status: &str) -> String {
+    format!(
+        "<task-notification>\n<task-id>{task_id}</task-id>\n<tool-use-id>{tuid}</tool-use-id>\n<status>{status}</status>\n<summary>Agent finished</summary>\n</task-notification>"
+    )
+}
+
+/// The same notification as [`claude_task_notification`], in the two forms written when
+/// the child ends while its parent is **mid-turn** — a `queue-operation` and the
+/// queued-command `attachment`. In that case no user turn is written at all, so these
+/// are the whole record of the ending (issue #85).
+fn claude_task_notification_queued(
+    id: &str,
+    tuid: &str,
+    task_id: &str,
+    status: &str,
+) -> [String; 2] {
+    let body = notification_body(tuid, task_id, status);
+    [
+        serde_json::json!({
+            "type": "queue-operation", "operation": "enqueue",
+            "timestamp": "2026-07-19T10:20:00Z", "sessionId": id, "content": body,
+        })
+        .to_string(),
+        serde_json::json!({
+            "type": "attachment", "sessionId": id, "isSidechain": false,
+            "timestamp": "2026-07-19T10:20:00Z",
+            "attachment": { "type": "queued_command", "prompt": body,
+                "commandMode": "task-notification" },
+        })
+        .to_string(),
+    ]
 }
 
 /// Write a Claude Sub-agent's own transcript and the metadata sidecar Claude writes
@@ -253,9 +287,18 @@ fn write_transcript(root: &Path, project_dir: &str, file: &str, lines: &[String]
 }
 
 fn append_line(path: &Path, line: &str) {
+    append_lines(path, &[line.to_string()]);
+}
+
+/// Append several records in **one** write, the way Claude Code actually flushes a
+/// spawn and the acknowledgement answering it: both landed inside a single 100ms
+/// sample when this was measured against a live fan-out, so a watcher never sees a
+/// transcript that holds the spawn and not yet the acknowledgement.
+fn append_lines(path: &Path, lines: &[String]) {
     let mut f = OpenOptions::new().append(true).open(path).unwrap();
-    f.write_all(line.as_bytes()).unwrap();
-    f.write_all(b"\n").unwrap();
+    let mut body = lines.join("\n");
+    body.push('\n');
+    f.write_all(body.as_bytes()).unwrap();
 }
 
 /// Start the board HTTP server in-process on an ephemeral port. The returned
@@ -1077,6 +1120,86 @@ async fn a_roster_entry_moves_on_the_notification_and_not_on_the_acknowledgement
     );
     let c = wait_for(&card, |c| c["subAgentRoster"][0]["state"] == "finished").await;
     assert_eq!(c["subAgentRoster"][0]["outcome"], "completed");
+}
+
+#[tokio::test]
+async fn a_busy_parents_queued_notification_finishes_its_roster_entry_in_motion() {
+    // The lifecycle in motion in the shape a live fan-out actually writes it, which is
+    // not the shape the test above assumes (issue #85, found by running one):
+    //
+    //   * the spawn and its acknowledgement are flushed together, so no watcher ever
+    //     sees the one without the other — the old retire-on-`tool_result` rule would
+    //     not have zeroed the badge 2s after each spawn, the row would never have
+    //     appeared at all;
+    //   * the parent is still mid-turn when the child ends, so the notification is
+    //     enqueued rather than delivered, and the user turn that carries it is never
+    //     written. These two records are the whole ending.
+    let claude = tempfile::tempdir().unwrap();
+    let project = "-Users-x-repos-foo";
+    let cwd = "/Users/x/repos/foo";
+    let parent = write_transcript(
+        claude.path(),
+        project,
+        "sess-busy.jsonl",
+        &[assistant_line("sess-busy", "orchestrating", 10, 1)],
+    );
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+    let card = || async {
+        let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        body["sessions"].as_array().unwrap()[0].clone()
+    };
+
+    // Spawn and acknowledgement, in one write.
+    append_lines(
+        &parent,
+        &[
+            claude_agent_spawn("sess-busy", cwd, "toolu_a", "map the parser"),
+            claude_launch_ack("sess-busy", "toolu_a"),
+        ],
+    );
+    let c = wait_for(&card, |c| {
+        !c["subAgentRoster"].as_array().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(
+        c["subAgentRoster"][0]["state"], "running",
+        "an acknowledgement flushed with its own spawn is still not a completion: {c:?}"
+    );
+    assert_eq!(c["subAgentRoster"][0]["errand"], "map the parser");
+
+    // The child ends while the parent is busy: queued records only, no user turn.
+    let [queued, attached] =
+        claude_task_notification_queued("sess-busy", "toolu_a", "task-a", "completed");
+    append_lines(&parent, &[queued, attached]);
+    let c = wait_for(&card, |c| c["subAgentRoster"][0]["state"] == "finished").await;
+    assert_eq!(c["subAgentRoster"][0]["outcome"], "completed");
+
+    // Three records carried that one ending — `enqueue`, the attachment, and the
+    // `remove` that dequeued it. One row, one outcome: the join is by tool-use id.
+    append_line(
+        &parent,
+        &claude_task_notification_queued("sess-busy", "toolu_a", "task-a", "completed")[0]
+            .replace("\"enqueue\"", "\"remove\""),
+    );
+    append_line(
+        &parent,
+        &assistant_line("sess-busy", "reading the child's report", 10, 1),
+    );
+    let c = wait_for(&card, |c| c["activity"] == "reading the child's report").await;
+    assert_eq!(c["subAgentRoster"].as_array().unwrap().len(), 1);
+    assert_eq!(c["subAgentRoster"][0]["outcome"], "completed");
+
+    // The parent is now free to leave the Running band once its own transcript goes
+    // quiet, which a row stuck Running would have prevented for as long as it lived.
+    // That half is pinned at the fold seam, where the clock can be moved:
+    // `sessions::session::tests::a_queued_notification_lets_a_quiet_parent_finish`.
+    assert_eq!(c["status"], "active", "the transcript was just written to");
 }
 
 #[tokio::test]
