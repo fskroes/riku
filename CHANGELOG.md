@@ -5,6 +5,25 @@ release's notes; `Unreleased` collects what has landed since.
 
 ## Unreleased
 
+### A Claude Sub-agent that finished while its parent was busy now says so
+
+A roster row could sit on Running forever, and its card would sit under **Running in
+the background** long after everything on it had stopped — a session quiet for five
+hours still reading as live work.
+
+Claude Code writes a Sub-agent's completion into the transcript differently
+depending on what its parent was doing at the time. If the parent was idle, the
+notification arrives as a turn. If the parent was mid-turn — which is exactly what a
+session that has just fanned work out is — the notification is queued instead, and
+the turn is never written. Riku only read the turn, so it never heard about the
+second case: **33 of 92** Sub-agent spawns on the machine this was found on, leaving
+**20 of 41** fan-out cards with a row stuck Running. A completion is now read from
+whichever record carries it.
+
+Nothing about the outcome changed: the word on the row is still the source's own
+(`completed`, `failed`, `stopped`, `killed`), never guessed, and a Sub-agent that
+ended without one still ends unworded.
+
 ### Codex cards cost roughly double, and that is the number becoming true
 
 Riku now counts what a Codex CLI session's Sub-agents spend, the way it already

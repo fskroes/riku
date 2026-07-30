@@ -1,7 +1,9 @@
 //! Transcript parsing. Each transcript line is one JSON object; we tolerate
 //! unknown fields, unknown `type` values, and schema drift between Claude Code
-//! versions (unknown => ignore, never error). Only `user` / `assistant` entries
-//! feed the session model.
+//! versions (unknown => ignore, never error). `user` / `assistant` entries feed the
+//! session model; every other record type is ignored except for the one thing such a
+//! record can be the only carrier of — a queued completion notification (see
+//! [`Entry::task_notifications`]).
 //!
 //! The same decoding serves both kinds of Claude transcript — an Agent Session's
 //! and a Sub-agent's — because their entries have the same shape. Which of the two
@@ -34,6 +36,31 @@ struct RawEntry {
     #[serde(rename = "isApiErrorMessage", default)]
     is_api_error_message: bool,
     message: Option<RawMessage>,
+    /// A `queue-operation` record's whole payload: the prompt that was queued, a bare
+    /// string in every record observed. Read only for records that are not turns, where
+    /// it can be the sole statement of a Sub-agent's ending.
+    ///
+    /// Typed as a `Value` rather than a `String` because this field name is shared with
+    /// record types we do not model, where it may hold anything: a `String` here would
+    /// make one of those a *deserialization error*, and an `Err` from
+    /// [`parse_entry`] means "mid-write fragment, retry this line" — a whole transcript
+    /// would stall on a record it should have ignored. A payload of another shape is an
+    /// absence.
+    #[serde(default)]
+    content: Option<serde_json::Value>,
+    /// A queued-command `attachment`, whose `prompt` carries the same payload.
+    #[serde(default)]
+    attachment: Option<RawAttachment>,
+}
+
+/// The part of an `attachment` record worth reading. Deliberately shapeless beyond
+/// `prompt`: attachments carry many kinds of thing and requiring the notification tags
+/// is what selects the one kind meant here. `prompt` is lenient for the same reason
+/// [`RawEntry::content`] is.
+#[derive(Debug, Deserialize)]
+struct RawAttachment {
+    #[serde(default)]
+    prompt: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -139,7 +166,12 @@ pub struct TaskNotification {
 }
 
 /// What the accumulator cares about after decoding one relevant entry.
-#[derive(Debug)]
+///
+/// `Default` is every field's absence — no tokens, no activity, nothing pending. It
+/// exists so a record that contributes exactly one thing can say only that thing
+/// (see [`queued_notification`]) without restating the other fourteen, which would
+/// make adding a field a two-site edit and a silent one to get wrong.
+#[derive(Debug, Default)]
 pub struct Entry {
     pub is_assistant: bool,
     /// `isSidechain: true` — a Sub-agent's turn. In a Sub-agent's own transcript
@@ -163,11 +195,19 @@ pub struct Entry {
     /// The `tool_use_id`s answered by `tool_result` blocks in this entry (user
     /// turns) — the correlated resolutions of earlier tool-call needs.
     pub tool_result_ids: Vec<String>,
-    /// The completion records this entry carries (user turns only). The harness
-    /// writes each notification into the transcript three times — a `queue-operation`
-    /// record, a queued-command `attachment`, and the user turn that actually reaches
-    /// the orchestrator — and only the last is a `user` entry, so only the last is
-    /// read. Latest-wins downstream makes the duplication harmless either way.
+    /// The completion records this entry carries.
+    ///
+    /// A notification reaches the orchestrator as a user turn whose whole prompt is the
+    /// record — but **only when the parent was idle** when its child ended. A parent
+    /// that is mid-turn, which is what an orchestrator that just fanned out is, has the
+    /// notification *enqueued* instead: the only records written are a `queue-operation`
+    /// (`enqueue`, then `remove`) and a queued-command `attachment`, and no user turn is
+    /// ever written. Reading only the user turn dropped 33 of 92 spawns on the corpus
+    /// and left 20 of 41 fan-out parents pinned Active by a row stuck Running
+    /// (issue #85), so a completion is read out of whichever record carries it.
+    ///
+    /// Reading all of them is harmless: the join is by tool-use id and the latest word
+    /// wins, so repeats of one notification land on one row and restate one outcome.
     pub task_notifications: Vec<TaskNotification>,
     /// `message.stop_reason`, when present (assistant turns only).
     pub stop_reason: Option<String>,
@@ -186,8 +226,10 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
     let is_assistant = match raw.entry_type.as_deref() {
         Some("assistant") => true,
         Some("user") => false,
-        // Unknown / irrelevant type (attachment, queue-operation, ...).
-        _ => return Ok(None),
+        // Not a turn. Such a record contributes nothing the card is built from — no
+        // tokens, no activity, no Attention — with one exception: it may be the only
+        // record a Sub-agent's ending was ever written into.
+        _ => return Ok(queued_notification(raw)),
     };
 
     // A record with no message at all reads as an empty one: every field it would
@@ -213,6 +255,40 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
         stop_reason: message.stop_reason,
         is_api_error: raw.is_api_error_message,
     }))
+}
+
+/// A completion notification carried by a record that is not a turn: the
+/// `queue-operation` that enqueued it, or the queued-command `attachment` holding the
+/// same prompt. `None` unless such a record states an actual completion.
+///
+/// The record *type* is deliberately not part of the test — the notification tags are.
+/// A harness that renames `queue-operation` keeps working, which matters for a format
+/// nobody here controls: the rename of `Task` to `Agent` is what hid this whole feature
+/// for months (ADR 0014), and the same class of drift is issue #78.
+///
+/// Everything a turn would contribute is left at its absence, so such a record states
+/// the ending, says which session's file it is (identity is assigned unconditionally,
+/// ADR 0014's second breakage), and advances the session's latest timestamp — the
+/// notification *is* an event in that session, and the user-turn form advanced it too.
+/// It contributes no tokens, no activity, no model, and no Attention of any kind: it is
+/// not a user turn, so it neither raises a human need nor answers one (ADR 0010).
+fn queued_notification(raw: RawEntry) -> Option<Entry> {
+    let carrier = raw
+        .content
+        .or_else(|| raw.attachment.and_then(|a| a.prompt))?;
+    let notifications = task_notifications(carrier.as_str()?);
+    if notifications.is_empty() {
+        return None;
+    }
+    Some(Entry {
+        is_sidechain: raw.is_sidechain,
+        session_id: raw.session_id,
+        timestamp: raw.timestamp,
+        cwd: raw.cwd,
+        git_branch: raw.git_branch,
+        task_notifications: notifications,
+        ..Entry::default()
+    })
 }
 
 /// What one message's content contributes to the fold.

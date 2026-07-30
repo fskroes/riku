@@ -1336,6 +1336,109 @@ mod tests {
         assert_eq!(rooted, subs, "every observed chain resolves to a root");
     }
 
+    /// Re-ground the Claude Sub-agent lifecycle against this machine's real transcripts
+    /// — the companion to the Codex test above, and the test that was missing when the
+    /// bug it now guards shipped (issue #85).
+    ///
+    /// The check is deliberately asymmetric. One side is the fold; the other is a raw
+    /// text scan for `<task-notification>` blocks that knows nothing about record types,
+    /// turns, or queues. Every spawn the dumb side finds an ending for, the fold must
+    /// also report ended. Reading only `user` turns passed every hand-written fixture in
+    /// this repo and failed this on 33 of 92 spawns.
+    ///
+    /// **Host-dependent**, so ignored by default, like the Codex one:
+    ///
+    /// `cargo test -p sessions claude_corpus -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn the_claude_corpus_reads_every_ending_it_states() {
+        let root = match std::env::var_os("RIKU_ROOT") {
+            Some(r) => PathBuf::from(r),
+            None => match crate::default_root() {
+                Some(r) => r,
+                None => return,
+            },
+        };
+        if !root.is_dir() {
+            eprintln!("no Claude corpus at {root:?}; nothing to re-ground against");
+            return;
+        }
+        let now = Utc::now();
+        let mut store = SessionStore::new(vec![Box::new(ClaudeSource::new(root.clone()))]);
+        let mut found = Vec::new();
+        walk(&root, MAX_SCAN_DEPTH, &mut found);
+        found.retain(|p| store.owns_path(p));
+        for path in &found {
+            // Directly, so the discovery window does not hide history.
+            store.feed(path, now);
+        }
+
+        // The independent side, per transcript: the endings *that file's own bytes*
+        // state, by spawning tool-use id. No JSON, no record types — just the tags.
+        // Kept per file rather than corpus-wide so one transcript quoting another's
+        // notification (which a transcript of a session reading its own logs does) can
+        // never vouch for a row it does not own.
+        let endings = |path: &Path| -> HashMap<String, String> {
+            let mut stated = HashMap::new();
+            let Ok(text) = fs::read_to_string(path) else {
+                return stated;
+            };
+            for block in text.split("<task-notification>").skip(1) {
+                let block = block.split("</task-notification>").next().unwrap_or(block);
+                let between = |open: &str, close: &str| {
+                    let s = block.find(open)? + open.len();
+                    let e = block[s..].find(close)?;
+                    Some(block[s..s + e].trim().to_string())
+                };
+                if let (Some(tuid), Some(status)) = (
+                    between("<tool-use-id>", "</tool-use-id>"),
+                    between("<status>", "</status>"),
+                ) {
+                    // Latest wins, and a file is read in its own order.
+                    stated.insert(tuid, status);
+                }
+            }
+            stated
+        };
+
+        let (mut spawns, mut ended, mut unread) = (0u64, 0u64, Vec::new());
+        for (path, entry) in &store.files {
+            let Some(Folded::AgentSession(p)) = entry.state.folded() else {
+                continue;
+            };
+            if p.sub_agent_roster.is_empty() {
+                continue;
+            }
+            let stated = endings(path);
+            for row in &p.sub_agent_roster {
+                spawns += 1;
+                let Some(word) = stated.get(&row.spawn_key) else {
+                    continue; // no ending stated at all: ADR 0014's parent-dominance case
+                };
+                ended += 1;
+                if row.outcome.as_deref() != Some(word.as_str()) {
+                    unread.push(format!(
+                        "{} states {word:?}, the fold reads {:?}",
+                        row.spawn_key, row.outcome
+                    ));
+                }
+            }
+        }
+        eprintln!(
+            "{spawns} Claude spawns, {ended} with an ending stated, {} unread",
+            unread.len()
+        );
+        for u in unread.iter().take(10) {
+            eprintln!("  {u}");
+        }
+        assert!(spawns > 0, "the corpus holds no Claude spawns to check");
+        assert!(
+            unread.is_empty(),
+            "{} spawn(s) ended in the corpus without the fold reading it",
+            unread.len()
+        );
+    }
+
     #[test]
     fn alive_sighting_resets_the_miss_counter() {
         let dir = tempfile::tempdir().unwrap();
