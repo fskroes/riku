@@ -419,19 +419,36 @@ fn a_roster_crosses_the_wire_with_its_errands_intact() {
         ],
     )
     .unwrap();
-    s.sub_agent_roster = vec![sessions::SubAgent {
-        id: "a1b2c3".into(),
-        spawn_key: "toolu_a".into(),
-        errand: Some("map the parser end to end".into()),
-        state: sessions::SubAgentState::Running,
-        outcome: None,
-        tokens_in: 1_000,
-        tokens_out: 100,
-        cost_usd: Some(0.25),
-        model: Some("claude-haiku-4-5".into()),
-        depth: 1,
-        last_event_at: Some(ts("2026-07-19T10:00:10Z")),
-    }];
+    s.sub_agent_roster = vec![
+        sessions::SubAgent {
+            id: "a1b2c3".into(),
+            spawn_key: "toolu_a".into(),
+            errand: Some("map the parser end to end".into()),
+            state: sessions::SubAgentState::Running,
+            outcome: None,
+            tokens_in: 1_000,
+            tokens_out: 100,
+            cost_usd: Some(0.25),
+            model: Some("claude-haiku-4-5".into()),
+            depth: 1,
+            last_event_at: Some(ts("2026-07-19T10:00:10Z")),
+        },
+        // One that has already come back, so both states cross together — a roster
+        // carrying only the running half would show a finished session nothing.
+        sessions::SubAgent {
+            id: "d4e5f6".into(),
+            spawn_key: "toolu_b".into(),
+            errand: Some("audit the tests".into()),
+            state: sessions::SubAgentState::Finished,
+            outcome: Some("failed".into()),
+            tokens_in: 4_242,
+            tokens_out: 424,
+            cost_usd: Some(0.5),
+            model: Some("claude-haiku-4-5".into()),
+            depth: 1,
+            last_event_at: Some(ts("2026-07-19T10:02:00Z")),
+        },
+    ];
 
     let wire: WireSession = s.into();
     let frame = serde_json::to_string(&wire).unwrap();
@@ -441,12 +458,27 @@ fn a_roster_crosses_the_wire_with_its_errands_intact() {
     );
 
     let back: Session = serde_json::from_str::<WireSession>(&frame).unwrap().into();
+    assert_eq!(back.sub_agent_roster.len(), 2, "both entries crossed");
     let entry = &back.sub_agent_roster[0];
     assert_eq!(entry.errand.as_deref(), Some("map the parser end to end"));
     assert_eq!(entry.state, sessions::SubAgentState::Running);
+    assert_eq!(entry.outcome, None);
     assert_eq!(entry.spawn_key, "toolu_a");
     assert_eq!(entry.depth, 1);
     assert_eq!(entry.model.as_deref(), Some("claude-haiku-4-5"));
+
+    // How it ended is the source's own word, and it crosses as one: a receiving board
+    // reads `failed` rather than inferring a failure from a missing field.
+    let done = &back.sub_agent_roster[1];
+    assert_eq!(done.errand.as_deref(), Some("audit the tests"));
+    assert_eq!(done.state, sessions::SubAgentState::Finished);
+    assert_eq!(done.outcome.as_deref(), Some("failed"));
+    // Per-child spend crosses too — the roster row is the disclosure of whose spend
+    // the card's headline total was.
+    assert_eq!(done.tokens_in, 4_242);
+    assert_eq!(done.tokens_out, 424);
+    assert_eq!(done.cost_usd, Some(0.5));
+    assert_eq!(done.last_event_at, Some(ts("2026-07-19T10:02:00Z")));
 }
 
 #[test]

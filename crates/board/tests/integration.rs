@@ -2496,6 +2496,272 @@ async fn subscribed_board_streams_remote_session_events() {
     );
 }
 
+/// A fake Collector: a long-lived streaming `POST /collect` whose NDJSON body the
+/// test writes by hand. It is how a session shape no Collector produces any more —
+/// a legacy one — reaches a board.
+fn connect_fake_collector(relay_url: &str, token: &str) -> tokio::sync::mpsc::Sender<String> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, std::io::Error>);
+    let body = reqwest::Body::wrap_stream(stream);
+    let url = format!("{relay_url}/collect");
+    let auth = format!("Bearer {token}");
+    tokio::spawn(async move {
+        let _ = reqwest::Client::new()
+            .post(url)
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .body(body)
+            .send()
+            .await;
+    });
+    tx
+}
+
+/// The cards `GET /api/sessions` on `addr` is serving right now.
+async fn cards_on(addr: SocketAddr) -> Vec<serde_json::Value> {
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["sessions"].as_array().cloned().unwrap_or_default()
+}
+
+/// Poll `GET /api/sessions` on `addr` until a card with `id` satisfies `done`.
+async fn wait_for_card(
+    addr: SocketAddr,
+    id: &'static str,
+    done: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let fetch = || async move { serde_json::Value::Array(cards_on(addr).await) };
+    let cards = wait_for(&fetch, |cards| {
+        cards
+            .as_array()
+            .and_then(|a| a.iter().find(|s| s["id"] == id))
+            .is_some_and(&done)
+    })
+    .await;
+    cards
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id)
+        .unwrap()
+        .clone()
+}
+
+#[tokio::test]
+async fn a_teammates_fan_out_crosses_the_relay_intact() {
+    // The whole hop, at the seam a person sees. A Collector on another machine folds
+    // a session with one Sub-agent still out and one already back, pushes it to a
+    // Relay, and a subscribing board serves the roster — Errands, outcome word,
+    // states, and per-child spend all the way through.
+    let token = "team-token";
+    let relay_url = spawn_relay(token).await;
+
+    let remote = tempfile::tempdir().unwrap();
+    let project = "-Users-x-repos-foo";
+    let cwd = "/Users/x/repos/foo";
+    let parent = write_transcript(
+        remote.path(),
+        project,
+        "sess-team.jsonl",
+        &[
+            assistant_line("sess-team", "orchestrating", 1_000_000, 1_000_000),
+            claude_agent_spawn("sess-team", cwd, "toolu_a", "map the parser"),
+            claude_agent_spawn("sess-team", cwd, "toolu_b", "audit the tests"),
+            claude_launch_ack("sess-team", "toolu_a"),
+            // The second one is back, and it did not go well.
+            claude_task_notification("sess-team", "toolu_b", "task-b", "failed"),
+        ],
+    );
+    write_sub_agent(
+        remote.path(),
+        project,
+        "sess-team",
+        "a1b2c3",
+        "toolu_a",
+        "map the parser",
+        1,
+        cwd,
+        "claude-haiku-4-5",
+        1_000_000,
+        0,
+    );
+    write_sub_agent(
+        remote.path(),
+        project,
+        "sess-team",
+        "d4e5f6",
+        "toolu_b",
+        "audit the tests",
+        1,
+        cwd,
+        "claude-haiku-4-5",
+        4_242,
+        424,
+    );
+    // The parent's own transcript went quiet while its Sub-agent grinds — the state
+    // the roster exists to keep legible, here on somebody else's machine.
+    age_file(&parent, 30);
+
+    let (addr, _started) = spawn_board_subscribed(relay_url.clone(), token.to_string()).await;
+    // Watch the teammate's board stream from before the first frame crosses.
+    // Awaiting send() guarantees the handler has subscribed.
+    let stream = reqwest::Client::new()
+        .get(format!("http://{addr}/api/events"))
+        .send()
+        .await
+        .unwrap();
+
+    tokio::spawn(relay::run_collector(relay::CollectorConfig {
+        relay_url,
+        token: token.to_string(),
+        claude_root: remote.path().to_path_buf(),
+        codex_root: None,
+        machine: "remote-desk".to_string(),
+    }));
+    // The same fixture served by a board of its own: the source card this relayed one
+    // must match, rather than a set of numbers re-derived by hand in the assertions.
+    let (source_addr, _source) = spawn_server(remote.path().to_path_buf()).await;
+
+    // Everything that reached the stream is the parent's card. A Sub-agent's file
+    // moves its root, and it is the root that crosses — never an event of its own.
+    let buf = read_until(stream, "audit the tests", Duration::from_secs(15)).await;
+    let streamed: Vec<serde_json::Value> = buf
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    assert!(!streamed.is_empty(), "expected streamed cards: {buf:?}");
+    for c in &streamed {
+        assert_eq!(
+            c["id"], "sess-team",
+            "a relayed Sub-agent must never stream as a card: {c:?}"
+        );
+    }
+
+    let card = wait_for_card(addr, "sess-team", |c| {
+        c["subAgentRoster"].as_array().is_some_and(|r| r.len() == 2)
+    })
+    .await;
+    assert_eq!(card["machine"], "remote-desk");
+
+    // Every entry intact, in spawn order.
+    let roster = card["subAgentRoster"].as_array().unwrap();
+    let out = &roster[0];
+    // The Errand crosses unreduced: the orchestrator's own words, character for
+    // character, not a redaction of them. A redacted Errand would leave a remote
+    // roster listing rows that say nothing.
+    assert_eq!(out["errand"], "map the parser");
+    assert_eq!(out["state"], "running");
+    assert_eq!(out["outcome"], serde_json::Value::Null);
+    assert_eq!(out["tokensIn"], 1_000_000);
+    assert_eq!(out["model"], "claude-haiku-4-5");
+    assert_eq!(out["depth"], 1);
+
+    let back = &roster[1];
+    assert_eq!(back["errand"], "audit the tests");
+    assert_eq!(back["state"], "finished");
+    // How it ended, in the source's own word — read on the teammate's board, not
+    // inferred there.
+    assert_eq!(back["outcome"], "failed");
+    assert_eq!(back["tokensIn"], 4_242);
+    assert_eq!(back["tokensOut"], 424);
+    assert!(
+        back["costUsd"].as_f64().is_some_and(|c| c > 0.0),
+        "a Sub-agent's own cost crosses too: {back:?}"
+    );
+
+    // The relayed card says what the source card says: the same roster, and headline
+    // totals that count the same Sub-agent spend.
+    let source = wait_for_card(source_addr, "sess-team", |c| {
+        c["subAgentRoster"].as_array().is_some_and(|r| r.len() == 2)
+    })
+    .await;
+    assert_eq!(card["subAgentRoster"], source["subAgentRoster"]);
+    assert_eq!(card["tokensIn"], source["tokensIn"]);
+    assert_eq!(card["tokensOut"], source["tokensOut"]);
+    assert_eq!(card["costUsd"], source["costUsd"]);
+    assert_eq!(card["status"], source["status"]);
+    // …and that is the parent still Running while its own transcript is half an hour
+    // quiet, on a board that never saw the files.
+    assert_eq!(card["status"], "active");
+
+    // A relayed Sub-agent is no more a card here than it is at home.
+    let cards = cards_on(addr).await;
+    let ids: Vec<&str> = cards.iter().filter_map(|s| s["id"].as_str()).collect();
+    assert_eq!(ids, vec!["sess-team"], "a Sub-agent is not a card: {ids:?}");
+
+    // Nor an id-lookup result, nor a Work Link target. Both of those surfaces resolve
+    // against the local Engine — an Open lands a terminal on *this* machine, and a
+    // Work Link chip points at a card a person can open — so on a subscribing board
+    // neither can reach a relayed session at all, let alone a row on its roster.
+    //
+    // Which is to say these two say less than the assertions above them: they would
+    // hold for a relayed *parent* too, so they cannot fail for a Sub-agent-shaped
+    // reason today. They are kept as the tripwire for the day one of those pools
+    // learns about remote sessions — a Sub-agent shares its parent's branch and cwd
+    // verbatim and is usually more recently active, so it would win both contests.
+    // What actually pins the Sub-agent invariant here is what crossed the wire: the
+    // stream and the card list above.
+    let missing = reqwest::Client::new()
+        .post(format!("http://{addr}/api/sessions/a1b2c3/open"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let work = reqwest::Client::new()
+        .get(format!("http://{addr}/api/work"))
+        .query(&[("cwd", cwd)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(work.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_legacy_collector_costs_the_badge_and_not_the_card() {
+    // A Collector that predates the roster sends the old count-and-descriptions
+    // object. Under the roster's new field name that one is simply unknown and
+    // dropped, so the session still decodes: the teammate loses the badge, not the
+    // card. (A legacy object arriving where the array is expected would be a decode
+    // error, and the whole card would go.)
+    let token = "team-token";
+    let relay_url = spawn_relay(token).await;
+    let (addr, _started) = spawn_board_subscribed(relay_url.clone(), token.to_string()).await;
+
+    let old = connect_fake_collector(&relay_url, token);
+    let line = serde_json::json!({
+        "type": "upsert",
+        "id": "sess-old", "tool": "claude", "project": "foo",
+        "model": "claude-opus-4-8", "branch": "main", "cwd": "/Users/x/repos/foo",
+        "tokensIn": 1_200, "tokensOut": 340, "activity": "orchestrating",
+        "lastEventAt": "2026-07-19T10:00:00Z", "status": "active",
+        "costUsd": 0.5, "machine": "old-desk",
+        "subAgents": { "active": 2, "descriptions": ["map the parser", "audit the tests"] }
+    });
+    old.send(format!("{line}\n")).await.unwrap();
+
+    let card = wait_for_card(addr, "sess-old", |_| true).await;
+
+    // A normal card, whole: everything the legacy Collector did say still reads.
+    assert_eq!(card["machine"], "old-desk");
+    assert_eq!(card["tokensIn"], 1_200);
+    assert_eq!(card["tokensOut"], 340);
+    assert_eq!(card["activity"], "orchestrating");
+    assert_eq!(card["status"], "active");
+    // …and no badge: an empty roster, not a legacy count wearing the new name. The
+    // old field's contents reach the board nowhere at all.
+    assert_eq!(card["subAgentRoster"], serde_json::json!([]));
+    assert_eq!(card["subAgents"], serde_json::Value::Null);
+    assert!(
+        !card.to_string().contains("map the parser"),
+        "the legacy descriptions are dropped, not smuggled in: {card:?}"
+    );
+}
+
 #[tokio::test]
 async fn local_only_board_reports_no_relay() {
     let tmp = tempfile::tempdir().unwrap();
