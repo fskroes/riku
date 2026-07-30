@@ -51,6 +51,12 @@ struct RawEntry {
     /// A queued-command `attachment`, whose `prompt` carries the same payload.
     #[serde(default)]
     attachment: Option<RawAttachment>,
+    /// What a `queue-operation` record is doing to the prompt it carries. Read only to
+    /// recognise the one operation that restates a payload rather than delivering it
+    /// (see [`DEQUEUE_OPERATION`]). Lenient for the same reason [`RawEntry::content`]
+    /// is: an unmodelled record using this field name must be an absence, not a stall.
+    #[serde(default)]
+    operation: Option<serde_json::Value>,
 }
 
 /// The part of an `attachment` record worth reading. Deliberately shapeless beyond
@@ -257,9 +263,33 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
     }))
 }
 
+/// The `queue-operation` that takes a queued prompt back off the queue, restating the
+/// payload it was parked with. [`queued_notification`] refuses it.
+///
+/// **It is the only carrier that lands late.** Timed across this machine's corpus, the
+/// `attachment` form lags the `enqueue` by a median *and* maximum of 0.0s and the user
+/// turn by 0.0s median, while this one lags it by a median of 9.4s and up to 903.8s — 53
+/// of its 60 appearances by more than a second, which is room enough for a resume to land
+/// in between and be overwritten by news already superseded (issue #87).
+///
+/// **Refusing it drops nothing.** All 60 of those appearances echo an `enqueue` already
+/// on disk, and no notification anywhere on the corpus is carried by a `remove` alone.
+///
+/// **Named as the record to refuse, not as the records to accept.** Reading "only an
+/// `enqueue`" would be the same one line and look tidier, but the two orientations fail
+/// in opposite directions under the format drift this module is deliberately built for.
+/// A harness that renames this operation reintroduces issue #87 — one roster row briefly
+/// wrong in the direction that self-corrects on the child's next notification. A harness
+/// that renamed `enqueue` under an allow-list would drop **every** queued notification
+/// and hand back issue #85 in full: a third of all spawns stuck Running for the life of
+/// the process, and their parents' cards pinned with them. So anything unrecognised is
+/// read, and only this is not. Same class of hazard as `Task` becoming `Agent`
+/// (ADR 0014) and as issue #78 — chosen so drift costs the cheaper mistake.
+const DEQUEUE_OPERATION: &str = "remove";
+
 /// A completion notification carried by a record that is not a turn: the
 /// `queue-operation` that enqueued it, or the queued-command `attachment` holding the
-/// same prompt. `None` unless such a record states an actual completion.
+/// same prompt. `None` unless such a record carries the notification tags at all.
 ///
 /// The record *type* is deliberately not part of the test — the notification tags are.
 /// A harness that renames `queue-operation` keeps working, which matters for a format
@@ -272,7 +302,29 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
 /// notification *is* an event in that session, and the user-turn form advanced it too.
 /// It contributes no tokens, no activity, no model, and no Attention of any kind: it is
 /// not a user turn, so it neither raises a human need nor answers one (ADR 0010).
+///
+/// A [`DEQUEUE_OPERATION`] record is the one that states no ending — but it is still
+/// such a record, and everything above still holds of it.
 fn queued_notification(raw: RawEntry) -> Option<Entry> {
+    // A record that says it is *removing* a queued prompt is not delivering that
+    // prompt's news; it is the queue restating a payload it has already handed over. It
+    // is the only carrier written at a moment other than the notification's arrival, so
+    // it is the only one that can restate a status *across* a later event — and the
+    // event it would overwrite is a resume. See [`DEQUEUE_OPERATION`] and ADR 0014's
+    // #87 update for the measurements.
+    //
+    // What is refused is the *news*, not the record. Returning `None` here instead would
+    // take the dequeue's timestamp and its statement of session identity down with the
+    // outcome — and an early return positioned above that assignment is ADR 0014's second
+    // recorded breakage, which is why `Accumulator::apply` makes both unconditional. The
+    // queue draining is a real event in this transcript at the moment it is written; only
+    // the outcome it repeats is stale.
+    //
+    // Matched on the operation alone, without requiring the record type, for the same
+    // reason the rest of this function ignores the type: nothing on the corpus carries a
+    // notification under a top-level `remove` operation except the queue.
+    let is_dequeue_echo =
+        raw.operation.as_ref().and_then(|o| o.as_str()) == Some(DEQUEUE_OPERATION);
     let carrier = raw
         .content
         .or_else(|| raw.attachment.and_then(|a| a.prompt))?;
@@ -280,6 +332,11 @@ fn queued_notification(raw: RawEntry) -> Option<Entry> {
     if notifications.is_empty() {
         return None;
     }
+    let notifications = if is_dequeue_echo {
+        Vec::new()
+    } else {
+        notifications
+    };
     Some(Entry {
         is_sidechain: raw.is_sidechain,
         session_id: raw.session_id,

@@ -18,7 +18,9 @@ session that has just fanned work out is — the notification is queued instead,
 the turn is never written. Riku only read the turn, so it never heard about the
 second case: **33 of 92** Sub-agent spawns on the machine this was found on, leaving
 **20 of 41** fan-out cards with a row stuck Running. A completion is now read from
-whichever record carries it.
+whichever record first states it, rather than only from the turn — and only from the
+record that states it, not from the queue's later echo of the same news, which would
+have re-finished a Sub-agent that had been sent back to work.
 
 Nothing about the outcome changed: the word on the row is still the source's own
 (`completed`, `failed`, `stopped`, `killed`), never guessed, and a Sub-agent that
