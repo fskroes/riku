@@ -36,7 +36,7 @@ struct RawEntry {
     message: Option<RawMessage>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct RawMessage {
     model: Option<String>,
     usage: Option<Usage>,
@@ -102,6 +102,40 @@ pub struct ToolUseInfo {
     pub id: Option<String>,
     pub name: Option<String>,
     pub detail: Option<String>,
+    /// Who the call addresses, from the input's `to` field — the id of an existing
+    /// Sub-agent, for the tool that sends a finished one back to work. `None` for
+    /// every other call, which addresses nobody.
+    pub recipient: Option<String>,
+}
+
+/// A `<task-notification>` record: the harness telling the orchestrator that
+/// something it launched has ended, and how.
+///
+/// It is the **only** statement of a Sub-agent's completion. A spawn's `tool_result`
+/// is a launch acknowledgement — "Async agent launched successfully… you will be
+/// notified automatically when it completes" — arriving ~2s after the spawn against
+/// children that run up to 20 minutes (ADR 0014).
+///
+/// Both fields are read from structured tags, never from the summary prose beside
+/// them, and a record missing either is not a completion: notifications also carry
+/// backgrounded commands and monitor events, which name no Sub-agent and state no
+/// status. Joining by [`tool_use_id`](Self::tool_use_id) back to a spawn is what
+/// keeps those out — 101 task-ids appear against 59 spawns, so counting
+/// notifications would attribute a shell command to a Sub-agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskNotification {
+    /// The tool-use this notification is about: the `Agent` spawn that started the
+    /// Sub-agent, or the message that later resumed it.
+    pub tool_use_id: String,
+    /// The source's own id for the task — a Sub-agent's `agentId`. It is what a
+    /// message resuming that Sub-agent addresses, so it is the identity that
+    /// outlives any one tool-use id.
+    pub task_id: Option<String>,
+    /// How it ended, in the source's own word: `completed`, `failed`, `stopped`,
+    /// `killed`. Nothing here interprets it, so a word we have not seen before travels
+    /// exactly as the four we have do — up to the one bound every string the card
+    /// carries shares (see [`tag`]), which no status word of this shape reaches.
+    pub status: String,
 }
 
 /// What the accumulator cares about after decoding one relevant entry.
@@ -129,6 +163,12 @@ pub struct Entry {
     /// The `tool_use_id`s answered by `tool_result` blocks in this entry (user
     /// turns) — the correlated resolutions of earlier tool-call needs.
     pub tool_result_ids: Vec<String>,
+    /// The completion records this entry carries (user turns only). The harness
+    /// writes each notification into the transcript three times — a `queue-operation`
+    /// record, a queued-command `attachment`, and the user turn that actually reaches
+    /// the orchestrator — and only the last is a `user` entry, so only the last is
+    /// read. Latest-wins downstream makes the duplication harmless either way.
+    pub task_notifications: Vec<TaskNotification>,
     /// `message.stop_reason`, when present (assistant turns only).
     pub stop_reason: Option<String>,
     /// `true` for a synthetic `isApiErrorMessage` record.
@@ -150,26 +190,11 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
         _ => return Ok(None),
     };
 
-    let (model, input_tokens, output_tokens, activity, tool_uses, tool_result_ids, stop_reason) =
-        match raw.message {
-            Some(msg) => {
-                let (usage_in, usage_out) = msg
-                    .usage
-                    .map(|u| (u.input_tokens, u.output_tokens))
-                    .unwrap_or((0, 0));
-                let summary = summarize_content(&msg.content, is_assistant);
-                (
-                    msg.model,
-                    usage_in,
-                    usage_out,
-                    summary.activity,
-                    summary.tool_uses,
-                    summary.tool_result_ids,
-                    msg.stop_reason,
-                )
-            }
-            None => (None, 0, 0, None, Vec::new(), Vec::new(), None),
-        };
+    // A record with no message at all reads as an empty one: every field it would
+    // have contributed is already an absence.
+    let message = raw.message.unwrap_or_default();
+    let usage = message.usage.unwrap_or_default();
+    let summary = summarize_content(&message.content, is_assistant);
 
     Ok(Some(Entry {
         is_assistant,
@@ -178,13 +203,14 @@ pub fn parse_entry(line: &str) -> Result<Option<Entry>, serde_json::Error> {
         timestamp: raw.timestamp,
         cwd: raw.cwd,
         git_branch: raw.git_branch,
-        model,
-        input_tokens,
-        output_tokens,
-        activity,
-        tool_uses,
-        tool_result_ids,
-        stop_reason,
+        model: message.model,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        activity: summary.activity,
+        tool_uses: summary.tool_uses,
+        tool_result_ids: summary.tool_result_ids,
+        task_notifications: summary.task_notifications,
+        stop_reason: message.stop_reason,
         is_api_error: raw.is_api_error_message,
     }))
 }
@@ -195,27 +221,32 @@ struct ContentSummary {
     activity: Option<String>,
     tool_uses: Vec<ToolUseInfo>,
     tool_result_ids: Vec<String>,
+    task_notifications: Vec<TaskNotification>,
 }
 
-/// Extract the activity line (assistant text only), the pending `tool_use` calls,
-/// and the `tool_result` correlations from a message's content.
+/// Extract the activity line (assistant text only), the pending `tool_use` calls, the
+/// `tool_result` correlations, and — from a user turn's prompt text — the completion
+/// records it carries.
 fn summarize_content(content: &Content, is_assistant: bool) -> ContentSummary {
+    let mut summary = ContentSummary::default();
     match content {
-        Content::Text(s) => ContentSummary {
-            activity: is_assistant.then(|| first_line(s)).flatten(),
-            ..Default::default()
-        },
+        // A notification reaches the orchestrator as a user turn whose whole prompt is
+        // the record — a bare string in every one observed, but read out of text blocks
+        // too, since the same prompt is a block list whenever anything accompanies it.
+        Content::Text(s) => summary.add_text(s, is_assistant),
         Content::Blocks(blocks) => {
-            let mut summary = ContentSummary::default();
             for block in blocks {
                 match block {
-                    Block::Text { text } if is_assistant && summary.activity.is_none() => {
-                        summary.activity = first_line(text);
-                    }
+                    Block::Text { text } => summary.add_text(text, is_assistant),
                     Block::ToolUse { id, name, input } => summary.tool_uses.push(ToolUseInfo {
                         id: id.clone(),
                         name: name.clone(),
                         detail: tool_input_detail(input),
+                        recipient: input
+                            .as_object()
+                            .and_then(|o| o.get("to"))
+                            .and_then(|v| v.as_str())
+                            .and_then(first_line),
                     }),
                     Block::ToolResult {
                         tool_use_id: Some(id),
@@ -223,9 +254,67 @@ fn summarize_content(content: &Content, is_assistant: bool) -> ContentSummary {
                     _ => {}
                 }
             }
-            summary
         }
     }
+    summary
+}
+
+impl ContentSummary {
+    /// What one text block contributes, which turns on who wrote it: an assistant's
+    /// text is the activity line — the first non-empty one wins — while a user's is a
+    /// prompt, and a prompt is where completion records arrive.
+    fn add_text(&mut self, text: &str, is_assistant: bool) {
+        if is_assistant {
+            if self.activity.is_none() {
+                self.activity = first_line(text);
+            }
+        } else {
+            self.task_notifications.extend(task_notifications(text));
+        }
+    }
+}
+
+/// The completion records in one user prompt, read from the tags the harness writes
+/// rather than from the summary prose beside them.
+///
+/// A record naming no tool-use, or stating no status, is not a completion and is
+/// dropped here: monitor events and backgrounded commands notify under the same tag,
+/// and how a Sub-agent ended is read or it is absent.
+fn task_notifications(text: &str) -> Vec<TaskNotification> {
+    const OPEN: &str = "<task-notification>";
+    const CLOSE: &str = "</task-notification>";
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        let body = &rest[start + OPEN.len()..];
+        let (body, tail) = match body.find(CLOSE) {
+            Some(end) => (&body[..end], &body[end + CLOSE.len()..]),
+            // An unterminated record: read what is there rather than dropping it.
+            None => (body, ""),
+        };
+        if let (Some(tool_use_id), Some(status)) = (tag(body, "tool-use-id"), tag(body, "status")) {
+            out.push(TaskNotification {
+                tool_use_id,
+                task_id: tag(body, "task-id"),
+                status,
+            });
+        }
+        rest = tail;
+    }
+    out
+}
+
+/// The text of one `<name>…</name>` tag: its first line, bounded to 80 chars like
+/// every other string the card carries. `None` when the tag is absent or says nothing.
+///
+/// The bound is safe for the tags read here, which are ids and a single word. Were an
+/// id ever longer, truncating it would only cost the join a match — a notification
+/// that names no spawn we hold changes nothing — never attach it to the wrong one.
+fn tag(body: &str, name: &str) -> Option<String> {
+    let open = format!("<{name}>");
+    let start = body.find(&open)? + open.len();
+    let end = body[start..].find(&format!("</{name}>"))?;
+    first_line(&body[start..start + end])
 }
 
 /// A short, source-faithful detail from a `tool_use` call's input for evidence: the

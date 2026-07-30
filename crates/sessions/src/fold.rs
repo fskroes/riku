@@ -108,11 +108,13 @@ impl SubAgentProjection {
     /// This Sub-agent as a roster row — what it spent, and what the source said it
     /// was sent to do.
     ///
-    /// The row's state is `Running`: a Sub-agent's completion is read from its
-    /// parent's notification records, which no source populates yet, and a parent
-    /// that is itself Finished demotes every still-Running row of its own accord in
-    /// [`assemble`]. `cost_usd` is `None` for an unpriced model rather than a
-    /// misleading `0.00`, matching the folded `0.0` accumulator's meaning.
+    /// The row's state is `Running`, and its outcome absent: a Claude Sub-agent's
+    /// completion is stated in its *parent's* notification records, not in its own
+    /// file, so this side of the union never has the word — [`merge_roster`] takes it
+    /// from the side that does. A parent that is itself Finished demotes every
+    /// still-Running row of its own accord in [`assemble`]. `cost_usd` is `None` for
+    /// an unpriced model rather than a misleading `0.00`, matching the folded `0.0`
+    /// accumulator's meaning.
     ///
     /// The join key falls back to this Sub-agent's own id when the source states
     /// none: it then matches no spawn record and the row stands on its own.
@@ -137,11 +139,12 @@ impl SubAgentProjection {
 /// and what its Sub-agents' files spent, keyed by the spawn's tool-use id.
 ///
 /// Neither side alone is required for a row. The parent's spawn record establishes
-/// that a Sub-agent exists and what it was sent to do — it is there the instant the
-/// spawn is written, before any child file exists. The child file supplies what that
-/// Sub-agent spent, and is the *only* side for a Sub-agent spawned by another
-/// Sub-agent, whose spawn was recorded in a child transcript rather than the
-/// parent's (1 of 70 observed children).
+/// that a Sub-agent exists, what it was sent to do, and — for Claude — how it ended,
+/// which its notifications state; it is there the instant the spawn is written,
+/// before any child file exists. The child file supplies what that Sub-agent spent,
+/// and is the *only* side for a Sub-agent spawned by another Sub-agent, whose spawn
+/// was recorded in a child transcript rather than the parent's (1 of 70 observed
+/// children).
 ///
 /// `spawns` keeps its order — that is spawn order, which is what the roster reads in.
 /// Rows contributed by a child file alone are appended in a deterministic order
@@ -163,9 +166,24 @@ pub fn merge_roster(mut spawns: Vec<SubAgent>, contributions: Vec<SubAgent>) -> 
             // The spawn said what the Sub-agent was for; the child says what it cost.
             // Errand stays the parent's word when it stated one — both sides copy it
             // from the same spawn, so this only decides which copy is read.
+            //
+            // How it *ended* comes from whichever side the source stated it on, and the
+            // sides differ by tool: Claude's completion is a notification in the
+            // parent's transcript, Codex's a terminal marker in the child's own
+            // rollout. Taking the child's row wholesale would put a Sub-agent Claude
+            // has already reported finished back to Running on its next folded line.
             Some(row) => {
                 let errand = row.errand.take().or(child.errand);
-                *row = SubAgent { errand, ..child };
+                let (state, outcome) = match row.outcome.take() {
+                    Some(word) => (row.state, Some(word)),
+                    None => (child.state, child.outcome),
+                };
+                *row = SubAgent {
+                    errand,
+                    state,
+                    outcome,
+                    ..child
+                };
             }
             None => extra.push(child),
         }
@@ -705,6 +723,49 @@ mod tests {
     }
 
     #[test]
+    fn the_side_that_states_an_outcome_decides_how_a_sub_agent_ended() {
+        // The two sides of a row say different things, and how it ended is one of
+        // them. For Claude that is the parent's notification — the child's own file
+        // states no outcome and is still being written when it arrives, so a fresh
+        // fold of it must not put a finished Sub-agent back to Running.
+        let spawn = SubAgent {
+            spawn_key: "toolu_a".into(),
+            state: SubAgentState::Finished,
+            outcome: Some("failed".into()),
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: None,
+            ..sub_agent("toolu_a", "claude-haiku-4-5", 0, 0)
+        };
+        let child = SubAgent {
+            spawn_key: "toolu_a".into(),
+            ..sub_agent("a1b2c3", "claude-haiku-4-5", 900, 90)
+        };
+        let roster = merge_roster(vec![spawn], vec![child.clone()]);
+        assert_eq!(roster[0].state, SubAgentState::Finished);
+        assert_eq!(roster[0].outcome.as_deref(), Some("failed"));
+        assert_eq!(roster[0].tokens_in, 900, "and still what the child spent");
+
+        // The other way round is the Codex shape, where the terminal marker is in the
+        // child's own rollout and the parent recorded no notification at all.
+        let running_spawn = SubAgent {
+            spawn_key: "toolu_a".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: None,
+            ..sub_agent("toolu_a", "claude-haiku-4-5", 0, 0)
+        };
+        let finished_child = SubAgent {
+            state: SubAgentState::Finished,
+            outcome: Some("completed".into()),
+            ..child
+        };
+        let roster = merge_roster(vec![running_spawn], vec![finished_child]);
+        assert_eq!(roster[0].state, SubAgentState::Finished);
+        assert_eq!(roster[0].outcome.as_deref(), Some("completed"));
+    }
+
+    #[test]
     fn either_side_alone_is_a_row() {
         // A spawn whose child file has not appeared yet is a row that says what it was
         // sent to do; a child whose spawn was recorded in *another* child's transcript
@@ -733,13 +794,10 @@ mod tests {
 
     #[test]
     fn a_fan_out_parent_stays_running_until_a_completion_says_otherwise() {
-        // The interim this ticket ships, stated as a decision rather than left as an
-        // accident. Nothing reads completions yet, so every row is Running, and a
-        // Running row keeps its parent out of Finished — which means a session that
-        // ever fanned out cannot age into Finished by Staleness alone, however long
-        // it has been quiet. Process Liveness is the only thing that finishes it.
-        // Reading the completion notification is the next ticket's job; when it
-        // lands, this assertion is the one that should change.
+        // A Running row keeps its parent out of Finished however long its own
+        // transcript has been quiet — which is right while a Sub-agent is genuinely
+        // running, and was the whole board's behaviour for a session that ever fanned
+        // out while nothing read completions.
         let mut p = projection();
         p.sub_agent_roster = vec![sub_agent("a1", "claude-haiku-4-5", 500, 50)];
         let s = assemble(
@@ -751,7 +809,23 @@ mod tests {
         assert_eq!(s.status, Status::Active);
         assert_eq!(s.sub_agent_roster[0].state, SubAgentState::Running);
 
-        // And the one thing that does finish it, which is what keeps the above honest.
+        // A completion is what releases it: with the fan-out over, the same quiet
+        // parent ages into Finished on the Staleness rule like any other session, and
+        // the word the source stated survives that.
+        let mut done = p.clone();
+        done.sub_agent_roster[0].state = SubAgentState::Finished;
+        done.sub_agent_roster[0].outcome = Some("completed".into());
+        let s = assemble(
+            done,
+            ts("2026-07-19T10:00:00Z"),
+            ts("2026-07-19T18:00:00Z"),
+            ProcessLiveness::Unknown,
+        );
+        assert_eq!(s.status, Status::Finished);
+        assert_eq!(s.sub_agent_roster[0].outcome.as_deref(), Some("completed"));
+
+        // And the other thing that finishes it, which is what keeps the first
+        // assertion honest when no completion ever arrives.
         let dead = assemble(
             p,
             ts("2026-07-19T10:00:00Z"),

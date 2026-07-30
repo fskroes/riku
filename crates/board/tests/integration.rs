@@ -100,6 +100,23 @@ fn claude_launch_ack(id: &str, tuid: &str) -> String {
     .to_string()
 }
 
+/// The record that says a Sub-agent has actually finished: a user turn whose whole
+/// prompt is a `<task-notification>` block, arriving up to 20 minutes after the
+/// launch acknowledgement. Its `<tool-use-id>` joins back to the spawn; its
+/// `<status>` is the verbatim outcome word.
+fn claude_task_notification(id: &str, tuid: &str, task_id: &str, status: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "sessionId": id,
+        "cwd": "/Users/x/repos/foo",
+        "timestamp": "2026-07-19T10:20:00Z",
+        "message": { "role": "user", "content": format!(
+            "<task-notification>\n<task-id>{task_id}</task-id>\n<tool-use-id>{tuid}</tool-use-id>\n<status>{status}</status>\n<summary>Agent finished</summary>\n</task-notification>"
+        ) }
+    })
+    .to_string()
+}
+
 /// Write a Claude Sub-agent's own transcript and the metadata sidecar Claude writes
 /// beside it at spawn, at
 /// `<project>/<root-uuid>/subagents/agent-<agentId>.{jsonl,meta.json}`.
@@ -314,6 +331,29 @@ async fn read_until(resp: reqwest::Response, needle: &str, dur: Duration) -> Str
     tokio::time::timeout(dur, fut)
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for '{needle}' in SSE stream; got: {buf:?}"))
+}
+
+/// Poll the board until `done` accepts what it returns, or give up. Used where a
+/// test appends to a transcript and waits for the watcher to catch up, rather than
+/// asserting against whichever tick it happened to land in.
+async fn wait_for<F, Fut, D>(fetch: &F, done: D) -> serde_json::Value
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = serde_json::Value>,
+    D: Fn(&serde_json::Value) -> bool,
+{
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let value = fetch().await;
+        if done(&value) {
+            return value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the board to catch up; last saw {value:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test]
@@ -679,6 +719,157 @@ async fn a_claude_fan_out_shows_its_sub_agents_on_the_parents_card() {
 
     let codex_card = sessions.iter().find(|s| s["id"] == "codex-plain").unwrap();
     assert_eq!(codex_card["subAgentRoster"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn a_completion_notification_finishes_one_roster_entry_and_leaves_the_rest() {
+    // The ticket at the seam a person sees. Two Sub-agents out, one notification
+    // back: a session that fanned out shows the one that has returned as Finished —
+    // in the source's own word — and the one that has not as Running, while the
+    // parent itself is still Running. The `failed` word does not become a human need,
+    // and a notification for a backgrounded command touches nothing at all.
+    let claude = tempfile::tempdir().unwrap();
+    let project = "-Users-x-repos-foo";
+    let cwd = "/Users/x/repos/foo";
+
+    let parent = write_transcript(
+        claude.path(),
+        project,
+        "sess-done.jsonl",
+        &[
+            assistant_line("sess-done", "orchestrating", 1_000, 100),
+            claude_agent_spawn("sess-done", cwd, "toolu_a", "map the parser"),
+            claude_agent_spawn("sess-done", cwd, "toolu_b", "audit the tests"),
+            // The acknowledgement, ~2s after the spawn: it changes nothing.
+            claude_launch_ack("sess-done", "toolu_a"),
+            // A backgrounded shell command notifying under the same tag. 101 task-ids
+            // appear against 59 spawns — this is why completions join by id.
+            claude_task_notification("sess-done", "toolu_bash", "task-bg", "failed"),
+            // The first Sub-agent's real ending, 20 minutes after its launch.
+            claude_task_notification("sess-done", "toolu_a", "task-a", "completed"),
+            // …and a later word about the same one, which wins.
+            claude_task_notification("sess-done", "toolu_a", "task-a", "failed"),
+        ],
+    );
+    write_sub_agent(
+        claude.path(),
+        project,
+        "sess-done",
+        "a1b2c3",
+        "toolu_a",
+        "map the parser",
+        1,
+        cwd,
+        "claude-haiku-4-5",
+        900,
+        90,
+    );
+    // The parent's own transcript is long quiet; the Sub-agent still out keeps it
+    // Running, so a completion is read against a live parent rather than a dead one.
+    age_file(&parent, 30);
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let card = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "sess-done")
+        .unwrap()
+        .clone();
+
+    let roster = card["subAgentRoster"].as_array().unwrap();
+    assert_eq!(
+        roster.len(),
+        2,
+        "no row for a backgrounded command: {roster:?}"
+    );
+    assert_eq!(roster[0]["state"], "finished");
+    assert_eq!(roster[0]["outcome"], "failed", "the latest word wins");
+    assert_eq!(roster[0]["errand"], "map the parser");
+    assert_eq!(
+        roster[0]["tokensIn"], 900,
+        "and it still says what it spent"
+    );
+    assert_eq!(roster[1]["state"], "running");
+    assert_eq!(roster[1]["outcome"], serde_json::Value::Null);
+
+    // A failed Sub-agent is reported to the agent, not to the person.
+    assert_eq!(card["status"], "active");
+    assert_eq!(card["attention"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn a_roster_entry_moves_on_the_notification_and_not_on_the_acknowledgement() {
+    // The lifecycle in motion rather than at rest: riku watching while a fan-out
+    // happens. Spawn, then the acknowledgement ~2s later, then the notification
+    // ~20 minutes after that — the order the transcript is actually written in. The
+    // entry is Running across the first two and moves only on the third.
+    let claude = tempfile::tempdir().unwrap();
+    let project = "-Users-x-repos-foo";
+    let cwd = "/Users/x/repos/foo";
+    let parent = write_transcript(
+        claude.path(),
+        project,
+        "sess-motion.jsonl",
+        &[assistant_line("sess-motion", "orchestrating", 10, 1)],
+    );
+
+    let (addr, _started) = spawn_server(claude.path().to_path_buf()).await;
+    let card = || async {
+        let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        body["sessions"].as_array().unwrap()[0].clone()
+    };
+    assert_eq!(
+        card().await["subAgentRoster"],
+        serde_json::json!([]),
+        "nothing sent out yet"
+    );
+
+    // The spawn.
+    append_line(
+        &parent,
+        &claude_agent_spawn("sess-motion", cwd, "toolu_a", "map the parser"),
+    );
+    let c = wait_for(&card, |c| {
+        !c["subAgentRoster"].as_array().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(c["subAgentRoster"][0]["state"], "running");
+    assert_eq!(c["subAgentRoster"][0]["errand"], "map the parser");
+
+    // The acknowledgement, and a turn after it. Waiting for the *later* line to show
+    // up is what proves the acknowledgement itself was read — a transcript is folded
+    // in file order, so the entry's state at that point is its state after the
+    // acknowledgement, not before the board had caught up.
+    append_line(&parent, &claude_launch_ack("sess-motion", "toolu_a"));
+    append_line(
+        &parent,
+        &assistant_line("sess-motion", "waiting on the child", 10, 1),
+    );
+    let c = wait_for(&card, |c| c["activity"] == "waiting on the child").await;
+    assert_eq!(
+        c["subAgentRoster"][0]["state"], "running",
+        "an acknowledgement is not a completion: {c:?}"
+    );
+
+    // The notification.
+    append_line(
+        &parent,
+        &claude_task_notification("sess-motion", "toolu_a", "task-a", "completed"),
+    );
+    let c = wait_for(&card, |c| c["subAgentRoster"][0]["state"] == "finished").await;
+    assert_eq!(c["subAgentRoster"][0]["outcome"], "completed");
 }
 
 #[tokio::test]

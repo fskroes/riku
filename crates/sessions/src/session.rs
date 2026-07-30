@@ -37,6 +37,35 @@ use crate::parse::{parse_entry, Entry, ToolUseInfo};
 /// four independent breakages that kept the badge from ever rendering (ADR 0014).
 const AGENT_TOOL: &str = "Agent";
 
+/// The Claude Code tool that sends a message to a Sub-agent that has already
+/// finished, putting it back to work. Its `to` field names the Sub-agent by the
+/// `task-id` its completion notification stated — so it is the one record that says a
+/// finished Sub-agent is Running again.
+///
+/// Read from the same corpus as everything else here, where exactly one resume was
+/// observed. Like [`AGENT_TOOL`] it is a tool name, and tool names have been renamed
+/// under us before (issue #78): a rename costs a resumed Sub-agent its return to
+/// Running, and nothing else — the row keeps the last outcome the source stated.
+const RESUME_TOOL: &str = "SendMessage";
+
+/// One Sub-agent as its parent's own transcript knows it: the spawn that started it,
+/// what it was sent to do, and the latest word on how it ended.
+#[derive(Debug)]
+struct SpawnedSubAgent {
+    /// The spawning `Agent` tool-use id — this row's join key, both to the
+    /// Sub-agent's own file and to the notification that ends its first run.
+    key: String,
+    /// The Errand, from the spawn's `description`.
+    errand: Option<String>,
+    /// The source's own id for this Sub-agent, learned from its first notification.
+    /// It is what a resuming message addresses, and what every later notification
+    /// joins on once the spawn's own id has stopped being the one stated.
+    task_id: Option<String>,
+    /// The latest verbatim outcome word, or `None` while it is running. Latest rather
+    /// than final: a Sub-agent can be resumed after it ends.
+    outcome: Option<String>,
+}
+
 /// The Claude Code fold: a running projection of a single transcript. Fold entries
 /// in file order via [`Accumulator::apply`]; token counts and "latest" fields
 /// update in place. Attention lifecycle is delegated entirely to the shared
@@ -54,12 +83,11 @@ pub struct Accumulator {
     activity: Option<String>,
     tokens_in: u64,
     tokens_out: u64,
-    /// Every Sub-agent this session has spawned, in spawn order: each an `Agent`
-    /// tool-use `id` and the `description` from its input. Entries are never
-    /// retired here — the roster carries running and finished alike, and a spawn's
-    /// `tool_result` is a launch acknowledgement rather than a completion (see
-    /// [`Accumulator::apply`]).
-    spawns: Vec<(String, Option<String>)>,
+    /// Every Sub-agent this session has spawned, in spawn order. Entries are never
+    /// retired — the roster carries running and finished alike — and what retires the
+    /// *state* of one is its completion notification, never a spawn's `tool_result`,
+    /// which is a launch acknowledgement (see [`Accumulator::apply`]).
+    spawns: Vec<SpawnedSubAgent>,
     attention: AttentionReducer,
 }
 
@@ -108,6 +136,20 @@ impl Accumulator {
         self.tokens_in += entry.input_tokens;
         self.tokens_out += entry.output_tokens;
 
+        // A completion notification: the one record that says a Sub-agent has actually
+        // finished, and how. It is addressed to the orchestrator, which reads it and
+        // carries on — in 23 of 24 observed non-`completed` notifications the parent's
+        // next entry came a median of 0.7 seconds later — so it moves a roster entry
+        // and nothing else. It raises no need of its own (ADR 0010 rules out inferring
+        // a human need from an agent-level event), and it answers none either: a
+        // person still waiting to approve something is still waiting after a Sub-agent
+        // dies. That second half is what `notified` carries down to the branches below.
+        let notifications = entry.task_notifications;
+        let notified = !notifications.is_empty();
+        for note in notifications {
+            self.note_completion(note);
+        }
+
         // Attention Since prefers the entry's own timestamp, falling back to the
         // latest one seen so far (set just above) when a record carries none.
         let at = entry.timestamp.or(self.latest_timestamp);
@@ -136,14 +178,30 @@ impl Accumulator {
             // would masquerade as needing attention, the exact false pull we remove.
             let mut human_waits: Vec<ToolUseInfo> = Vec::new();
             for tool in entry.tool_uses {
-                if tool.name.as_deref() == Some(AGENT_TOOL) {
-                    if let Some(id) = tool.id {
-                        if !self.spawns.iter().any(|(sid, _)| *sid == id) {
-                            self.spawns.push((id, tool.detail));
+                match tool.name.as_deref() {
+                    Some(AGENT_TOOL) => {
+                        if let Some(id) = tool.id {
+                            if !self.spawns.iter().any(|s| s.key == id) {
+                                self.spawns.push(SpawnedSubAgent {
+                                    key: id,
+                                    errand: tool.detail,
+                                    task_id: None,
+                                    outcome: None,
+                                });
+                            }
                         }
                     }
-                } else {
-                    human_waits.push(tool);
+                    // Sending a finished Sub-agent back to work. Unlike a spawn this
+                    // is still a tool call like any other — the turn ends on it and
+                    // its own `tool_result` answers it — so it stays in the awaiting
+                    // decision below; only the roster row changes here.
+                    Some(RESUME_TOOL) => {
+                        if let Some(to) = tool.recipient.as_deref() {
+                            self.note_resume(to);
+                        }
+                        human_waits.push(tool);
+                    }
+                    _ => human_waits.push(tool),
                 }
             }
             // Waiting-on-human = the turn ended to call a (non-`Agent`) tool. Prefer the
@@ -176,8 +234,12 @@ impl Accumulator {
                 self.attention.apply(Observation::Superseded);
             }
         } else if entry.tool_result_ids.is_empty() {
-            // A plain user turn resuming after an error/approval is forward progress.
-            self.attention.apply(Observation::Superseded);
+            // A plain user turn resuming after an error/approval is forward progress —
+            // unless the turn *is* the notification, which the person never typed and
+            // which says nothing about what they were asked for.
+            if !notified {
+                self.attention.apply(Observation::Superseded);
+            }
         } else {
             // A tool_result answers its tool_use by id — a correlated resolution.
             //
@@ -186,10 +248,52 @@ impl Accumulator {
             // notified automatically when it completes" — arriving ~2s after the spawn
             // against children that run up to 20 minutes. Retiring the roster entry
             // here (as the old rule did) would empty the badge two seconds after every
-            // spawn. Completion arrives separately, as a notification (#75).
+            // spawn. Completion arrives separately, up to 20 minutes later, as the
+            // notification [`Accumulator::note_completion`] reads.
             for id in entry.tool_result_ids {
                 self.attention.apply(Observation::Resolved { key: id });
             }
+        }
+    }
+
+    /// Record how a Sub-agent ended, joining the notification back to the spawn that
+    /// started it.
+    ///
+    /// **By id, never by count.** 101 task-ids appear against 59 spawns — backgrounded
+    /// commands and monitor events notify under the same tag — so a notification
+    /// naming no spawn of ours moves nothing and creates nothing. And **latest wins**:
+    /// a Sub-agent can be resumed after it ends, so the roster carries the newest word
+    /// rather than treating the first as final.
+    fn note_completion(&mut self, note: crate::parse::TaskNotification) {
+        let Some(spawn) = self.spawns.iter_mut().find(|s| {
+            s.key == note.tool_use_id
+                // A run that is not the first notifies under the id of the message
+                // that started it, not the spawn's. The `task-id` is the identity that
+                // outlives any one tool-use id — every notification in the corpus
+                // states one — so it is what a later ending joins on.
+                || (note.task_id.is_some() && s.task_id == note.task_id)
+        }) else {
+            return;
+        };
+        if spawn.task_id.is_none() {
+            spawn.task_id = note.task_id;
+        }
+        spawn.outcome = Some(note.status);
+    }
+
+    /// A message addressed to a Sub-agent that had finished: it is working again, so
+    /// the row drops the word it ended on and returns to Running.
+    ///
+    /// The recipient is matched against the id the *source* stated in a notification,
+    /// so a message to something that never notified — or that is not a Sub-agent at
+    /// all — matches nothing.
+    fn note_resume(&mut self, to: &str) {
+        if let Some(spawn) = self
+            .spawns
+            .iter_mut()
+            .find(|s| s.task_id.as_deref() == Some(to))
+        {
+            spawn.outcome = None;
         }
     }
 }
@@ -239,12 +343,17 @@ impl Fold for Accumulator {
             sub_agent_roster: self
                 .spawns
                 .iter()
-                .map(|(id, description)| SubAgent {
-                    id: id.clone(),
-                    spawn_key: id.clone(),
-                    errand: description.clone(),
-                    state: SubAgentState::Running,
-                    outcome: None,
+                .map(|spawn| SubAgent {
+                    id: spawn.key.clone(),
+                    spawn_key: spawn.key.clone(),
+                    errand: spawn.errand.clone(),
+                    // Running until a notification says otherwise — the acknowledgement
+                    // that answers the spawn ~2s later says only that it launched.
+                    state: match spawn.outcome {
+                        Some(_) => SubAgentState::Finished,
+                        None => SubAgentState::Running,
+                    },
+                    outcome: spawn.outcome.clone(),
                     tokens_in: 0,
                     tokens_out: 0,
                     cost_usd: None,
@@ -1040,6 +1149,294 @@ mod tests {
             s.sub_agent_roster[0].errand.as_deref(),
             Some("map the parser")
         );
+    }
+
+    /// The `<task-notification>` block Claude Code writes: the structured tags that
+    /// carry the join key and the outcome word, and the prose beside them that nothing
+    /// reads. Every record form below is this same body.
+    fn notification_body(tuid: &str, task_id: &str, status: &str) -> String {
+        format!(
+            "<task-notification>\n<task-id>{task_id}</task-id>\n<tool-use-id>{tuid}</tool-use-id>\n<output-file>/tmp/{task_id}.output</output-file>\n<status>{status}</status>\n<summary>Agent \"map the parser\" finished</summary>\n<note>A task-notification fires each time this agent stops…</note>\n<result>the child's whole report</result>\n</task-notification>"
+        )
+    }
+
+    /// The completion record itself, as it reaches the **parent's** fold: a user turn
+    /// whose whole prompt is the notification.
+    fn task_notification(tuid: &str, task_id: &str, status: &str) -> String {
+        serde_json::json!({
+            "type": "user",
+            "sessionId": "s1",
+            "cwd": "/a/foo",
+            "timestamp": "2026-07-19T10:20:00Z",
+            "message": { "role": "user", "content": notification_body(tuid, task_id, status) }
+        })
+        .to_string()
+    }
+
+    /// The same notification's other two record forms — the queue record that
+    /// enqueued it and the attachment that carries the queued prompt. Both sit in the
+    /// transcript beside the user turn above; neither is a user turn, so neither is
+    /// read.
+    fn task_notification_queue_forms(tuid: &str, task_id: &str, status: &str) -> [String; 2] {
+        let body = notification_body(tuid, task_id, status);
+        [
+            serde_json::json!({
+                "type": "queue-operation", "operation": "enqueue",
+                "timestamp": "2026-07-19T10:20:00Z", "sessionId": "s1", "content": body,
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "attachment", "sessionId": "s1", "cwd": "/a/foo",
+                "timestamp": "2026-07-19T10:20:00Z",
+                "attachment": { "type": "queued_command", "prompt": body,
+                    "commandMode": "task-notification" },
+            })
+            .to_string(),
+        ]
+    }
+
+    /// A message the orchestrator sends to a Sub-agent that had already finished —
+    /// the one way a Sub-agent goes back to work. It names the Sub-agent by the id the
+    /// notification stated, and the notification that ends the resumed run carries
+    /// *this* tool-use id.
+    fn resume_message(tuid: &str, to: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "sessionId": "s1",
+            "cwd": "/a/foo",
+            "timestamp": "2026-07-19T10:25:00Z",
+            "message": {
+                "model": "claude-opus-4-8",
+                "stop_reason": "tool_use",
+                "content": [{
+                    "type": "tool_use", "id": tuid, "name": "SendMessage",
+                    "input": { "to": to, "summary": "finish it yourself now",
+                        "message": "the long message the Sub-agent receives" }
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    /// Feed `lines` to a fresh Claude fold and build the card at a fixed clock.
+    fn fold_lines(lines: &[String]) -> Session {
+        let mut fs = claude();
+        let mut data = lines.join("\n");
+        data.push('\n');
+        fs.feed(data.as_bytes());
+        fs.build(ts("2026-07-19T10:30:00Z"), ts("2026-07-19T10:30:10Z"))
+            .unwrap()
+    }
+
+    /// Each roster row's state and the source's word for how it ended.
+    fn outcomes(s: &Session) -> Vec<(SubAgentState, Option<&str>)> {
+        s.sub_agent_roster
+            .iter()
+            .map(|a| (a.state, a.outcome.as_deref()))
+            .collect()
+    }
+
+    #[test]
+    fn a_completion_notification_finishes_its_entry_while_its_parent_runs() {
+        // The ticket, stated once: a roster entry stops being Running the moment its
+        // Sub-agent actually finishes — which its parent's notification says, ~20
+        // minutes after the launch acknowledgement — and says so in the source's own
+        // word. The parent is still Running; the Sub-agent it has not heard about is
+        // still Running too.
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            agent_spawn("toolu_b", "audit the tests"),
+            agent_launch_ack("toolu_a"),
+            task_notification("toolu_a", "task-a", "completed"),
+        ]);
+        assert_eq!(
+            outcomes(&s),
+            vec![
+                (SubAgentState::Finished, Some("completed")),
+                (SubAgentState::Running, None),
+            ]
+        );
+        assert_eq!(s.status, Status::Active);
+    }
+
+    #[test]
+    fn every_word_the_source_states_travels_verbatim() {
+        // The vocabulary is the source's, not ours: `completed`, `failed`, `stopped`,
+        // `killed` are read off the status tag, never inferred from the prose beside
+        // it — and a word we have never seen would travel just as unaltered.
+        for word in ["completed", "failed", "stopped", "killed", "abandoned"] {
+            let s = fold_lines(&[
+                agent_spawn("toolu_a", "map the parser"),
+                task_notification("toolu_a", "task-a", word),
+            ]);
+            assert_eq!(outcomes(&s), vec![(SubAgentState::Finished, Some(word))]);
+        }
+    }
+
+    #[test]
+    fn the_latest_notification_wins() {
+        // A Sub-agent can notify more than once, so the roster shows the latest word
+        // rather than treating the first as final.
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            task_notification("toolu_a", "task-a", "completed"),
+            task_notification("toolu_a", "task-a", "failed"),
+        ]);
+        assert_eq!(
+            outcomes(&s),
+            vec![(SubAgentState::Finished, Some("failed"))]
+        );
+    }
+
+    #[test]
+    fn a_resumed_sub_agent_goes_back_to_running() {
+        // How a Sub-agent ends is the latest word, not a final one. The orchestrator
+        // sends a finished Sub-agent another message; the roster says what is true now
+        // — Running, with no outcome — and the notification that ends the resumed run
+        // arrives under the *resuming* tool-use id, which is the one the source states.
+        let resumed = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            task_notification("toolu_a", "task-a", "completed"),
+            resume_message("toolu_resume", "task-a"),
+        ]);
+        assert_eq!(outcomes(&resumed), vec![(SubAgentState::Running, None)]);
+        assert_eq!(resumed.sub_agent_roster.len(), 1, "still one Sub-agent");
+
+        let ended_again = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            task_notification("toolu_a", "task-a", "completed"),
+            resume_message("toolu_resume", "task-a"),
+            task_notification("toolu_resume", "task-a", "stopped"),
+        ]);
+        assert_eq!(
+            outcomes(&ended_again),
+            vec![(SubAgentState::Finished, Some("stopped"))]
+        );
+        assert_eq!(ended_again.sub_agent_roster.len(), 1);
+    }
+
+    #[test]
+    fn a_notification_joins_a_spawn_by_id_and_is_never_counted() {
+        // 101 task-ids appear against 59 spawns: notifications are not Sub-agent
+        // specific — a backgrounded command notifies too. One that names a tool-use
+        // that is not a spawn moves nothing and creates nothing; counting them would
+        // attribute a shell command to a Sub-agent.
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            task_notification("toolu_bash", "task-bg", "failed"),
+        ]);
+        assert_eq!(outcomes(&s), vec![(SubAgentState::Running, None)]);
+        assert_eq!(
+            s.sub_agent_roster.len(),
+            1,
+            "no row for a background command"
+        );
+    }
+
+    #[test]
+    fn a_notification_that_states_no_status_ends_nothing() {
+        // Monitor events notify under the same tag with no status and no tool-use id.
+        // How a Sub-agent ended is read or it is absent — never inferred from the
+        // summary prose sitting right beside it.
+        let mut fs = claude();
+        let monitor = serde_json::json!({
+            "type": "user", "sessionId": "s1", "cwd": "/a/foo",
+            "timestamp": "2026-07-19T10:20:00Z",
+            "message": { "role": "user", "content":
+                "<task-notification>\n<task-id>bi9juvjcz</task-id>\n<summary>Monitor event: \"map the parser\"</summary>\n<event>the agent failed and died</event>\n</task-notification>" }
+        })
+        .to_string();
+        let mut data = [agent_spawn("toolu_a", "map the parser"), monitor].join("\n");
+        data.push('\n');
+        fs.feed(data.as_bytes());
+        let s = fs
+            .build(ts("2026-07-19T10:30:00Z"), ts("2026-07-19T10:30:10Z"))
+            .unwrap();
+        assert_eq!(outcomes(&s), vec![(SubAgentState::Running, None)]);
+    }
+
+    #[test]
+    fn a_notification_in_all_its_record_forms_produces_one_outcome() {
+        // The same notification is written three times — a queue record, a queued-
+        // command attachment, and the user turn. Only the user turn is read, and the
+        // roster carries one Sub-agent with one outcome either way.
+        let [queued, attached] = task_notification_queue_forms("toolu_a", "task-a", "completed");
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            queued.clone(),
+            attached.clone(),
+            task_notification("toolu_a", "task-a", "completed"),
+        ]);
+        assert_eq!(
+            outcomes(&s),
+            vec![(SubAgentState::Finished, Some("completed"))]
+        );
+
+        // And the queue forms alone say nothing: they are not the parent's turn.
+        let queue_only = fold_lines(&[agent_spawn("toolu_a", "map the parser"), queued, attached]);
+        assert_eq!(outcomes(&queue_only), vec![(SubAgentState::Running, None)]);
+    }
+
+    #[test]
+    fn a_failed_sub_agent_leaves_the_parents_attention_exactly_as_it_was() {
+        // The notification is addressed to the orchestrator, which reads it and
+        // carries on — in 23 of 24 observed non-completed notifications the parent's
+        // next entry came a median of 0.7s later. It manufactures no human need
+        // (ADR 0010), and it answers none either: a person is still waiting to approve
+        // that Bash call, and the card must not stop saying so.
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            assistant_tool_use("s1"),
+            task_notification("toolu_a", "task-a", "failed"),
+        ]);
+        assert_eq!(
+            outcomes(&s),
+            vec![(SubAgentState::Finished, Some("failed"))]
+        );
+        assert_eq!(s.status, Status::Attention);
+        let a = s
+            .attention
+            .expect("the human's wait survives the notification");
+        assert_eq!(a.cause, AttentionCause::Input);
+        assert_eq!(a.since, ts("2026-07-19T10:00:00Z"));
+        assert_eq!(a.evidence.as_deref(), Some("Bash"));
+
+        // A notification arriving in the same turn as the answer to that Bash call
+        // still lets the answer through: the two records are unrelated, and reading one
+        // must not cost the other. Every notification observed arrived alone, so this
+        // is the shape that would rot silently — the card stuck in Attention with the
+        // tool it named already answered.
+        let answered = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            assistant_tool_use("s1"),
+            serde_json::json!({
+                "type": "user", "sessionId": "s1", "cwd": "/a/foo",
+                "timestamp": "2026-07-19T10:20:00Z",
+                "message": { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok" },
+                    { "type": "text", "text": notification_body("toolu_a", "task-a", "failed") },
+                ] }
+            })
+            .to_string(),
+        ]);
+        assert_eq!(
+            outcomes(&answered),
+            vec![(SubAgentState::Finished, Some("failed"))]
+        );
+        assert_eq!(
+            answered.status,
+            Status::Active,
+            "the Bash call was answered"
+        );
+        assert!(answered.attention.is_none());
+
+        // And with nothing pending, a failure raises nothing of its own.
+        let quiet = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            task_notification("toolu_a", "task-a", "failed"),
+        ]);
+        assert_eq!(quiet.status, Status::Active);
+        assert!(quiet.attention.is_none());
     }
 
     #[test]
