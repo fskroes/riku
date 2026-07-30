@@ -60,6 +60,26 @@ pub enum Folded {
     SubAgent(SubAgentProjection),
 }
 
+/// What a Sub-agent's source says it hangs from, and how much of the way to the
+/// root that gets us.
+///
+/// Attachment is to the **root** Agent Session either way — the only node in a spawn
+/// tree that is a card, however deep the Sub-agent was spawned (ADR 0014). The two
+/// tools are mirror images of that one model rather than two models. Claude stamps
+/// the root's id on every child entry and again on the directory holding it, so the
+/// root comes free and it is the *immediate* spawner that costs a cross-file join.
+/// Codex names only the immediate spawner, so the root costs a walk up the chain —
+/// which passes through another Sub-agent in 4 of 79 observed rollouts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attachment {
+    /// The source named the root outright. Nothing to walk.
+    Root(String),
+    /// The source named the immediate spawner, which may itself be a Sub-agent. The
+    /// root is wherever the chain from here ends, and only the store — the one place
+    /// that sees every fold — can walk it.
+    Spawner(String),
+}
+
 /// The per-source projection of one Sub-agent's transcript.
 ///
 /// Deliberately *not* card-shaped: no Attention, no branch, no working directory.
@@ -74,15 +94,22 @@ pub struct SubAgentProjection {
     /// The Sub-agent's own source-native id: Claude's `agentId`, Codex's
     /// `session_meta` rollout id.
     pub id: String,
-    /// The root Agent Session this Sub-agent belongs to — the only node in the
-    /// spawn tree that is a card, however deep the Sub-agent was spawned. `None`
-    /// while the source cannot yet resolve it, in which case the Sub-agent is held
-    /// out of every roster rather than attached to a guess.
-    pub root_session_id: Option<String>,
-    /// The key that joins this Sub-agent back to the spawn that created it: Claude's
-    /// spawning tool-use id, Codex's parent thread id. `None` when the source states
-    /// none, in which case this Sub-agent joins no spawn record and stands as its own
-    /// roster row — which is right, since nothing links it to one.
+    /// What this Sub-agent hangs from, as its source states it. `None` when the
+    /// source states nothing — and a stated chain that cannot be resolved is treated
+    /// the same way: the Sub-agent is held out of every roster rather than attached
+    /// to a guess.
+    pub attachment: Option<Attachment>,
+    /// The key that joins this Sub-agent back to the *individual spawn* that created
+    /// it — Claude's spawning tool-use id, minted one per `Agent` tool-use. `None`
+    /// when the source records no such spawn, in which case this Sub-agent joins no
+    /// spawn record and stands as its own roster row, which is right since nothing
+    /// links it to one.
+    ///
+    /// It is emphatically not "whatever id the parent appears under": Codex's parent
+    /// thread id names the *spawner*, which eight siblings can share, and putting it
+    /// here would collide all eight onto one row — see [`merge_roster`]'s contract
+    /// that a spawn key identifies at most one Sub-agent. That id is an
+    /// [`Attachment::Spawner`], and Codex records no per-spawn key at all.
     pub spawn_key: Option<String>,
     /// What it was sent to do, verbatim from the source (bounded where it is read,
     /// like every other string the card carries). `None` when none is stated.
@@ -92,6 +119,17 @@ pub struct SubAgentProjection {
     /// producers of a Claude row emit 1 for a direct Sub-agent, so a 0 is an absence
     /// rather than a level.
     pub depth: u32,
+    /// Whether this Sub-agent's *own* file says it has ended. Only one of the two
+    /// tools ever does: Codex writes a terminal event into the child's rollout, while
+    /// Claude states completion in the *parent's* notifications, so a Claude Sub-agent
+    /// is always `Running` from this side and [`merge_roster`] takes the word from the
+    /// side that has it.
+    pub state: SubAgentState,
+    /// The outcome word that goes with [`state`](Self::state), when there is one.
+    /// `None` for a Sub-agent still running, and equally for one that ended in a way
+    /// its source has no word for — an ending is not a word, and a word is never
+    /// invented to fill the gap (CONTEXT.md "Errand", applied to outcomes).
+    pub outcome: Option<String>,
     pub tool: Tool,
     /// The model this Sub-agent ran, which may be cheaper than the orchestrator's.
     pub model: Option<String>,
@@ -105,16 +143,18 @@ pub struct SubAgentProjection {
 }
 
 impl SubAgentProjection {
-    /// This Sub-agent as a roster row — what it spent, and what the source said it
-    /// was sent to do.
+    /// This Sub-agent as a roster row — what it spent, what the source said it was
+    /// sent to do, and how its own file says it ended.
     ///
-    /// The row's state is `Running`, and its outcome absent: a Claude Sub-agent's
-    /// completion is stated in its *parent's* notification records, not in its own
-    /// file, so this side of the union never has the word — [`merge_roster`] takes it
-    /// from the side that does. A parent that is itself Finished demotes every
-    /// still-Running row of its own accord in [`assemble`]. `cost_usd` is `None` for
-    /// an unpriced model rather than a misleading `0.00`, matching the folded `0.0`
-    /// accumulator's meaning.
+    /// **The row runs until its own file says it stopped**, and only one of the two
+    /// tools ever says so: Codex writes a terminal event into the child's rollout,
+    /// while a Claude Sub-agent's completion is stated in its *parent's* notification
+    /// records, so a Claude row is always Running from this side and [`merge_roster`]
+    /// takes the word from the side that has it. A parent that is itself Finished
+    /// demotes every still-Running row of its own accord in [`assemble`] — reaching
+    /// Finished that way, the row carries no outcome word, because no source stated
+    /// one. `cost_usd` is `None` for an unpriced model rather than a misleading
+    /// `0.00`, matching the folded `0.0` accumulator's meaning.
     ///
     /// The join key falls back to this Sub-agent's own id when the source states
     /// none: it then matches no spawn record and the row stands on its own.
@@ -123,8 +163,8 @@ impl SubAgentProjection {
             id: self.id.clone(),
             spawn_key: self.spawn_key.clone().unwrap_or_else(|| self.id.clone()),
             errand: self.errand.clone(),
-            state: SubAgentState::Running,
-            outcome: None,
+            state: self.state,
+            outcome: self.outcome.clone(),
             tokens_in: self.tokens_in,
             tokens_out: self.tokens_out,
             cost_usd: (self.cost_usd > 0.0).then_some(self.cost_usd),
@@ -151,6 +191,14 @@ impl SubAgentProjection {
 /// (oldest first, ties broken by id) rather than in whatever order the store's file
 /// map happened to yield, so an unchanged roster compares equal and the store's
 /// no-op suppression holds.
+///
+/// **A known bound, recorded rather than fixed.** That fallback order is by *latest*
+/// event, not first, so it is only an approximation of spawn order — and Codex makes
+/// it the rule rather than the exception, since Codex records no spawn in the parent's
+/// rollout at all and every one of its rows arrives this way. A Codex roster therefore
+/// reads in latest-activity order: siblings spawned together but finishing apart can
+/// swap places. Fixing it means carrying each Sub-agent's *first* timestamp through to
+/// the wire, which is a new field on the row rather than a change to this merge.
 ///
 /// **A spawn key identifies at most one Sub-agent.** Claude mints one per `Agent`
 /// tool-use and its sidecar carries it back, so two children cannot honestly claim

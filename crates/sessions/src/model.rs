@@ -240,9 +240,14 @@ pub struct Session {
     /// serving/streaming. Omitted-on-wire tolerant (`default` → `None`).
     #[serde(default)]
     pub diff: Option<DiffStat>,
-    /// Every Sub-agent this Session has spawned, running and finished alike, in
-    /// spawn order — the card's Sub-agent badge and the roster its panel shows.
-    /// Empty for a session that never fanned out.
+    /// Every Sub-agent this Session has spawned, running and finished alike — the
+    /// card's Sub-agent badge and the roster its panel shows. Empty for a session that
+    /// never fanned out.
+    ///
+    /// In spawn order where the source records the spawns, which is Claude. Codex
+    /// records none in the parent's rollout, so its rows are ordered by latest activity
+    /// instead — an approximation of spawn order, bounded and explained at
+    /// [`merge_roster`](crate::fold::merge_roster).
     ///
     /// A **new** wire field name, replacing the legacy count-and-descriptions
     /// object. An absent field defaults cleanly to an empty roster, but a legacy

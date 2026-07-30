@@ -144,6 +144,43 @@ looks like content is worse than a blank.
   been observed live. Verify against a session actively fanning out before
   treating the lifecycle as settled.
 
+## Update — 2026-07-30, on building the Codex side (#76)
+
+Three things this ADR states came out differently once the Codex join was built.
+Recorded here rather than edited in above, so the decision keeps its date and the
+correction keeps its own.
+
+- **The outcome word is Riku's for Codex, not the source's.** Above, outcome is
+  "read from the notification's `<status>` tag, never inferred from prose" — true
+  of Claude, which names one of `completed` / `failed` / `stopped` / `killed`.
+  Codex has no such field anywhere: it states an event *type*, `task_complete`,
+  and nothing else. So `completed` is a mapping declared in one place in
+  `codex.rs`, one terminal event to one word, rather than a token lifted out of a
+  rollout. The rule that survives intact is the one that matters — a word is
+  never *inferred*, and an ending Codex has no word for carries none.
+- **An aborted turn ends a Codex Sub-agent too**, unworded. Not considered above,
+  where `task_complete` on 74 of 75 rollouts made the remaining one look like a
+  rounding error. It is not: a roster row that claims to be running is exactly
+  what holds a quiet parent out of Finished, so one unterminated child pins its
+  parent's card Active for as long as the parent lives, escapable only by a dead
+  process. Ending it on the abort closes that, and a later `task_started` takes
+  the ending back like any other resumption.
+- **The ratios were re-measured and moved.** Above: Codex sub-agents total 106%
+  of their parents' input tokens, over 75 rollouts. Against the corpus on
+  2026-07-30 — 79 rollouts, 35 parents that spawned — it is **98%**. The worst
+  case is unchanged at 3.61× from 8 children, and so is the conclusion the number
+  was cited for: Codex card costs roughly double. This is a live corpus; the
+  figure will keep moving, and the release note carries the measured one.
+
+One thing this ADR did not anticipate at all. Codex rollouts **fork**, and a
+forked thread replays the meta of the thread it forked from into its own history,
+so a rollout can state several `session_meta` records. The fold took the last, and
+the last is an ancestor's: 55 of 193 rollouts were running under their parent's
+id. It never showed, because every one of them was a subagent rollout and those
+were suppressed — the same "invisible because the failure mode is silence" this
+ADR was written about, one layer down. The first `session_meta` is now the one
+that identifies a rollout.
+
 ## Deliberately out of scope
 
 A per-session detail surface (the roster's eventual right home — a hover panel

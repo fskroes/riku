@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::fold::{assemble, merge_roster, Folded, Projection};
+use crate::fold::{assemble, merge_roster, Attachment, Folded, Projection, SubAgentProjection};
 use crate::liveness::ProcessLiveness;
 use crate::model::{Session, SubAgent};
 use crate::session::FileState;
@@ -58,6 +58,55 @@ pub enum Event {
 /// **root** Agent Session each belongs to — the only node in a spawn tree that is a
 /// card, however deep the Sub-agent was spawned.
 type Rosters = HashMap<String, Vec<SubAgent>>;
+
+/// How many links of a spawn chain the walk to the root will follow before giving
+/// up. The deepest chain in the observed corpus is 3, so this is not a cap on
+/// nesting; it is what guarantees a chain that loops back on itself — which no
+/// honest source writes, and only a file could claim — ends the walk rather than the
+/// process.
+const MAX_SPAWN_CHAIN: usize = 16;
+
+/// Who is a card and what every Sub-agent hangs from, indexed so that each hop of a
+/// walk up a spawn chain is a lookup rather than another pass over the file map.
+///
+/// The store is the only place this can be built: a Sub-agent's chain runs through
+/// files it has no knowledge of, and its root may be a session discovered before or
+/// after it. It is rebuilt per join rather than cached, so it cannot go stale against
+/// the folds — the folds move on every ingested byte.
+#[derive(Default)]
+struct SpawnTree {
+    /// Every id that is an Agent Session — the ids a chain can end at.
+    sessions: HashSet<String>,
+    /// What each discovered Sub-agent hangs from, by that Sub-agent's own id.
+    attachments: HashMap<String, Attachment>,
+}
+
+impl SpawnTree {
+    /// The root Agent Session an attachment leads to, or `None` when the chain cannot
+    /// be resolved — an unknown id, an unstated attachment, or (defensively) a loop.
+    ///
+    /// An unresolved chain means the Sub-agent is **held out** of every roster rather
+    /// than attached to a guess. The commonest honest cause is a root that discovery
+    /// has not reached: it falls outside the discovery window, or its file simply has
+    /// not been sighted yet. Both fix themselves the moment the root appears, which is
+    /// why holding out costs nothing but the guess.
+    ///
+    /// [`Attachment::Root`] resolves to itself without consulting the tree at all: the
+    /// source named the root, and whether that root has been discovered is the caller's
+    /// question, answered by there being no card to put the row on.
+    fn root_of(&self, attachment: Option<&Attachment>) -> Option<String> {
+        let mut at = attachment?;
+        for _ in 0..MAX_SPAWN_CHAIN {
+            match at {
+                Attachment::Root(id) => return Some(id.clone()),
+                Attachment::Spawner(id) if self.sessions.contains(id) => return Some(id.clone()),
+                // The spawner is itself a Sub-agent: keep climbing towards the card.
+                Attachment::Spawner(id) => at = self.attachments.get(id)?,
+            }
+        }
+        None
+    }
+}
 
 struct FileEntry {
     state: FileState,
@@ -130,8 +179,8 @@ impl SessionStore {
     /// here, and merging in [`build`], is what lets `assemble` stay the one pure
     /// projection-to-card seam and gain an input rather than a second job.
     ///
-    /// A Sub-agent whose root the source could not resolve is **held out** rather
-    /// than attached to a guess: it waits, invisible, until its root is discovered.
+    /// A Sub-agent whose root cannot be resolved is **held out** rather than attached
+    /// to a guess: it waits, invisible, until its root is discovered.
     ///
     /// **Known bound, recorded rather than fixed.** A Sub-agent's file is filtered by
     /// [`DISCOVERY_WINDOW`] on its *own* mtime, like any other transcript, so a
@@ -143,17 +192,38 @@ impl SessionStore {
     /// files by their *root's* freshness instead of their own would fix it and is a
     /// change to discovery, not to this join.
     fn rosters(&self) -> Rosters {
+        let tree = self.spawn_tree();
         let mut rosters = Rosters::new();
         for entry in self.files.values() {
             let Some(Folded::SubAgent(sub)) = entry.state.folded() else {
                 continue;
             };
-            let Some(root) = sub.root_session_id.clone() else {
+            let Some(root) = tree.root_of(sub.attachment.as_ref()) else {
                 continue;
             };
             rosters.entry(root).or_default().push(sub.roster_entry());
         }
         rosters
+    }
+
+    /// Who is a card and what every Sub-agent hangs from, as the folds currently
+    /// state it.
+    fn spawn_tree(&self) -> SpawnTree {
+        let mut tree = SpawnTree::default();
+        for entry in self.files.values() {
+            match entry.state.folded() {
+                Some(Folded::AgentSession(p)) => {
+                    tree.sessions.insert(p.id);
+                }
+                Some(Folded::SubAgent(sub)) => {
+                    if let Some(attachment) = sub.attachment {
+                        tree.attachments.insert(sub.id, attachment);
+                    }
+                }
+                None => {}
+            }
+        }
+        tree
     }
 
     /// The source that owns `path`: the one whose root is an ancestor and whose
@@ -243,13 +313,13 @@ impl SessionStore {
     /// event iff the resulting Session changed.
     ///
     /// A Sub-agent's file emits an update for **its root's** session and never one
-    /// of its own: what changed is a row on the root's roster. If the root has not
-    /// been discovered, nothing is emitted and the Sub-agent waits — held out of
-    /// every roster rather than attached to a guess.
+    /// of its own: what changed is a row on the root's roster. If the chain to that
+    /// root cannot be resolved, nothing is emitted and the Sub-agent waits — held out
+    /// of every roster rather than attached to a guess.
     pub fn ingest(&mut self, path: &Path, now: DateTime<Utc>) -> Option<Event> {
         self.feed(path, now)?;
         match self.files.get(path)?.state.folded()? {
-            Folded::SubAgent(sub) => self.rebuild_session(&sub.root_session_id?, now),
+            Folded::SubAgent(sub) => self.rebuild_root_of(&sub, now),
             Folded::AgentSession(_) => self.rebuild(&path.to_path_buf(), now),
         }
     }
@@ -261,7 +331,13 @@ impl SessionStore {
     pub fn remove(&mut self, path: &Path, now: DateTime<Utc>) -> Option<Event> {
         let entry = self.files.remove(path)?;
         if let Some(Folded::SubAgent(sub)) = entry.state.folded() {
-            return self.rebuild_session(&sub.root_session_id?, now);
+            // Resolved *after* the removal, which is what makes the rebuild complete: a
+            // chain that ran through this Sub-agent is now broken, so a nested child it
+            // spawned is held out on the same rule as any other unresolvable chain, and
+            // the one rebuild below drops both rows rather than leaving the grandchild's
+            // behind. This Sub-agent's own attachment still resolves — it is read from
+            // the removed projection, not from the map.
+            return self.rebuild_root_of(&sub, now);
         }
         entry.session.map(|s| Event::Removed { id: s.id })
     }
@@ -275,6 +351,14 @@ impl SessionStore {
         let changed = entry.session.as_ref() != Some(&session);
         entry.session = Some(session.clone());
         changed.then_some(Event::Upsert(session))
+    }
+
+    /// As [`rebuild`](Self::rebuild), for the card `sub` belongs to — the root its
+    /// chain climbs to. `None`, and so no event, when that chain cannot be resolved:
+    /// the Sub-agent is on no roster, so nothing changed for anyone.
+    fn rebuild_root_of(&mut self, sub: &SubAgentProjection, now: DateTime<Utc>) -> Option<Event> {
+        let root = self.spawn_tree().root_of(sub.attachment.as_ref())?;
+        self.rebuild_session(&root, now)
     }
 
     /// As [`rebuild`](Self::rebuild), for the transcript carrying Agent Session `id`.
@@ -907,6 +991,349 @@ mod tests {
         .into();
         store.apply_liveness(&alive, later);
         assert_eq!(status_of(&store, "root-1", later), Status::Active);
+    }
+
+    // --- the Codex walk up the spawn chain ---------------------------------------
+    //
+    // Codex is the mirror image of Claude: it names the *immediate* spawner on every
+    // subagent rollout and never the root, so attachment costs a walk that only the
+    // store can make — a chain runs through files no single fold knows about.
+
+    /// A Codex rollout: `session_meta` + one cumulative `token_count`. `parent` makes
+    /// it a subagent rollout spawned by that thread; `None` makes it an Agent Session.
+    fn rollout_lines(id: &str, parent: Option<(&str, u32)>, cwd: &str, tin: u64) -> Vec<String> {
+        let mut meta = serde_json::json!({
+            "timestamp": "2026-07-19T10:00:00Z",
+            "type": "session_meta",
+            "payload": { "id": id, "cwd": cwd, "git": { "branch": "main" } }
+        });
+        if let Some((parent, depth)) = parent {
+            let payload = meta["payload"].as_object_mut().unwrap();
+            payload.insert("thread_source".into(), "subagent".into());
+            payload.insert("parent_thread_id".into(), parent.into());
+            payload.insert("agent_nickname".into(), "Dirac".into());
+            payload.insert(
+                "source".into(),
+                serde_json::json!({ "subagent": { "thread_spawn": { "depth": depth } } }),
+            );
+        }
+        vec![
+            meta.to_string(),
+            serde_json::json!({
+                "timestamp": "2026-07-19T10:00:01Z",
+                "type": "turn_context",
+                "payload": { "model": "gpt-5.6-sol", "cwd": cwd }
+            })
+            .to_string(),
+            serde_json::json!({
+                "timestamp": "2026-07-19T10:00:02Z",
+                "type": "event_msg",
+                "payload": { "type": "token_count", "info": {
+                    "total_token_usage": { "input_tokens": tin, "output_tokens": 10 }
+                }}
+            })
+            .to_string(),
+        ]
+    }
+
+    /// Write a Codex rollout under a date-nested directory and return its path.
+    fn write_codex(root: &Path, id: &str, lines: &[String]) -> PathBuf {
+        let dir = root.join("2026/07/19");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-2026-07-19T10-00-00-{id}.jsonl"));
+        let mut body = lines.join("\n");
+        body.push('\n');
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// Append one committed line to a transcript, as a live agent would.
+    fn append_line(path: &Path, line: &str) {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    fn codex_store(root: &Path) -> SessionStore {
+        SessionStore::new(vec![Box::new(crate::source::CodexSource::new(
+            root.to_path_buf(),
+        ))])
+    }
+
+    #[test]
+    fn a_codex_sub_agent_lands_on_its_spawners_card_and_is_never_one_itself() {
+        // The whole of the Codex side in one: the child's rollout is the only file
+        // that says anything about it, and what it says is a row on the parent's card.
+        let dir = tempfile::tempdir().unwrap();
+        let now = ts("2026-07-19T10:00:30Z");
+        write_codex(
+            dir.path(),
+            "root-1",
+            &rollout_lines("root-1", None, "/a/foo", 500),
+        );
+        let child = write_codex(
+            dir.path(),
+            "sub-1",
+            &rollout_lines("sub-1", Some(("root-1", 1)), "/a/foo", 900),
+        );
+
+        let mut store = codex_store(dir.path());
+        let cards = store.scan(now);
+        assert_eq!(
+            cards.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["root-1"],
+            "only the spawner is a card"
+        );
+        let row = &cards[0].sub_agent_roster[0];
+        assert_eq!(row.id, "sub-1");
+        assert_eq!(row.depth, 1);
+        assert_eq!(row.errand, None, "no nickname stands in for an Errand");
+        assert_eq!(row.tokens_in, 900);
+        // And its spend reaches the headline totals — the number that was 0.
+        assert_eq!(cards[0].tokens_in, 1400);
+
+        // Never a lookup target, and its own ingest re-emits the parent instead.
+        assert!(store.find_by_id("sub-1", now).is_none());
+        assert!(store.find_by_id("root-1", now).is_some());
+        // Nor does it take the parent's Process Liveness credit, though it shares the
+        // working directory exactly and is the more recently active of the two: the
+        // credit is read off a built card, and a Sub-agent never has one.
+        for (path, entry) in store.files.iter_mut() {
+            entry.mtime = if path == &child {
+                now
+            } else {
+                ts("2026-07-19T09:00:00Z")
+            };
+        }
+        store.apply_liveness(&HashSet::new(), now);
+        store.apply_liveness(&HashSet::new(), now);
+        assert_eq!(
+            status_of(&store, "root-1", now),
+            Status::Finished,
+            "the parent holds the credit, so its process dying is what decides it"
+        );
+        append_line(
+            &child,
+            &rollout_lines("sub-1", Some(("root-1", 1)), "/a/foo", 1500)[2],
+        );
+        let Some(Event::Upsert(card)) = store.ingest(&child, now) else {
+            panic!("a Sub-agent's file re-emits its root");
+        };
+        assert_eq!(card.id, "root-1");
+        assert_eq!(card.sub_agent_roster[0].tokens_in, 1500);
+    }
+
+    #[test]
+    fn a_codex_sub_agent_spawned_by_a_sub_agent_lands_on_the_root() {
+        // Attachment is to the root — the only node that is a card — so the walk keeps
+        // climbing while the spawner is itself a Sub-agent (4 of 79 observed rollouts).
+        let dir = tempfile::tempdir().unwrap();
+        let now = ts("2026-07-19T10:00:30Z");
+        write_codex(
+            dir.path(),
+            "root-1",
+            &rollout_lines("root-1", None, "/a/foo", 100),
+        );
+        write_codex(
+            dir.path(),
+            "sub-1",
+            &rollout_lines("sub-1", Some(("root-1", 1)), "/a/foo", 200),
+        );
+        write_codex(
+            dir.path(),
+            "sub-2",
+            &rollout_lines("sub-2", Some(("sub-1", 2)), "/a/foo", 400),
+        );
+
+        let cards = codex_store(dir.path()).scan(now);
+        assert_eq!(cards.len(), 1);
+        let mut rows: Vec<_> = cards[0]
+            .sub_agent_roster
+            .iter()
+            .map(|s| (s.id.as_str(), s.depth))
+            .collect();
+        rows.sort();
+        assert_eq!(rows, vec![("sub-1", 1), ("sub-2", 2)]);
+        assert_eq!(cards[0].tokens_in, 700, "the whole tree's spend");
+    }
+
+    #[test]
+    fn a_codex_chain_that_cannot_be_resolved_is_held_out_of_every_roster() {
+        // The root falls outside the discovery window, or its file has not been sighted
+        // yet: the chain ends at an id nobody has, so the Sub-agent waits — attached to
+        // nothing rather than to a guess. Its own nested child waits with it.
+        let dir = tempfile::tempdir().unwrap();
+        let now = ts("2026-07-19T10:00:30Z");
+        write_codex(
+            dir.path(),
+            "other",
+            &rollout_lines("other", None, "/a/foo", 100),
+        );
+        let orphan = write_codex(
+            dir.path(),
+            "sub-1",
+            &rollout_lines("sub-1", Some(("root-missing", 1)), "/a/foo", 900),
+        );
+        write_codex(
+            dir.path(),
+            "sub-2",
+            &rollout_lines("sub-2", Some(("sub-1", 2)), "/a/foo", 400),
+        );
+
+        let mut store = codex_store(dir.path());
+        let cards = store.scan(now);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "other");
+        assert!(cards[0].sub_agent_roster.is_empty());
+        assert_eq!(cards[0].tokens_in, 100, "no orphan spend leaks onto a card");
+        assert!(store.ingest(&orphan, now).is_none(), "nothing to emit yet");
+    }
+
+    #[test]
+    fn removing_a_sub_agent_takes_the_chain_below_it_off_the_card_too() {
+        // Removing a link breaks every chain that ran through it, and the one rebuild
+        // the removal emits has to reflect that — otherwise the grandchild's row, and
+        // its spend, sit on the card until something unrelated rebuilds it.
+        let dir = tempfile::tempdir().unwrap();
+        let now = ts("2026-07-19T10:00:30Z");
+        write_codex(
+            dir.path(),
+            "root-1",
+            &rollout_lines("root-1", None, "/a/foo", 100),
+        );
+        let middle = write_codex(
+            dir.path(),
+            "sub-1",
+            &rollout_lines("sub-1", Some(("root-1", 1)), "/a/foo", 200),
+        );
+        write_codex(
+            dir.path(),
+            "sub-2",
+            &rollout_lines("sub-2", Some(("sub-1", 2)), "/a/foo", 400),
+        );
+
+        let mut store = codex_store(dir.path());
+        assert_eq!(store.scan(now)[0].sub_agent_roster.len(), 2);
+
+        fs::remove_file(&middle).unwrap();
+        let Some(Event::Upsert(card)) = store.remove(&middle, now) else {
+            panic!("removing a Sub-agent re-emits its root");
+        };
+        assert_eq!(card.id, "root-1");
+        assert!(
+            card.sub_agent_roster.is_empty(),
+            "the grandchild goes with it: {:?}",
+            card.sub_agent_roster
+        );
+        assert_eq!(card.tokens_in, 100, "and so does its spend");
+    }
+
+    #[test]
+    fn a_spawn_chain_that_loops_ends_the_walk_rather_than_the_process() {
+        // No honest source writes a cycle; a file can claim one. The walk is bounded,
+        // so the claim costs the rows and nothing else.
+        let dir = tempfile::tempdir().unwrap();
+        let now = ts("2026-07-19T10:00:30Z");
+        write_codex(
+            dir.path(),
+            "root-1",
+            &rollout_lines("root-1", None, "/a/foo", 100),
+        );
+        write_codex(
+            dir.path(),
+            "sub-a",
+            &rollout_lines("sub-a", Some(("sub-b", 1)), "/a/foo", 900),
+        );
+        write_codex(
+            dir.path(),
+            "sub-b",
+            &rollout_lines("sub-b", Some(("sub-a", 1)), "/a/foo", 900),
+        );
+
+        let cards = codex_store(dir.path()).scan(now);
+        assert_eq!(cards.len(), 1);
+        assert!(cards[0].sub_agent_roster.is_empty());
+    }
+
+    #[test]
+    fn a_running_codex_sub_agent_keeps_its_quiet_parent_working() {
+        // The Staleness refinement, on the Codex side: the parent's own rollout has
+        // been quiet for 25 minutes, but a Sub-agent that never reached its terminal
+        // event is still running — and fanning out is never a human need.
+        let dir = tempfile::tempdir().unwrap();
+        write_codex(
+            dir.path(),
+            "root-1",
+            &rollout_lines("root-1", None, "/a/foo", 100),
+        );
+        write_codex(
+            dir.path(),
+            "sub-1",
+            &rollout_lines("sub-1", Some(("root-1", 1)), "/a/foo", 900),
+        );
+        let mut store = codex_store(dir.path());
+        let ingested = ts("2026-07-19T10:00:00Z");
+        store.scan(ingested);
+        for entry in store.files.values_mut() {
+            entry.mtime = ingested;
+        }
+
+        let later = ts("2026-07-19T10:25:00Z");
+        let card = store
+            .snapshot(later)
+            .into_iter()
+            .find(|s| s.id == "root-1")
+            .unwrap();
+        assert_eq!(card.status, Status::Active);
+        assert!(card.attention.is_none());
+        assert_eq!(
+            card.sub_agent_roster[0].state,
+            crate::model::SubAgentState::Running
+        );
+    }
+
+    /// Re-ground the Codex Sub-agent join against this machine's real rollouts.
+    ///
+    /// Every fixture above is hand-written against a format we do not control, which
+    /// is exactly how the Sub-agent badge rotted for months without a red test (ADR
+    /// 0014). This one reads the corpus instead: it ignores the discovery window (it
+    /// ingests each file directly) so history counts, and reports what the join
+    /// resolved. **Host-dependent**, so ignored by default, like the liveness probe:
+    ///
+    /// `cargo test -p sessions codex_corpus -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn the_codex_corpus_resolves_every_sub_agent_to_a_root() {
+        let root = std::env::var("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").expect("HOME")).join(".codex"))
+            .join("sessions");
+        if !root.is_dir() {
+            eprintln!("no Codex corpus at {root:?}; nothing to re-ground against");
+            return;
+        }
+        let now = Utc::now();
+        let mut store = codex_store(&root);
+        let mut found = Vec::new();
+        walk(&root, MAX_SCAN_DEPTH, &mut found);
+        found.retain(|p| store.owns_path(p));
+        for path in &found {
+            store.feed(path, now);
+        }
+
+        let tree = store.spawn_tree();
+        let (mut subs, mut rooted, mut tokens) = (0u64, 0u64, 0u64);
+        for entry in store.files.values() {
+            let Some(Folded::SubAgent(sub)) = entry.state.folded() else {
+                continue;
+            };
+            subs += 1;
+            tokens += sub.tokens_in;
+            rooted += u64::from(tree.root_of(sub.attachment.as_ref()).is_some());
+        }
+        eprintln!("{rooted} of {subs} Codex Sub-agents rooted, {tokens} input tokens");
+        assert!(subs > 0, "the corpus holds no subagent rollouts to check");
+        assert_eq!(rooted, subs, "every observed chain resolves to a root");
     }
 
     #[test]
