@@ -546,18 +546,58 @@ async fn codex_append_emits_session_event() {
     );
 }
 
-#[tokio::test]
-async fn codex_subagent_rollout_is_not_a_card() {
-    let claude = tempfile::tempdir().unwrap();
-    let codex = tempfile::tempdir().unwrap();
-    let mut lines = codex_rollout("sub-1", "subagent work", 900, 90);
-    // Flip the session_meta to a subagent rollout.
+/// Turn a rollout into a subagent rollout spawned by `parent`, in the shape the real
+/// corpus writes: the spawner at the top level, the depth inside the spawn block, and
+/// a nickname that names nothing about the work. `cwd` is the parent's — a Sub-agent
+/// shares it verbatim, which is the whole reason Work Link and Process Liveness must
+/// never see one.
+fn as_codex_subagent(lines: &mut [String], id: &str, parent: &str, depth: u32, cwd: &str) {
     lines[0] = serde_json::json!({
         "timestamp": "2026-07-19T10:00:00Z",
         "type": "session_meta",
-        "payload": { "id": "sub-1", "cwd": "/Users/x/repos/bar", "thread_source": "subagent" }
+        "payload": {
+            "id": id, "session_id": parent, "cwd": cwd,
+            "thread_source": "subagent", "parent_thread_id": parent,
+            "agent_nickname": "Dirac", "agent_path": "/root/spec_review",
+            "source": { "subagent": { "thread_spawn": {
+                "parent_thread_id": parent, "depth": depth, "agent_role": null
+            }}}
+        }
     })
     .to_string();
+}
+
+/// A Codex rollout rooted in a chosen working directory and branch — the two fields a
+/// Work Link reads.
+fn codex_rollout_in(id: &str, cwd: &str, branch: &str) -> Vec<String> {
+    let mut lines = codex_rollout(id, "carrying the work", 100, 10);
+    lines[0] = serde_json::json!({
+        "timestamp": "2026-07-19T10:00:00Z",
+        "type": "session_meta",
+        "payload": { "id": id, "cwd": cwd, "thread_source": "user", "git": { "branch": branch } }
+    })
+    .to_string();
+    lines
+}
+
+/// A Codex lifecycle `event_msg` — `task_started`, `task_complete`, `turn_aborted`.
+fn codex_event(payload_type: &str) -> String {
+    serde_json::json!({
+        "timestamp": "2026-07-19T10:00:04Z",
+        "type": "event_msg",
+        "payload": { "type": payload_type, "turn_id": "t1" }
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn a_codex_subagent_rollout_whose_parent_is_undiscovered_is_no_card_at_all() {
+    // Held out of every roster rather than attached to a guess — and still never a
+    // card, which is the half that was always true and for the wrong reason.
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let mut lines = codex_rollout("sub-1", "subagent work", 900, 90);
+    as_codex_subagent(&mut lines, "sub-1", "root-missing", 1, "/Users/x/repos/bar");
     write_codex_rollout(
         codex.path(),
         "rollout-2026-07-19T10-00-00-sub-1.jsonl",
@@ -581,6 +621,173 @@ async fn codex_subagent_rollout_is_not_a_card() {
     assert!(
         sessions.is_empty(),
         "subagent rollout must not render: {sessions:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_codex_fan_out_shows_its_sub_agents_on_the_parents_card() {
+    // The Codex side end to end, in the mirror image of the Claude one: nothing but
+    // the children's own rollouts says a Sub-agent exists, and the walk up each
+    // `parent_thread_id` is what puts every row on the one node that is a card.
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+
+    let parent = write_codex_rollout(
+        codex.path(),
+        "rollout-2026-07-19T10-00-00-codex-fanout.jsonl",
+        &codex_rollout("codex-fanout", "orchestrating", 1_000, 100),
+    );
+
+    // A finished Sub-agent: it reached its terminal event, so it carries the one
+    // outcome word Codex names.
+    let mut done = codex_rollout("codex-sub-a", "spec review", 900_000, 900);
+    as_codex_subagent(
+        &mut done,
+        "codex-sub-a",
+        "codex-fanout",
+        1,
+        "/Users/x/repos/bar",
+    );
+    done.push(codex_event("task_started"));
+    done.push(codex_event("task_complete"));
+    write_codex_rollout(
+        codex.path(),
+        "rollout-2026-07-19T10-00-01-codex-sub-a.jsonl",
+        &done,
+    );
+
+    // One still running, spawned by that Sub-agent rather than by the card: it lands
+    // on the **root** all the same, after a walk through another Sub-agent.
+    let mut nested = codex_rollout("codex-sub-b", "grinding", 500, 50);
+    as_codex_subagent(
+        &mut nested,
+        "codex-sub-b",
+        "codex-sub-a",
+        2,
+        "/Users/x/repos/bar",
+    );
+    nested.push(codex_event("task_started"));
+    write_codex_rollout(
+        codex.path(),
+        "rollout-2026-07-19T10-00-02-codex-sub-b.jsonl",
+        &nested,
+    );
+
+    // The parent's own rollout has been quiet for half an hour — twice the Staleness
+    // window — while its Sub-agent grinds.
+    age_file(&parent, 30);
+
+    let (addr, _started) = spawn_server_with(
+        claude.path().to_path_buf(),
+        Some(codex.path().to_path_buf()),
+    )
+    .await;
+
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/sessions"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.iter().map(|s| &s["id"]).collect::<Vec<_>>(),
+        vec!["codex-fanout"],
+        "only the root is a card: {sessions:?}"
+    );
+
+    let card = &sessions[0];
+    let roster = card["subAgentRoster"].as_array().unwrap();
+    assert_eq!(roster.len(), 2, "roster was {roster:?}");
+    let row = |id: &str| roster.iter().find(|r| r["id"] == id).unwrap();
+
+    let finished = row("codex-sub-a");
+    assert_eq!(finished["state"], "finished");
+    assert_eq!(finished["outcome"], "completed");
+    assert_eq!(finished["depth"], 1);
+    assert_eq!(finished["tokensIn"], 900_000);
+    // Unlabelled: no nickname, role, or path is presented as an Errand.
+    assert_eq!(finished["errand"], serde_json::Value::Null);
+
+    let running = row("codex-sub-b");
+    assert_eq!(running["state"], "running");
+    assert_eq!(running["outcome"], serde_json::Value::Null);
+    assert_eq!(running["depth"], 2);
+
+    // The spend that was being attributed to nothing now reaches the headline totals.
+    assert_eq!(card["tokensIn"], 901_500);
+    assert_eq!(card["tokensOut"], 1_050);
+
+    // A Codex parent with a Running Sub-agent stays Running past the Staleness
+    // window, and fanning out is never a human need.
+    assert_eq!(card["status"], "active");
+    assert_eq!(card["attention"], serde_json::Value::Null);
+
+    // Never an id-lookup target: a Sub-agent cannot be opened or resumed, because
+    // only the session that sent it can.
+    let opened = reqwest::Client::new()
+        .post(format!("http://{addr}/api/sessions/codex-sub-a/open"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(opened.status(), 404);
+}
+
+#[tokio::test]
+async fn a_codex_sub_agent_is_never_a_work_link_target() {
+    // A Codex Sub-agent inherits its parent's working directory and its branch with
+    // it, and is the more recently active of the two — so if it were ever a session,
+    // `link_session`'s newest-wins pick would put the Work Item chip on a card that
+    // does not exist. It cannot be: a Sub-agent never reaches the session list the
+    // link is chosen from. Asserted rather than left to the type, because "it is
+    // structurally impossible" is exactly the claim that rots unnoticed.
+    let claude = tempfile::tempdir().unwrap();
+    let codex = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    let proj_cwd = proj.path().to_string_lossy().to_string();
+    fs::write(
+        proj.path().join("WORK.md"),
+        "# Work Map\n\n- [ ] W-76 The work the parent is carrying\n",
+    )
+    .unwrap();
+
+    write_codex_rollout(
+        codex.path(),
+        "rollout-2026-07-19T10-00-00-codex-parent.jsonl",
+        &codex_rollout_in("codex-parent", &proj_cwd, "feat/W-76-codex-roster"),
+    );
+    let mut child = codex_rollout_in("codex-child", &proj_cwd, "feat/W-76-codex-roster");
+    as_codex_subagent(&mut child, "codex-child", "codex-parent", 1, &proj_cwd);
+    write_codex_rollout(
+        codex.path(),
+        "rollout-2026-07-19T10-00-01-codex-child.jsonl",
+        &child,
+    );
+
+    let (addr, _started) = spawn_server_with(
+        claude.path().to_path_buf(),
+        Some(codex.path().to_path_buf()),
+    )
+    .await;
+
+    let work: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/work"))
+        .query(&[("cwd", proj_cwd.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let item = work["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "W-76")
+        .unwrap();
+    assert_eq!(
+        item["session"]["id"], "codex-parent",
+        "the chip stays on the parent, the only card there is: {item}"
     );
 }
 

@@ -9,7 +9,10 @@
 //! * `session_meta` (first line) — `payload.id` is the Session id; `thread_source
 //!   == "subagent"` marks a subagent rollout, which folds like any other but is
 //!   stated as a Sub-agent rather than an Agent Session, so it never becomes a
-//!   card; `payload.cwd` and `payload.git.branch` seed the project/branch.
+//!   card; `payload.cwd` and `payload.git.branch` seed the project/branch. On a
+//!   subagent rollout `payload.parent_thread_id` names the thread that spawned it —
+//!   which may be another Sub-agent — and `payload.source.subagent.thread_spawn`
+//!   carries the spawn depth.
 //! * `turn_context` — the model lives here (`payload.model`), per turn, not on the
 //!   message; latest wins.
 //! * `event_msg` / `token_count` — `payload.info.total_token_usage` is *cumulative
@@ -24,13 +27,59 @@
 //! note; no local rollout could verify the marker (all ran `approval_policy:
 //! never`), so a real approval degrades safely to no-attention if the CLI names
 //! the event differently.
+//!
+//! On a **subagent** rollout those same lifecycle events say something else as well:
+//! `task_complete` is the terminal event, the one record that says the Sub-agent is
+//! done, and Codex names exactly one word for it. A later `task_started` is a
+//! resumption and takes the word back. None of it reaches Attention — a Sub-agent
+//! projection carries none, so a Sub-agent that fails is reported to the agent that
+//! sent it and never to the person (ADR 0010, ADR 0014).
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::attention::{AttentionReducer, NeedEvidence, Observation};
-use crate::fold::{first_line, project_from_cwd, Fold, Folded, Projection, SubAgentProjection};
+use crate::fold::{
+    first_line, project_from_cwd, Attachment, Fold, Folded, Projection, SubAgentProjection,
+};
 use crate::model::{AttentionCause, Tool};
+
+/// The outcome word a Codex Sub-agent carries once it reaches its terminal event.
+///
+/// **Riku's word for Codex's one event, not a token lifted out of the rollout.** The
+/// record states a type, `task_complete`, and no `<status>`-style field anywhere —
+/// unlike Claude, whose notification names one of `completed` / `failed` / `stopped` /
+/// `killed` and where the outcome genuinely is the source's own word. So the mapping
+/// is stated here, in one place, rather than being read: one terminal event, one word.
+///
+/// What that buys, and what it costs, is the same thing — Codex names no vocabulary
+/// for any other ending, so there is nothing to map it onto. A Codex Sub-agent that
+/// stops another way therefore carries no word at all rather than an invented one,
+/// which is the Errand rule (CONTEXT.md) applied to outcomes: present when the source
+/// says so, absent otherwise. A second Codex terminal event would need its own word
+/// added beside this one; it must never be inferred from the prose next to it.
+const COMPLETED: &str = "completed";
+
+/// Where this rollout's latest lifecycle event leaves the Sub-agent it may be.
+///
+/// One value rather than a state flag beside an outcome string, so "finished, and
+/// Codex has no word for how" stays sayable and "running, but here is how it ended"
+/// stays unsayable. The default is [`Running`](Self::Running) — a rollout that has
+/// stated no lifecycle event yet has not ended — which is the opposite of
+/// [`SubAgentState`]'s own wire default, where an unreadable row must not claim to be
+/// running.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+enum Lifecycle {
+    /// No terminal event, or a later `task_started` took one back: a Sub-agent can
+    /// resume after finishing, so a terminal event is the latest word, not a final one.
+    #[default]
+    Running,
+    /// A terminal event, carrying the word for it when Codex has one — which is only
+    /// for `task_complete`. An aborted turn ends the Sub-agent just as truly and ends
+    /// it unworded, rather than leaving a row that claims to still be running and
+    /// holds its parent out of Finished for as long as the parent lives.
+    Ended(Option<String>),
+}
 
 /// A raw Codex rollout line, deserialized leniently. Every field is optional so
 /// partial / drifting records still parse; unmodeled fields are dropped.
@@ -50,6 +99,13 @@ struct Payload {
     id: Option<String>,
     thread_source: Option<String>,
     git: Option<Git>,
+    /// session_meta, subagent rollouts: the thread that spawned this one, which may
+    /// itself be a Sub-agent. Read from the top level, where all 79 observed subagent
+    /// rollouts state it; the copy inside the spawn block is on only 75 of them.
+    parent_thread_id: Option<String>,
+    /// session_meta, subagent rollouts: the spawn block, holding the depth. Untyped
+    /// on purpose — see [`spawn_depth`].
+    source: Option<serde_json::Value>,
     // session_meta + turn_context
     cwd: Option<String>,
     // turn_context
@@ -100,6 +156,15 @@ pub struct CodexFold {
     /// `thread_source == "subagent"` — the whole file is a Sub-agent's, so the fold
     /// states a Sub-agent projection instead of an Agent Session one.
     is_subagent: bool,
+    /// The thread that spawned this one, when this rollout is a Sub-agent's. Codex
+    /// names the *immediate* spawner, so the walk to the root happens in the store.
+    parent_thread_id: Option<String>,
+    /// How deep this Sub-agent was spawned; `0` when the rollout states no depth.
+    depth: u32,
+    /// Where this rollout's lifecycle events leave the Sub-agent it may be. Read only
+    /// on that branch: an Agent Session's own liveness is Process Liveness and
+    /// Staleness (ADR 0011), never its transcript's say-so.
+    lifecycle: Lifecycle,
     project: Option<String>,
     cwd: Option<String>,
     branch: Option<String>,
@@ -155,12 +220,31 @@ impl CodexFold {
         }
 
         match raw.line_type.as_deref() {
-            Some("session_meta") => {
+            // **The one that names us wins**, unlike every other latest-wins field
+            // here. A forked thread — which every subagent rollout is — replays the
+            // meta of the thread it forked from into its own history, so a rollout can
+            // state several. Only the first is its own: across the corpus the first
+            // `session_meta` id matches the id in the filename in 193 of 193 rollouts,
+            // the last in 138. Letting the last win hands 55 rollouts their *parent's*
+            // id, which for a Sub-agent breaks the chain its own children climb.
+            //
+            // The guard is "we have no id yet" rather than "we have seen a meta", so
+            // the unobserved shape where the first one names none falls through to the
+            // next rather than locking the rollout out of an id — and out of a card —
+            // for good. Both readings agree on all 193; they differ only there, and
+            // there, a possibly-wrong id beats certainly no card.
+            Some("session_meta") if self.id.is_none() => {
                 if payload.id.is_some() {
                     self.id = payload.id;
                 }
                 if payload.thread_source.as_deref() == Some("subagent") {
                     self.is_subagent = true;
+                }
+                if payload.parent_thread_id.is_some() {
+                    self.parent_thread_id = payload.parent_thread_id;
+                }
+                if let Some(depth) = spawn_depth(&payload.source) {
+                    self.depth = depth;
                 }
                 if let Some(cwd) = payload.cwd {
                     self.project = Some(project_from_cwd(&cwd));
@@ -189,16 +273,30 @@ impl CodexFold {
                     }
                 }
                 // An interrupted / killed turn is an abnormal ending. Codex records
-                // no error text on the abort, so evidence is absent.
-                Some("turn_aborted") => self.attention.apply(Observation::Need {
-                    key: "error".into(),
-                    cause: AttentionCause::Error,
-                    evidence: NeedEvidence::Error { text: None },
-                    at,
-                }),
+                // no error text on the abort, so evidence is absent. It names no
+                // outcome word for it either, so a Sub-agent that ends here ends
+                // unworded — and never carries its parent into Attention, since a
+                // Sub-agent projection has no Attention to carry (ADR 0010/0014).
+                Some("turn_aborted") => {
+                    self.lifecycle = Lifecycle::Ended(None);
+                    self.attention.apply(Observation::Need {
+                        key: "error".into(),
+                        cause: AttentionCause::Error,
+                        evidence: NeedEvidence::Error { text: None },
+                        at,
+                    })
+                }
                 // A turn starting or completing cleanly is forward progress and
-                // supersedes any prior error/approval (recovery).
-                Some("task_started") | Some("task_complete") => {
+                // supersedes any prior error/approval (recovery). For a Sub-agent
+                // `task_complete` is also the terminal event — the one record that
+                // says it is done — and a `task_started` after one is a resumption,
+                // which drops the word and returns the row to Running.
+                Some("task_complete") => {
+                    self.lifecycle = Lifecycle::Ended(Some(COMPLETED.to_string()));
+                    self.attention.apply(Observation::Superseded)
+                }
+                Some("task_started") => {
+                    self.lifecycle = Lifecycle::Running;
                     self.attention.apply(Observation::Superseded)
                 }
                 _ => {}
@@ -244,15 +342,36 @@ impl Fold for CodexFold {
         if self.is_subagent {
             return Some(Folded::SubAgent(SubAgentProjection {
                 id,
-                // Codex names the immediate spawner, which may itself be a
-                // Sub-agent; walking that chain up to the root is not done here, so
-                // no attachment is claimed rather than a guessed one.
-                root_session_id: None,
-                // Codex's `session_meta` carries a parent thread id, a depth, and a
-                // nickname that names nothing; none is read yet (#76).
+                // Codex names the immediate spawner, which may itself be a Sub-agent;
+                // the store walks that chain to the root, and holds this Sub-agent out
+                // of every roster if it cannot.
+                attachment: self.parent_thread_id.clone().map(Attachment::Spawner),
+                // Codex records no per-spawn key: the parent thread id names the
+                // spawner, which every sibling shares, so it is the attachment and not
+                // this. The row therefore stands on its own id.
                 spawn_key: None,
+                // **No Errand, and nothing parsed that could become one.** Codex's only
+                // fully-covered field is a nickname — `Dirac`, `Euclid` — which names
+                // nothing about the work; `agent_path` and `agent_role` are on 59 and
+                // 16 of 79 observed rollouts and name a configuration rather than a
+                // purpose. An Errand is present when the source states one and absent
+                // otherwise, and a blank beats a label that merely looks like content
+                // (CONTEXT.md, ADR 0014).
+                //
+                // So none of the three is modelled in `Payload` at all, deliberately: a
+                // field sitting there unread is how the next reader comes to fill this
+                // blank with the nearest string to hand. Adding one back is a line of
+                // serde away if a Codex version ever states a purpose.
                 errand: None,
-                depth: 0,
+                depth: self.depth,
+                state: match self.lifecycle {
+                    Lifecycle::Running => crate::model::SubAgentState::Running,
+                    Lifecycle::Ended(_) => crate::model::SubAgentState::Finished,
+                },
+                outcome: match &self.lifecycle {
+                    Lifecycle::Ended(word) => word.clone(),
+                    Lifecycle::Running => None,
+                },
                 tool: Tool::Codex,
                 model: self.model.clone(),
                 tokens_in: self.tokens_in,
@@ -276,13 +395,38 @@ impl Fold for CodexFold {
             tokens_in: self.tokens_in,
             tokens_out: self.tokens_out,
             // A Codex Agent Session's own Sub-agents are rollouts of their own, folded
-            // separately; nothing joins them onto this roster yet (#76).
+            // separately and joined onto this roster by the store, which is the only
+            // place that sees both files. Codex records no spawn of its own in the
+            // parent rollout, so this side of the union contributes nothing and every
+            // row arrives from a child.
             sub_agent_roster: Vec::new(),
             activity: self.activity.clone(),
             last_event_at: self.latest_timestamp,
             attention: self.attention.current(),
         }))
     }
+}
+
+/// The spawn depth a `session_meta` states for a subagent rollout — 1 for a
+/// Sub-agent of an Agent Session, 2 for one a Sub-agent spawned itself — or `None`
+/// when it states none. An absence, not a level: 4 of 79 observed subagent rollouts
+/// carry no spawn block at all.
+///
+/// Dug out of an untyped `Value` rather than deserialized into a struct, because
+/// `session_meta.source` is **polymorphic**: an object holding the spawn block on a
+/// subagent rollout, and a bare string naming the originator on a plain one (169 of
+/// 252 observed). A typed field would reject the string shape — and rejecting *that*
+/// line is rejecting the `session_meta`, which would cost the rollout its id and an
+/// ordinary Codex session its card. The lenient read fails to nothing worse than a
+/// missing depth.
+fn spawn_depth(source: &Option<serde_json::Value>) -> Option<u32> {
+    let depth = source
+        .as_ref()?
+        .get("subagent")?
+        .get("thread_spawn")?
+        .get("depth")?
+        .as_u64()?;
+    u32::try_from(depth).ok()
 }
 
 /// The structured approval-kind label for a Codex event name, or `None` when the
@@ -367,6 +511,47 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    /// A subagent rollout's `session_meta`, in the shape the corpus writes it: the
+    /// spawner named at the top level *and* inside the spawn block, the depth only
+    /// inside it, and a nickname that names nothing about the work.
+    fn subagent_meta(id: &str, parent: &str, depth: u32) -> String {
+        serde_json::json!({
+            "timestamp": "2026-07-19T10:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": id,
+                "session_id": parent,
+                "parent_thread_id": parent,
+                "cwd": "/Users/x/repos/foo",
+                "thread_source": "subagent",
+                "agent_nickname": "Dirac",
+                "agent_path": "/root/spec_review",
+                "source": { "subagent": { "thread_spawn": {
+                    "parent_thread_id": parent,
+                    "depth": depth,
+                    "agent_path": "/root/spec_review",
+                    "agent_nickname": "Dirac",
+                    "agent_role": null
+                }}},
+                "git": { "branch": "main" }
+            }
+        })
+        .to_string()
+    }
+
+    /// The Sub-agent projection a run of lines folds to, or a panic naming what it
+    /// produced instead.
+    fn sub_agent_of(lines: &[String]) -> SubAgentProjection {
+        let mut fold = CodexFold::default();
+        for line in lines {
+            assert!(fold.apply_line(line), "line did not parse: {line}");
+        }
+        match fold.projection() {
+            Some(Folded::SubAgent(sub)) => sub,
+            other => panic!("expected a Sub-agent projection, got {other:?}"),
+        }
     }
 
     fn turn_context(model: &str) -> String {
@@ -566,7 +751,7 @@ mod tests {
         let path = std::path::Path::new("/x/2026/07/20/rollout-2026-07-20T13-39-51-sub.jsonl");
         let mut fold = crate::source::CodexSource::new("/x".into()).new_fold(path);
         for line in [
-            meta("sub-1", "subagent"),
+            subagent_meta("sub-1", "root-1", 1),
             turn_context("gpt-5.6-sol"),
             token_count(1000, 200),
         ] {
@@ -578,11 +763,155 @@ mod tests {
         assert_eq!(sub.id, "sub-1");
         assert_eq!(sub.tool, Tool::Codex);
         assert_eq!(sub.model.as_deref(), Some("gpt-5.6-sol"));
+        // The spend that was being attributed to nothing: 227M input tokens across the
+        // corpus, from the same cumulative-latest rule the Agent Session side uses.
         assert_eq!(sub.tokens_in, 1000);
         assert_eq!(sub.tokens_out, 200);
-        // The chain up to the root is not walked yet (#76), so no attachment is
-        // claimed rather than a guessed one.
-        assert_eq!(sub.root_session_id, None);
+        // Codex names the immediate spawner; the store walks from there to the root.
+        assert_eq!(sub.attachment, Some(Attachment::Spawner("root-1".into())));
+        assert_eq!(sub.depth, 1);
+    }
+
+    #[test]
+    fn a_codex_sub_agent_carries_no_errand_and_no_spawn_key() {
+        // The nickname (`Dirac`), the agent path and the role are all read past — none
+        // names what the Sub-agent was sent to do, and a blank beats a label that
+        // merely looks like content. The parent thread id names the *spawner*, which
+        // every sibling shares, so it is the attachment rather than a per-spawn key:
+        // putting it in `spawn_key` would collide all of one parent's children onto a
+        // single row.
+        let sub = sub_agent_of(&[subagent_meta("sub-1", "root-1", 1), token_count(10, 2)]);
+        assert_eq!(sub.errand, None);
+        assert_eq!(sub.spawn_key, None);
+        // And the row it becomes stands under its own id rather than joining a spawn.
+        let row = sub.roster_entry();
+        assert_eq!(row.errand, None);
+        assert_eq!(row.spawn_key, "sub-1");
+    }
+
+    #[test]
+    fn the_terminal_event_finishes_a_codex_sub_agent_with_the_word_codex_states() {
+        let sub = sub_agent_of(&[
+            subagent_meta("sub-1", "root-1", 1),
+            token_count(1000, 200),
+            event("task_started"),
+            event("task_complete"),
+        ]);
+        assert_eq!(sub.outcome.as_deref(), Some("completed"));
+        let row = sub.roster_entry();
+        assert_eq!(row.state, crate::model::SubAgentState::Finished);
+        assert_eq!(row.outcome.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn a_codex_sub_agent_that_ends_any_other_way_ends_unworded() {
+        // Codex names one outcome word and only one. An aborted turn ends a Sub-agent
+        // just as truly as a completed one and Codex has no word for it, so the row
+        // stops rather than carrying an invented word — an ending is not a word.
+        //
+        // Ending it is the point: a row that claimed to still be running would hold its
+        // parent out of Finished for as long as the parent lived, since a Running
+        // Sub-agent is exactly what keeps a quiet parent Active. 1 of 79 observed
+        // rollouts ends this way, and one is enough to pin a card forever.
+        let sub = sub_agent_of(&[
+            subagent_meta("sub-1", "root-1", 1),
+            event("task_started"),
+            event("turn_aborted"),
+        ]);
+        assert_eq!(sub.outcome, None);
+        assert_eq!(
+            sub.roster_entry().state,
+            crate::model::SubAgentState::Finished
+        );
+        // And it raises nothing on the parent: a Sub-agent projection carries no
+        // Attention, so a failure is reported to the agent, never to the person.
+        assert!(matches!(
+            sub_agent_of(&[subagent_meta("sub-2", "root-1", 1), event("turn_aborted"),]),
+            SubAgentProjection { outcome: None, .. }
+        ));
+    }
+
+    #[test]
+    fn a_resumed_codex_sub_agent_returns_to_running_without_a_word() {
+        // A Sub-agent can resume after finishing, so the roster carries the latest word
+        // rather than a final one: 39 of 79 observed rollouts complete more than once.
+        let mut lines = vec![
+            subagent_meta("sub-1", "root-1", 1),
+            event("task_started"),
+            event("task_complete"),
+        ];
+        assert_eq!(sub_agent_of(&lines).outcome.as_deref(), Some("completed"));
+
+        lines.push(event("task_started"));
+        let resumed = sub_agent_of(&lines);
+        assert_eq!(resumed.outcome, None);
+        assert_eq!(
+            resumed.roster_entry().state,
+            crate::model::SubAgentState::Running
+        );
+
+        lines.push(event("task_complete"));
+        assert_eq!(sub_agent_of(&lines).outcome.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn a_subagent_rollout_naming_no_spawner_claims_no_attachment() {
+        // Nothing to walk from, so the store holds it out of every roster rather than
+        // attaching it to a guess.
+        let sub = sub_agent_of(&[meta("sub-1", "subagent"), token_count(10, 2)]);
+        assert_eq!(sub.attachment, None);
+        // And a rollout with a spawner but no spawn block states no depth — an
+        // absence, not a level (4 of 79 observed rollouts).
+        let no_block = serde_json::json!({
+            "timestamp": "2026-07-19T10:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "sub-2", "cwd": "/a/foo",
+                "thread_source": "subagent", "parent_thread_id": "root-1"
+            }
+        })
+        .to_string();
+        let sub = sub_agent_of(&[no_block]);
+        assert_eq!(sub.attachment, Some(Attachment::Spawner("root-1".into())));
+        assert_eq!(sub.depth, 0);
+    }
+
+    #[test]
+    fn a_replayed_ancestor_session_meta_does_not_rename_the_rollout() {
+        // A forked thread — which every subagent rollout is — replays the meta of the
+        // thread it forked from into its own history, so the *first* `session_meta` is
+        // the only one that says who this rollout is (193 of 193 first ids match the
+        // filename's; 138 of 193 last ones do). Taking the last would give 55 rollouts
+        // their parent's id — and a Sub-agent under its parent's id is a broken link in
+        // the chain its own children climb, which is how one of them lost its root.
+        let sub = sub_agent_of(&[
+            subagent_meta("sub-1", "root-1", 1),
+            meta("root-1", "user"),
+            token_count(1000, 200),
+        ]);
+        assert_eq!(sub.id, "sub-1");
+        assert_eq!(sub.attachment, Some(Attachment::Spawner("root-1".into())));
+    }
+
+    #[test]
+    fn a_session_meta_whose_source_is_a_string_still_yields_a_card() {
+        // `session_meta.source` is polymorphic — the spawn block on a subagent rollout,
+        // a bare originator string on a plain one (169 of 252 observed). Reading it
+        // through a typed field would fail *this* line, and failing the `session_meta`
+        // costs an ordinary Codex session its whole card.
+        let mut fs = codex();
+        let meta = serde_json::json!({
+            "timestamp": "2026-07-19T10:00:00Z",
+            "type": "session_meta",
+            "payload": { "id": "rollout-1", "cwd": "/a/foo", "source": "vscode" }
+        })
+        .to_string();
+        feed(&mut fs, &[meta, token_count(42, 7)]);
+        let s = fs
+            .build(ts("2026-07-19T10:00:10Z"), ts("2026-07-19T10:00:20Z"))
+            .unwrap();
+        assert_eq!(s.id, "rollout-1");
+        assert_eq!(s.tokens_in, 42);
     }
 
     #[test]

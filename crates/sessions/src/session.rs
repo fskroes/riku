@@ -22,7 +22,8 @@ use tracing::warn;
 
 use crate::attention::{AttentionReducer, NeedEvidence, Observation};
 use crate::fold::{
-    assemble, first_line, project_from_cwd, Fold, Folded, Projection, SubAgentProjection,
+    assemble, first_line, project_from_cwd, Attachment, Fold, Folded, Projection,
+    SubAgentProjection,
 };
 use crate::liveness::ProcessLiveness;
 use crate::model::{AttentionCause, Session, SubAgent, SubAgentState, Tool};
@@ -583,10 +584,16 @@ impl Fold for ClaudeSubAgentFold {
     fn projection(&self) -> Option<Folded> {
         Some(Folded::SubAgent(SubAgentProjection {
             id: self.id.clone(),
-            root_session_id: Some(self.root_from_path.clone()),
+            // Claude names the root outright, at any spawn depth, so there is no chain
+            // to walk — the cross-file join it charges for instead is the spawn key.
+            attachment: Some(Attachment::Root(self.root_from_path.clone())),
             spawn_key: self.meta.tool_use_id.clone(),
             errand: self.meta.description.clone(),
             depth: self.meta.spawn_depth,
+            // A Claude Sub-agent's own file never says that it stopped, let alone how;
+            // the parent's notification does, and the two sides meet in `merge_roster`.
+            state: SubAgentState::Running,
+            outcome: None,
             tool: Tool::Claude,
             model: self.model.clone(),
             tokens_in: self.tokens_in,
@@ -818,7 +825,7 @@ mod tests {
             panic!("a Sub-agent transcript states a Sub-agent projection");
         };
         assert_eq!(sub.id, "a1b2c3");
-        assert_eq!(sub.root_session_id.as_deref(), Some(ROOT));
+        assert_eq!(sub.attachment, Some(Attachment::Root(ROOT.into())));
         assert_eq!(sub.spawn_key.as_deref(), Some("toolu_a"));
         assert_eq!(sub.errand.as_deref(), Some("map the parser"));
         assert_eq!(sub.depth, 1);
@@ -867,7 +874,7 @@ mod tests {
         };
         assert_eq!(sub.id, "a1b2c3");
         // Before any entry, the root is the containing directory's name.
-        assert_eq!(sub.root_session_id.as_deref(), Some(ROOT));
+        assert_eq!(sub.attachment, Some(Attachment::Root(ROOT.into())));
         assert_eq!(sub.errand.as_deref(), Some("map the parser"));
         assert_eq!(sub.spawn_key.as_deref(), Some("toolu_a"));
         assert_eq!(sub.tokens_in, 0);
@@ -983,7 +990,7 @@ mod tests {
         let Some(Folded::SubAgent(sub)) = fs.folded() else {
             panic!("a Sub-agent projection");
         };
-        assert_eq!(sub.root_session_id.as_deref(), Some(ROOT));
+        assert_eq!(sub.attachment, Some(Attachment::Root(ROOT.into())));
     }
 
     #[test]
@@ -1008,7 +1015,7 @@ mod tests {
         let Some(Folded::SubAgent(sub)) = fs.folded() else {
             panic!("a Sub-agent transcript states a Sub-agent projection");
         };
-        assert_eq!(sub.root_session_id.as_deref(), Some(ROOT));
+        assert_eq!(sub.attachment, Some(Attachment::Root(ROOT.into())));
         assert_eq!(sub.errand, None);
         assert_eq!(sub.spawn_key, None);
         assert_eq!(sub.tokens_in, 40);
