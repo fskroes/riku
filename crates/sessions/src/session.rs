@@ -1182,13 +1182,19 @@ mod tests {
 
     /// One `queue-operation` record. The queue states the same notification twice, on
     /// the `enqueue` that parks it and the `remove` that takes it back off.
-    fn queue_operation(operation: &str, tuid: &str, task_id: &str, status: &str) -> String {
-        serde_json::json!({
-            "type": "queue-operation", "operation": operation,
+    ///
+    /// `None` writes a record that states no operation at all, which no real record does
+    /// — it is how the tests reach the drifted shapes the `remove` gate has to survive.
+    fn queue_operation(operation: Option<&str>, tuid: &str, task_id: &str, status: &str) -> String {
+        let mut record = serde_json::json!({
+            "type": "queue-operation",
             "timestamp": "2026-07-19T10:20:00Z", "sessionId": "s1",
             "content": notification_body(tuid, task_id, status),
-        })
-        .to_string()
+        });
+        if let Some(operation) = operation {
+            record["operation"] = operation.into();
+        }
+        record.to_string()
     }
 
     /// The same notification's other two record forms — the queue record that
@@ -1202,7 +1208,7 @@ mod tests {
     fn task_notification_queue_forms(tuid: &str, task_id: &str, status: &str) -> [String; 2] {
         let body = notification_body(tuid, task_id, status);
         [
-            queue_operation("enqueue", tuid, task_id, status),
+            queue_operation(Some("enqueue"), tuid, task_id, status),
             serde_json::json!({
                 "type": "attachment", "sessionId": "s1", "cwd": "/a/foo",
                 "timestamp": "2026-07-19T10:20:00Z",
@@ -1413,17 +1419,49 @@ mod tests {
             );
         }
 
-        // The `remove` that dequeues it restates the same record; latest-wins makes
-        // that idempotent rather than a second ending.
+        // The `remove` that dequeues it restates the same record, and reading the pair
+        // leaves one ending rather than two. That much held before issue #87 as
+        // latest-wins idempotence; it now holds because the echo is not read at all,
+        // which is what makes it hold across a resume too — see
+        // `a_dequeue_echo_does_not_un_resume_a_row`.
         let s = fold_lines(&[
             agent_spawn("toolu_a", "map the parser"),
             queued.clone(),
-            queue_operation("remove", "toolu_a", "task-a", "completed"),
+            queue_operation(Some("remove"), "toolu_a", "task-a", "completed"),
         ]);
         assert_eq!(
             outcomes(&s),
             vec![(SubAgentState::Finished, Some("completed"))]
         );
+
+        // Only the dequeue echo is refused, and by name. An operation this code has
+        // never seen — or a record that states none — is still read, because the
+        // failure directions are not symmetric: mistaking an echo for news is issue
+        // #87, mild and self-correcting, while missing the arrival is #85, a row stuck
+        // Running for the life of the process. Unrecognised means read.
+        // The third case is written out rather than built from `queue_operation`
+        // precisely because it varies what that helper holds fixed — the record *type*.
+        // The claim being pinned is the one this module's doc makes in prose: a harness
+        // that renames `queue-operation` keeps working, because the notification tags are
+        // the test and the type is not.
+        let renamed_record_type = serde_json::json!({
+            "type": "prompt-queue-entry", "sessionId": "s1",
+            "timestamp": "2026-07-19T10:20:00Z",
+            "content": notification_body("toolu_a", "task-a", "completed"),
+        })
+        .to_string();
+        for unknown in [
+            queue_operation(Some("prioritise"), "toolu_a", "task-a", "completed"),
+            queue_operation(None, "toolu_a", "task-a", "completed"),
+            renamed_record_type,
+        ] {
+            let s = fold_lines(&[agent_spawn("toolu_a", "map the parser"), unknown]);
+            assert_eq!(
+                outcomes(&s),
+                vec![(SubAgentState::Finished, Some("completed"))],
+                "an unrecognised queue record is news until it says it is an echo"
+            );
+        }
 
         // Join by id, never by count, holds for the queued forms too: a backgrounded
         // command notifies under the same tag and must move nothing.
@@ -1431,6 +1469,71 @@ mod tests {
         let unrelated = fold_lines(&[agent_spawn("toolu_a", "map the parser"), other]);
         assert_eq!(outcomes(&unrelated), vec![(SubAgentState::Running, None)]);
         assert_eq!(unrelated.sub_agent_roster.len(), 1);
+    }
+
+    #[test]
+    fn a_dequeue_echo_does_not_un_resume_a_row() {
+        // Issue #87, and the defect #85's own fix made reachable. The queue states one
+        // notification twice: on the `enqueue` that parks it, and again on the `remove`
+        // that takes it back off — a median of 9.4s later on the corpus, and up to
+        // 903.8s. A resume landing inside that window is followed by a record restating
+        // the word the Sub-agent had *stopped* on, so a row that is genuinely working
+        // again would read Finished, and `has_active_sub_agents` would stop holding the
+        // parent's card out of Finished while a child still ran.
+        //
+        // This is the mild direction of #85 rather than a repeat of it, but the row is
+        // wrong either way: the last thing that happened to this Sub-agent is that it
+        // was sent back to work.
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            queue_operation(Some("enqueue"), "toolu_a", "task-a", "completed"),
+            resume_message("toolu_resume", "task-a"),
+            queue_operation(Some("remove"), "toolu_a", "task-a", "completed"),
+        ]);
+        assert_eq!(
+            outcomes(&s),
+            vec![(SubAgentState::Running, None)],
+            "the resume is the latest word, and the dequeue echo is not a newer one"
+        );
+
+        // The echo is refused whichever side of the resume it falls on, so the ordinary
+        // case — parked, dequeued, and only later sent back to work — reads the same.
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            queue_operation(Some("enqueue"), "toolu_a", "task-a", "completed"),
+            queue_operation(Some("remove"), "toolu_a", "task-a", "completed"),
+            resume_message("toolu_resume", "task-a"),
+        ]);
+        assert_eq!(outcomes(&s), vec![(SubAgentState::Running, None)]);
+
+        // What is refused is the outcome, not the record. The queue draining is a real
+        // event in this transcript at the moment it happens, and a record that reached
+        // the fold at all must still say which session's file it is and move the clock —
+        // dropping it outright would put an early return above the two assignments
+        // `Accumulator::apply` makes unconditional, which is ADR 0014's second recorded
+        // breakage. Written out rather than built from `queue_operation` because it
+        // varies the one thing that helper holds fixed: the timestamp.
+        let late_echo = serde_json::json!({
+            "type": "queue-operation", "operation": "remove", "sessionId": "s1",
+            "timestamp": "2026-07-19T10:22:00Z",
+            "content": notification_body("toolu_a", "task-a", "completed"),
+        })
+        .to_string();
+        let s = fold_lines(&[
+            agent_spawn("toolu_a", "map the parser"),
+            queue_operation(Some("enqueue"), "toolu_a", "task-a", "completed"),
+            late_echo,
+        ]);
+        assert_eq!(
+            s.last_event_at,
+            ts("2026-07-19T10:22:00Z"),
+            "the dequeue is still an event, even though its outcome is stale news"
+        );
+        assert_eq!(
+            outcomes(&s),
+            vec![(SubAgentState::Finished, Some("completed"))],
+            "and the enqueue's own statement of the ending still stands"
+        );
     }
 
     #[test]

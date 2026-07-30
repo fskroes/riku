@@ -230,6 +230,60 @@ only a check that does not share it could fail. That asymmetry, not the schedule
 what #78 should be specced around; with the Codex test #76 added, both tools now have
 one.
 
+## Update — 2026-07-30, on resume, and on what reading more records cost (#87)
+
+The fan-out run above verified one third of Decision 8. This is the second third: a real
+Sub-agent finished, was sent back to work with `SendMessage`, and finished again, with
+the board polling `/api/sessions` every 0.5s throughout. Two clauses that were inference
+from transcripts at rest are now observed.
+
+- **Resume.** The row returned to Running 0.6s after the `SendMessage` was written.
+  `RESUME_TOOL` had rested on a single observation in the whole corpus — the same shape
+  as the `Task`→`Agent` constant that hid this feature for months.
+- **The join outlives any one tool-use id.** The resumed run notified under a *different*
+  tool-use id from the spawn that created the row, and still moved that row, through the
+  `task-id` fallback in `note_completion`. That fallback was read off the corpus and had
+  never been watched working.
+
+The more useful finding is what the previous update's fix cost. Reading a notification
+out of "whichever record carries it" also reads the `queue-operation` whose `operation`
+is `remove` — the queue taking a prompt back off, restating the status it was parked
+with. Timed across the corpus, that record is the **only** carrier written at a moment
+other than the notification's arrival: the `attachment` form lags the `enqueue` by a
+median and maximum of 0.0s, the user turn by 0.0s median, while the dequeue echo lags it
+by a median of 9.4s and up to 903.8s. A resume landing in that window would be
+overwritten by news that had already been superseded, and the row would read Finished
+while its Sub-agent worked. So the echo is refused, and refusing it loses nothing: all 60
+of its appearances restate an `enqueue` already on disk, and no notification anywhere on
+the corpus is carried by a `remove` alone.
+
+Three things about that fix are worth keeping.
+
+- **What is refused is the news, not the record.** The first cut dropped the dequeue
+  outright, which also dropped its timestamp and its statement of session identity — an
+  early return sitting above the two assignments this ADR's second breakage was *about*,
+  reintroduced one layer up at the parse seam rather than in the fold. The queue draining
+  is a real event in the transcript at the moment it is written; only the outcome it
+  repeats is stale. Two breakages of this ADR have now had the same shape, which is worth
+  more than either bug: **when a record is uninteresting, make it contribute nothing, not
+  return nothing.**
+- **It is named as the record to refuse, not the records to accept**, because drift is
+  the thing this module is built for and the two orientations fail in opposite
+  directions. A renamed `remove` costs one row briefly wrong in the direction that
+  self-corrects; a renamed `enqueue` under an allow-list would drop every queued
+  notification and reinstate #85 in full. The cheaper mistake is the one left reachable.
+- **The interleave was not reproduced live, and is not claimed to be.** In the mid-turn
+  case the notification reaches the orchestrator *when the queue drains*, so by the time
+  a parent knows a child finished, the `remove` is usually already written — a parent
+  cannot easily resume into its own window. The defect is reachable (the constraint is
+  only a resume between two harness-timed records) but latent, and a unit test is what
+  pins it. The argument for the fix does not depend on the trigger: it removes a way to
+  be wrong at the cost of nothing.
+
+Which leaves **parent-dominates** as the last clause of Decision 8 still standing on
+transcripts at rest. It wants a live run of its own, where a parent dies with children
+mid-flight. The harness for that now exists and is cheap to point at it.
+
 ## Deliberately out of scope
 
 A per-session detail surface (the roster's eventual right home — a hover panel
