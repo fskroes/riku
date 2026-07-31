@@ -54,10 +54,35 @@ jobs:
     permissions:
       contents: write
     steps:
+      # CHANGELOG.md only, and before download-artifact: checkout cleans the
+      # workspace, so it would wipe the artifacts if it ran after them.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: distrib
           path: distrib
+      # The tagged version's CHANGELOG section is the release's notes. Nothing else
+      # reads that file — dist only builds artifacts here — so if this step is
+      # skipped the notes ship as the install snippet alone, which is how 0.3.0
+      # went out without its "Codex cards cost roughly double" warning.
+      - name: Assemble release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          section="$(awk -v want="## $version" '$0 == want {f=1; next} /^## /{f=0} f' CHANGELOG.md)"
+          if [ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]; then
+            echo "::error::CHANGELOG.md has no '## $version' section; the release notes would ship as the install snippet alone." >&2
+            exit 1
+          fi
+          {
+            printf 'Install (macOS, Apple Silicon):\n\n'
+            printf '```sh\nbrew tap fskroes/riku\nbrew install riku\n```\n\n'
+            printf '%s\n' "$section"
+          } > release-notes.md
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -71,12 +96,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --verify-tag \
             --title "riku $version" \
-            --notes "Install (macOS, Apple Silicon):
-
-          \`\`\`sh
-          brew tap fskroes/riku
-          brew install riku
-          \`\`\`" \
+            --notes-file release-notes.md \
             "${files[@]}"
 
   # Publish the Homebrew formula to the personal tap. Sole holder of the tap
