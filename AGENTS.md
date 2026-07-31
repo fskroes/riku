@@ -12,8 +12,10 @@ This repo uses the default mattpocock/skills triage labels. See `docs/agents/tri
 
 `CHANGELOG.md` at the root. A change a user would notice — behaviour, numbers on a
 card, anything that will read as a regression without the reason beside it — gets a
-note under `Unreleased` as it lands, not at tag time. `cargo dist` reads the section
-matching a tagged version as that release's notes.
+note under `Unreleased` as it lands, not at tag time. At tag time `Unreleased`
+becomes `## <version>`, and the release workflow reads that section as the release's
+notes — `cargo dist` does not, it only builds the artifacts. A tag whose version has
+no section fails the release job rather than shipping notes without it.
 
 ### Domain docs
 
