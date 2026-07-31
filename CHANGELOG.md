@@ -3,6 +3,8 @@
 Release notes for Riku. The section for a tagged version is what ships as that
 release's notes; `Unreleased` collects what has landed since.
 
+## Unreleased
+
 ## 0.3.0
 
 ### A Claude Sub-agent that finished while its parent was busy now says so
