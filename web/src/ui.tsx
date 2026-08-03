@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { rosterBadge, rosterRows } from "./roster";
 import type { DiffStat, Session, SubAgent, Tool } from "./types";
 import { abbrevTokens, diffLabel, formatCost, shortModel, tokensLabel } from "./format";
@@ -101,53 +101,58 @@ export function Diff({ diff }: { diff: DiffStat | null }) {
   );
 }
 
-/** The Sub-agent fan-out badge and its roster panel (ADR 0014). Two states: a
- *  pulsing, accented pill counting what is running now; a still, dimmed pill
- *  carrying the roster total once they have all finished — the work a session
- *  delegated stays discoverable after the fact. Nothing at all when the roster is
- *  empty, so the badge means something when it is there.
+/** The Sub-agent roster, as a fold under its parent's row (ADR 0015). Nothing at
+ *  all when the roster is empty, so a fold means something when it is there.
  *
- *  The panel is the roster either way, one row per Sub-agent in spawn order. It
- *  renders here and never as expanded rows beneath a Band's own: a Band's count has
- *  to keep describing what is on screen (#64/#65). Which count, which label, and
- *  each row's text are `roster.ts`'s; this renders what it returns. */
-export function SubAgentBadge({ roster }: { roster: SubAgent[] }) {
+ *  Shut — which every fold starts — the summary line is the whole of it: accented
+ *  and pulsing while any Sub-agent runs, still and dimmed once they have all
+ *  finished, and stating in words which of those two counts it is showing. Open, it
+ *  is one row per Sub-agent in spawn order, and it stays open until the same person
+ *  closes it: no poll, resume, or ending touches the state, which is this
+ *  component's alone and outlives no reload.
+ *
+ *  One level — a root Agent Session's own Sub-agents. Depth is carried and not
+ *  drawn. Which count, which words, and each row's text are `roster.ts`'s; this
+ *  renders what it returns. */
+export function SubAgentFold({ roster }: { roster: SubAgent[] }) {
+  const [open, setOpen] = useState(false);
+  const listId = useId();
   const badge = rosterBadge(roster);
   if (!badge) return null;
   const rows = rosterRows(roster);
   return (
-    <span className="subagents">
-      <span
-        className={badge.running ? "pill" : "pill still"}
-        role="img"
-        aria-label={badge.label}
-        tabIndex={0}
+    <div className="subagents">
+      <button
+        type="button"
+        className={badge.running ? "fold-sum" : "fold-sum still"}
+        aria-expanded={open}
+        aria-controls={listId}
+        onClick={() => setOpen((shown) => !shown)}
       >
+        <span className="tw" aria-hidden="true">{open ? "▾" : "▸"}</span>
         {badge.running && <span className="pulse" aria-hidden="true" />}
-        <span className="fan" aria-hidden="true">⑃</span> {badge.count}
-      </span>
-      <span className="tip" role="tooltip">
-        <span className="tip-h">{badge.label}</span>
-        <ul>
-          {rows.map((row) => (
-            <li key={row.id}>
-              <span className={row.running ? "d" : "d done"} aria-hidden="true" />
-              <span className="row">
-                {/* A Sub-agent whose source named no purpose is unlabelled — the
-                    Errand line is simply absent rather than filled with a stand-in. */}
-                {row.errand && <span className="errand">{row.errand}</span>}
-                <span className="sub">
-                  <span className="st">{row.state}</span>
-                  {row.model && <span className="k">{row.model}</span>}
-                  <span className="tk">{row.tokens}</span>
-                  {row.cost && <span className="ct">{row.cost}</span>}
-                </span>
+        <span className="fan" aria-hidden="true">⑃</span>
+        {badge.label}
+      </button>
+      <ul className="roster" id={listId} hidden={!open}>
+        {rows.map((row) => (
+          <li key={row.id}>
+            <span className={row.running ? "d" : "d done"} aria-hidden="true" />
+            <span className="line">
+              {/* A Sub-agent whose source named no purpose is unlabelled — the
+                  Errand line is simply absent rather than filled with a stand-in. */}
+              {row.errand && <span className="errand">{row.errand}</span>}
+              <span className="sub">
+                <span className="st">{row.state}</span>
+                {row.model && <span className="k">{row.model}</span>}
+                <span className="tk">{row.tokens}</span>
+                {row.cost && <span className="ct">{row.cost}</span>}
               </span>
-            </li>
-          ))}
-        </ul>
-      </span>
-    </span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

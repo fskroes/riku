@@ -2,7 +2,7 @@ import type { Session } from "./types";
 import type { OpenController } from "./useOpen";
 import { byMostRecent, finishedBand, finishedLine } from "./bands";
 import { causeLabel, domId, relativeAge, waitingFor } from "./format";
-import { Branch, Cost, Diff, Machine, SubAgentBadge, Tile, Tokens, useFlash } from "./ui";
+import { Branch, Cost, Diff, Machine, SubAgentFold, Tile, Tokens, useFlash } from "./ui";
 
 /** Oldest-waiting-first (ADR 0010): the session whose current need began longest
  *  ago sorts to the top, so the most-neglected need is always first. Falls back to
@@ -100,11 +100,12 @@ function AlertRow({
         ) : null}
         <div className="routing">
           <Machine host={session.machine} />
-          {/* A session can need attention *and* still be fanning work out (a
-              non-Task wait alongside live Sub-agents) — keep the badge visible so
-              its fan-out does not vanish when it routes to an attention card. */}
-          <SubAgentBadge roster={session.subAgentRoster} />
         </div>
+        {/* A session can need attention *and* still be fanning work out (a
+            non-Task wait alongside live Sub-agents), so the fold is drawn here too:
+            it follows the card's own lines rather than sitting among the routing
+            context, which is what makes it read as subordinate to them. */}
+        <SubAgentFold roster={session.subAgentRoster} />
         {failed && <div className="openerr">{failed}</div>}
       </div>
       <button
@@ -169,13 +170,15 @@ function CompactRow({
         )}
         <OpenLink session={session} open={open} />
         <PlanLink session={session} onOpenPlan={onOpenPlan} />
-        <SubAgentBadge roster={session.subAgentRoster} />
         <Diff diff={session.diff} />
         <Tokens tokensIn={session.tokensIn} tokensOut={session.tokensOut} />
         <Cost usd={session.costUsd} show={showCost} />
         <Machine host={session.machine} />
         <span className="age">{relativeAge(session.lastEventAt, now)}</span>
       </div>
+      {/* A line of the row's own grid rather than a member of its stat cluster, so
+          an opened fold runs the width of the row it hangs under. */}
+      <SubAgentFold roster={session.subAgentRoster} />
     </div>
   );
 }
