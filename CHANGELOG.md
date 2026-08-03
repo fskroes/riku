@@ -5,6 +5,22 @@ release's notes; `Unreleased` collects what has landed since.
 
 ## Unreleased
 
+### The Sub-agent roster is a fold you open, not a panel you hover
+
+A card that fanned work out now carries a line under its own — `⑃ 3 sub-agents in
+all, none running` — that opens into the roster and stays open until you close it.
+The hover panel it replaces could not be reached by touch, could not be held open
+while you read one Sub-agent's Errand against another's or against the parent's own
+numbers, and closed itself on the smallest pointer drift. The line is a button: it
+is reachable from the keyboard and says whether it is open or shut.
+
+Every fold starts shut, so a first paint looks as it did, and nothing but you opens
+or closes one — a poll, a resume, or a Sub-agent ending never moves a fold under
+your eye. Which fold is open belongs to the card and is not remembered: a reload
+closes them all. The counts beside **Running in the background**, **Up next** and
+**Finished** are unchanged, because they count Agent Sessions, and one Agent Session
+is still one row there however many Sub-agents it opens beneath it.
+
 ## 0.3.0
 
 ### A Claude Sub-agent that finished while its parent was busy now says so

@@ -1,26 +1,27 @@
-// How a Session's Sub-agent roster reads on a card: which count the badge shows,
-// what that badge announces, and the text of each row in its panel. Pure, so the
-// two badge states and the absent-Errand blank are observable without rendering —
-// the same discipline `bands.ts` holds for the Board's caps.
+// How a Session's Sub-agent roster reads on a card: which count the fold's summary
+// line shows, the words it says it in, and the text of each row under it. Pure, so
+// the two summary states and the absent-Errand blank are observable without
+// rendering — the same discipline `bands.ts` holds for the Board's caps.
 
 import { abbrevTokens, formatCost, shortModel } from "./format";
 import type { SubAgent } from "./types";
 
-/** The badge on a card: which of the two states it is in, the count that state
- *  shows, and what a screen reader hears. */
+/** The fold's summary line: which of the two states it is in, the count that state
+ *  shows, and the words that carry it. */
 export interface RosterBadge {
-  /** The number on the pill. */
+  /** The number the summary states. */
   count: number;
-  /** Any Sub-agent still running — the pulsing, accented state. Otherwise the pill
+  /** Any Sub-agent still running — the pulsing, accented state. Otherwise the summary
    *  is still and dimmed, and its count is the roster total rather than a zero. */
   running: boolean;
-  /** The accessible name, stating *which* count is on the pill. The two states
-   *  differ by colour and motion alone otherwise, neither of which a screen reader
-   *  or a reduced-motion reader has. */
+  /** The summary line's own words, stating *which* count it is showing. Read off a
+   *  shut fold and heard as the disclosure's accessible name, since the two states
+   *  differ by colour and motion alone otherwise, and neither a screen reader nor a
+   *  reduced-motion reader has those. */
   label: string;
 }
 
-/** One row of the badge's panel. */
+/** One row under an opened fold. */
 export interface RosterRow {
   /** The row's stable identity for rendering. This is the *spawn key*, not the
    *  Sub-agent's own id: a row the parent alone established carries the spawn key as
@@ -46,8 +47,8 @@ export interface RosterRow {
 
 const noun = (n: number): string => (n === 1 ? "sub-agent" : "sub-agents");
 
-/** The card's badge, or `null` for a session that never fanned out — a badge that
- *  renders for everything says nothing when it is there. */
+/** The fold's summary line, or `null` for a session that never fanned out — a fold
+ *  that renders for everything says nothing when it is there. */
 export function rosterBadge(roster: SubAgent[]): RosterBadge | null {
   if (roster.length === 0) return null;
   const running = roster.filter((a) => a.state === "running").length;
@@ -62,7 +63,7 @@ export function rosterBadge(roster: SubAgent[]): RosterBadge | null {
   };
 }
 
-/** The panel's rows, in the order the Sub-agents were sent out — reading it top to
+/** The fold's rows, in the order the Sub-agents were sent out — reading it top to
  *  bottom follows what the agent actually did, so the source's order is preserved
  *  rather than re-sorted by state or recency. */
 export function rosterRows(roster: SubAgent[]): RosterRow[] {

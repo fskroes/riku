@@ -63,6 +63,17 @@ describe("rosterBadge", () => {
     expect(live?.label).toBe("1 sub-agent running");
     expect(still?.label).toBe("2 sub-agents in all, none running");
   });
+
+  it("carries the count in the words themselves, so a shut fold still states it", () => {
+    // The summary line is all there is to read until someone opens the fold, and it
+    // is text rather than a number beside a glyph — so the count survives to a
+    // reader who never opens it, in either state and in the singular.
+    const live = rosterBadge([subAgent("a"), subAgent("b"), subAgent("c", { state: "finished" })]);
+    const still = rosterBadge([subAgent("a", { state: "finished", outcome: "stopped" })]);
+
+    expect(live?.label).toBe("2 sub-agents running");
+    expect(still?.label).toBe("1 sub-agent in all, none running");
+  });
 });
 
 describe("rosterRows", () => {
