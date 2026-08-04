@@ -17,4 +17,4 @@ notify = "6"
 dirs = "5"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
