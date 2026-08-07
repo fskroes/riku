@@ -3,6 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The stylesheet arrives with the module bundle, so the first paint would
+         otherwise flash a white canvas at a reader on a dark desktop. This tells
+         the browser both appearances are supported before any CSS is parsed;
+         `:root { color-scheme: light dark }` in styles.css repeats it for the
+         styled document. -->
+    <meta name="color-scheme" content="light dark" />
     <title>Agent Board</title>
   </head>
   <body>
